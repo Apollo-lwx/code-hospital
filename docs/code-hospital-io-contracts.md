@@ -502,11 +502,35 @@ graph LR
         "additionalProperties": false
       }
     },
+    "memory_context": {
+      "type": "object",
+      "description": "既往史（.rsi 项目记忆）：有帮助但不可全信；trust 恒为 unverified，note 固定附「不构成事实」声明",
+      "required": ["found", "source", "trust", "note", "official", "pending"],
+      "properties": {
+        "found": {"type": "boolean"},
+        "source": {"const": ".rsi/memory"},
+        "trust": {"const": "unverified"},
+        "note": {"type": "string"},
+        "official": {
+          "type": "object",
+          "required": ["conventions", "prohibitions"],
+          "properties": {
+            "conventions": {"type": "array", "items": {"$ref": "#def-memory-item"}},
+            "prohibitions": {"type": "array", "items": {"$ref": "#def-memory-item"}}
+          },
+          "additionalProperties": false
+        },
+        "pending": {"type": "array", "items": {"$ref": "#def-memory-item"}}
+      },
+      "additionalProperties": false
+    },
     "report_path": {"type": "string"}
   },
   "additionalProperties": false
 }
 ```
+
+`#def-memory-item`：`{type, status, title, snippet, updated_at}`——`type ∈ {convention, prohibition}`，`status ∈ {official（已经审批）, pending（未审批）}`；`title ≤80`、`snippet ≤120` 字符且已净化；每档最多 5 条（按更新时间倒序）。
 
 ### 3.3 `hosp_diagnose`（诊断）
 

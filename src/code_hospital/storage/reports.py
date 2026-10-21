@@ -81,6 +81,7 @@ def render_scan_report(
     devices: list[dict],
     findings: list[Finding],
     limitations: list[str],
+    memory_context: dict | None = None,
 ) -> str:
     counts = {sev: 0 for sev in _SEV_LABEL}
     for f in findings:
@@ -136,6 +137,22 @@ def render_scan_report(
                 "```",
                 "",
             ]
+
+    # 项目记忆（既往史）：有帮助但不可全信，独立成节并附信任声明
+    if memory_context and memory_context.get("found"):
+        parts += [
+            "## 项目记忆（未经证实，仅供坐诊参考）",
+            "",
+            f"> {memory_context.get('note', '')}",
+            "",
+        ]
+        for item in memory_context["official"]["conventions"]:
+            parts.append(f"- [convention·official] **{item['title']}**：{item['snippet']}")
+        for item in memory_context["official"]["prohibitions"]:
+            parts.append(f"- [prohibition·official] **{item['title']}**：{item['snippet']}")
+        for item in memory_context["pending"]:
+            parts.append(f"- [{item['type']}·pending] **{item['title']}**：{item['snippet']}")
+        parts.append("")
 
     parts += [
         "## 覆盖与限制",

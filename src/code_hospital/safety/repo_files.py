@@ -19,10 +19,13 @@ import yaml
 from ..core.errors import bad_argument
 
 # 内置排除目录（任意路径段命中即跳过；与 rsi-boot signal_discovery.EXCLUDED_DIRS 同思路）
+# 注意：.rsi 不排除——它是「既往病史」（项目记忆/用户画像），对诊疗有帮助，
+# 但以 advisory 上下文方式读取且标注不可全信（记忆可能过时/错误），见 storage/rsi_memory.py。
+# .hospital 必须排除——医院绝不把自家病历当扫描输入（篡改病历属禁止级）。
 _DENY_DIRS = {
     ".git", ".hg", ".svn", "node_modules", ".venv", "venv", "__pycache__",
     ".mypy_cache", ".pytest_cache", ".ruff_cache", "dist", "build", ".idea",
-    ".vscode", ".hospital", ".rsi",
+    ".vscode", ".hospital",
 }
 
 _SOURCE_EXT = {

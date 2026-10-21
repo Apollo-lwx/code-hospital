@@ -898,6 +898,8 @@ graph LR
 | 8 | 用户介入节点机制（`pending_question` 统一出参 + Q1–Q10 触发目录，无人应答落安全侧）与报告产物格式（6 类 Markdown 模板 + 文件命名定死） | §4.11/§6.5 / 契约 §2.9、§3、§5 | 非 breaking（实现前补充：新增出参变体与模板规范） |
 | 9 | 用户向术语手册（就医流程术语、十个介入节点白话版、数据安全 FAQ、黑话速查），单独成文 | `code-hospital-glossary.md` | 非 breaking（纯文档） |
 | 10 | 宿主可读性保障：server instructions 与 8 个工具 description 全文定死（五要素模板：技术定义+隐喻对照+Use when+约束+副作用），确保 AI 理解「是对代码做诊断」 | 契约 §6 | 非 breaking（实现前补充：描述文本定稿） |
+| 11 | 既往史读取：`.rsi` 移出扫描排除目录，`hosp_scan` 出参与检验报告新增 `memory_context`（official/pending 双信任档，`trust=unverified`，附「不构成事实」声明）——P0 实现的 rsi-boot 联动轻量版（读文件，不依赖 rsi MCP）；§4.9 的 MCP 联动（rsi_recall 用药禁忌）仍在 P3 | 契约 §3.2 / `storage/rsi_memory.py` | 非 breaking（出参新增字段） |
+| 12 | 扫描忽略三层：repo scope 枚举走 `git ls-files` 原生尊重 .gitignore；内置排除目录全 scope 兜底；项目级 `code-hospital.yaml` 的 `scan_ignore` globs 用户自定义 | `safety/repo_files.py` / README 配置节 | 非 breaking（P0 实现细节，不进工具契约） |
 
 ### v0.3 → v0.4（契约冻结前最后一轮，9 条，含影响面）
 

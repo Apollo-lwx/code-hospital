@@ -194,9 +194,14 @@ async def scan(
             ))
             case.triage_level = "emergency"
 
+        # 既往史读取（.rsi 项目记忆：有帮助但不可全信，advisory 上下文）
+        from ..storage.rsi_memory import load_memory_brief
+
+        memory_context = load_memory_brief(root)
+
         # 检验报告（PR 可贴）
         case.updated_at = now_ms()
-        md = render_scan_report(case, report_id, devices, findings, limitations)
+        md = render_scan_report(case, report_id, devices, findings, limitations, memory_context)
         report_path = hospital_root(root) / "reports" / case_id / "scan-r1.md"
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text(md, encoding="utf-8")
@@ -222,5 +227,6 @@ async def scan(
             ),
             "triage_upgrade": triage_upgrade,
             "suggested_acceptance_commands": detect_acceptance_commands(root),
+            "memory_context": memory_context,
             "report_path": str(report_path),
         }
