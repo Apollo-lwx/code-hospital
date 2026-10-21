@@ -12,7 +12,7 @@ from pathlib import Path
 
 import aiosqlite
 
-from ..core.models import ACTIVE_STATUSES, Case, Finding, ReportRecord, Scope
+from ..core.models import Case, Finding, ReportRecord, Scope
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY);

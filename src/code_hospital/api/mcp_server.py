@@ -102,7 +102,7 @@ async def hosp_case(
     project_root: str = "",
 ) -> dict:
     try:
-        return await _case_query(case_id, status, include, report_id, page, size, project_root)
+        return await _case_query(case_id, status, include, report_id, page, size, order_by, project_root)
     except HospitalError as e:
         return _guard(e)
     except Exception as e:  # noqa: BLE001
@@ -110,7 +110,8 @@ async def hosp_case(
 
 
 async def _case_query(
-    case_id: str, status: str, include: str, report_id: str, page: int, size: int, project_root: str
+    case_id: str, status: str, include: str, report_id: str,
+    page: int, size: int, order_by: str, project_root: str,
 ) -> dict:
     from ..core.errors import not_found
     from ..core.models import page_payload

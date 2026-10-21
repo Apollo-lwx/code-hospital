@@ -27,6 +27,7 @@ def main() -> None:
     check.add_argument("--range", dest="range_", default="", help="scope_type=range，如 main..HEAD")
     check.add_argument("--title", default="CLI 冒烟检查")
     check.add_argument("--tools", nargs="*", default=None, help="指定设备（默认 auto）")
+    check.add_argument("--force", action="store_true", help="已有活跃病例时先将其转诊")
     check.add_argument("--json", action="store_true", help="以 JSON 打印完整出参")
 
     args = parser.parse_args()
@@ -51,7 +52,7 @@ async def _check(args) -> None:
             title=args.title,
             scope_type=args.scope_type,
             scope=scope,
-            force=False,
+            force=args.force,
             project_root=args.repo,
         )
     except HospitalError as e:

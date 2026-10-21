@@ -75,7 +75,16 @@ def normalize(
     raw: RawFinding, tool: str, case_id: str, report_id: str, project_root: str
 ) -> Finding:
     """RawFinding → Finding：净化、证据补全、上下文锚、指纹（设计 §4.5）。"""
-    file_path = raw.file_path.replace("\\", "/").lstrip("./")
+    file_path = raw.file_path.replace("\\", "/")
+    abs_p = Path(file_path)
+    if abs_p.is_absolute():
+        # 部分设备（如 ruff 0.17）输出绝对路径：契约要求仓库相对 POSIX 路径
+        try:
+            file_path = abs_p.resolve().relative_to(Path(project_root).resolve()).as_posix()
+        except ValueError:
+            file_path = file_path.lstrip("./")
+    else:
+        file_path = file_path.lstrip("./")
     line_text, before, after = _read_window(project_root, file_path, raw.line_start)
     evidence = raw.evidence or line_text
     anchor = make_anchor(before, after)
@@ -114,7 +123,9 @@ async def scan(
     """hosp_scan 主逻辑，返回契约 §3.2 出参。"""
     from .reception import resolve_project_root
 
-    register_defaults()
+    # 注册表为空时才装默认适配器——测试注入替身后不再混入真实设备
+    if not all_adapters():
+        register_defaults()
     root = resolve_project_root(project_root)
     async with Database(root) as db:
         case = await db.get_case(case_id)
