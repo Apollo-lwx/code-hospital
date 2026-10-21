@@ -107,8 +107,8 @@ def render_scan_report(
         f" | {counts['minor']} | {counts['nit'] + counts['info']} |",
         "",
         "## 发现明细（按严重度排序）\n",
-        "| # | 严重度 | 规则 | 位置 | 摘要 |",
-        "|---|---|---|---|---|",
+        "| # | 严重度 | 规则 | 位置 | 摘要 | 病史 |",
+        "|---|---|---|---|---|---|",
     ]
     shown = findings
     if len(findings) > _MAX_ROWS:
@@ -116,8 +116,9 @@ def render_scan_report(
                  if f.severity in (Severity.CRITICAL.value, Severity.MAJOR.value)]
     for i, f in enumerate(shown, 1):
         msg = f.message.replace("|", "\\|").replace("\n", " ")[:80]
+        history = f"复发×{len(f.history_refs)}" if f.history_refs else "初发"
         parts.append(
-            f"| {i} | {f.severity} | {f.rule_id} | `{f.file_path}:{f.line_start}` | {msg} |"
+            f"| {i} | {f.severity} | {f.rule_id} | `{f.file_path}:{f.line_start}` | {msg} | {history} |"
         )
     if len(findings) > _MAX_ROWS:
         parts.append(

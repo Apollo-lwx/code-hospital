@@ -175,6 +175,26 @@ async def scan(
         from ..core.models import SEVERITY_ORDER
         findings.sort(key=lambda f: (SEVERITY_ORDER.get(f.severity, 9), f.file_path, f.line_start))
 
+        # 初诊调档（轻量版）：按指纹关联历史病例，每条发现标「初发/复发」——
+        # 二次入院不从头来（设计 §4.8，P0 提前落地）。
+        # 注意：history_refs 是派生字段不入库，报告与分页出参都要从本映射重挂。
+        fingerprints = sorted({f.fingerprint for f in findings})
+        raw_history = await db.find_fingerprint_history(root, fingerprints, exclude_case_id=case_id)
+        history_notes: dict[str, list[dict]] = {
+            fp: [
+                {**r, "note": f"此前病例曾出现同指纹发现（复发记录 {i + 1}/{len(refs)}）"}
+                for i, r in enumerate(refs)
+            ]
+            for fp, refs in raw_history.items()
+        }
+        recurring = 0
+        for f in findings:
+            f.history_refs = history_notes.get(f.fingerprint, [])
+            if f.history_refs:
+                recurring += 1
+        if recurring:
+            limitations.append(f"复发提醒：{recurring} 条发现在历史病例中出现过（详见各条 history_refs）")
+
         await db.insert_findings(findings)
 
         # 检验后分诊升级（设计 §3.2：只影响审批默认值，不动状态机；事件落 reports）
@@ -213,8 +233,10 @@ async def scan(
         ))
         await db.update_case(case_id, status="scanned")
 
-        # 分页出参
+        # 分页出参（DB 重读后重挂派生的 history_refs）
         page_items, total = await db.list_findings(case_id, page=page, size=size, order_by=order_by)
+        for f in page_items:
+            f.history_refs = history_notes.get(f.fingerprint, [])
         from ..core.models import page_payload
 
         return {

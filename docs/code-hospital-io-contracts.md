@@ -96,7 +96,30 @@ graph LR
     "status": {"enum": ["new", "unchanged", "resolved", "possibly_resolved", "suppressed"]},
     "origin": {"enum": ["initial", "new_related", "new_unrelated"]},
     "first_seen_round": {"type": "integer", "minimum": 1},
-    "last_seen_round": {"type": "integer", "minimum": 1}
+    "last_seen_round": {"type": "integer", "minimum": 1},
+    "history_refs": {
+      "type": "array", "maxItems": 3,
+      "items": {"$ref": "#def-history-ref"},
+      "description": "同指纹历史复发记录（按时间倒序 top 3）；初发为 []。派生字段：检验/查询时关联计算，不落库"
+    }
+  },
+  "additionalProperties": false
+}
+```
+
+### 2.1.1 HistoryRef（复发引用 · Finding/Diagnosis 共用）
+
+```json
+{
+  "$id": "#def-history-ref",
+  "type": "object",
+  "required": ["case_id", "outcome", "rounds", "method", "note"],
+  "properties": {
+    "case_id": {"type": "string", "description": "历史病例 id"},
+    "outcome": {"enum": ["cured", "improved", "unchanged", "referred", ""], "description": "该病例结局；在治/未知为 \"\""},
+    "rounds": {"type": "integer"},
+    "method": {"enum": ["autofix", "llm_patch", "manual", ""], "description": "当时剂型；P0 无处方恒为 \"\""},
+    "note": {"type": "string", "maxLength": 200}
   },
   "additionalProperties": false
 }
@@ -964,9 +987,9 @@ graph LR
 
 ## 发现明细（按严重度排序）
 
-| # | 严重度 | 规则 | 位置 | 摘要 | 状态 |
+| # | 严重度 | 规则 | 位置 | 摘要 | 病史 |
 |---|---|---|---|---|---|
-| 1 | critical | {rule_id} | `{file}:{line}` | {message 摘要 ≤80 字符} | new |
+| 1 | critical | {rule_id} | `{file}:{line}` | {message 摘要 ≤80 字符} | {初发 / 复发×N} |
 
 ## 证据
 

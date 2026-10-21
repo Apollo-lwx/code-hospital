@@ -87,7 +87,7 @@ hosp check --json                   # 完整 JSON 出参
 hosp serve                          # 一般由宿主拉起，不必手跑
 ```
 
-报告产物落 `.hospital/reports/<case_id>/`（检验报告可直接贴进 PR 评论），补丁存档落 `.hospital/patches/`；`.hospital/` 已自动加入 `.git/info/exclude`，不污染 git 状态。
+报告产物落 `.hospital/reports/<case_id>/`（检验报告可直接贴进 PR 评论），补丁存档落 `.hospital/patches/`；`.hospital/` 已自动加入 `.git/info/exclude`，不污染 git 状态。**二次入院不从头来**：检验时按指纹自动关联本仓库历史病例，检验报告「发现明细」的「病史」列直接标出每条发现是「初发」还是「复发×N」（含首次病例与当时结局），`.rsi` 项目记忆同页附注（未经证实档）。
 
 ## MCP 工具
 

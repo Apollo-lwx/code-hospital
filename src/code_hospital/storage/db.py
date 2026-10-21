@@ -217,7 +217,48 @@ class Database:
 
     @staticmethod
     def _row_to_finding(row: aiosqlite.Row) -> Finding:
-        return Finding(**{k: row[k] for k in Finding.model_fields})
+        keys = set(row.keys())
+        return Finding(**{k: row[k] for k in Finding.model_fields if k in keys})
+
+    async def find_fingerprint_history(
+        self,
+        project_root: str,
+        fingerprints: list[str],
+        exclude_case_id: str,
+        per_fingerprint: int = 3,
+    ) -> dict[str, list[dict]]:
+        """同指纹历史复发查询（设计 §4.8 初诊调档轻量版，P0 提前落地）。
+
+        按指纹在本仓库全部历史病例（排除当前病例）中查同指纹发现，
+        每个指纹按时间倒序最多 per_fingerprint 条（契约：top 3）。
+        """
+        history: dict[str, list[dict]] = {}
+        if not fingerprints:
+            return history
+        for i in range(0, len(fingerprints), 500):  # IN 查询分块，防参数过多
+            chunk = fingerprints[i: i + 500]
+            marks = ",".join("?" for _ in chunk)
+            cur = await self.conn.execute(
+                f"SELECT f.fingerprint AS fp, c.id AS case_id, c.status AS status,"
+                "       c.round AS rounds, c.created_at AS created_at"
+                " FROM findings f JOIN cases c ON c.id = f.case_id"
+                f" WHERE c.project_root=? AND f.fingerprint IN ({marks}) AND f.case_id != ?"
+                " ORDER BY c.created_at DESC",
+                (project_root, *chunk, exclude_case_id),
+            )
+            for r in await cur.fetchall():
+                refs = history.setdefault(r["fp"], [])
+                if len(refs) < per_fingerprint and all(
+                    x["case_id"] != r["case_id"] for x in refs
+                ):
+                    refs.append({
+                        "case_id": r["case_id"],
+                        "outcome": r["status"] if r["status"] in ("discharged", "referred") else "",
+                        "rounds": r["rounds"],
+                        "method": "",
+                        "note": "",
+                    })
+        return history
 
     async def list_findings(
         self,

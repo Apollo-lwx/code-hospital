@@ -144,6 +144,15 @@ async def _case_query(
         }
         if include == "findings":
             items, total = await db.list_findings(case_id, page=page, size=size)
+            # history_refs 为派生字段不入库，查询时按指纹重挂（语义：截至当前的历史）
+            history = await db.find_fingerprint_history(
+                root, sorted({f.fingerprint for f in items}), exclude_case_id=case_id
+            )
+            for f in items:
+                f.history_refs = [
+                    {**r, "note": "此前病例曾出现同指纹发现（复发）"}
+                    for r in history.get(f.fingerprint, [])
+                ]
             result["findings"] = page_payload(
                 [f.model_dump() for f in items], page, size, order_by, total
             )
