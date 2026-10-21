@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "code-hospital": {
+      "command": "hosp",
+      "args": ["serve"],
+      "env": {
+        "HOSP_PROJECT_ROOT": "${workspaceFolder}"
+      }
+    }
+  }
+}
