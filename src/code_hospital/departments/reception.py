@@ -66,7 +66,7 @@ async def register(
             await db.update_case(active.id, status="referred")
 
         # 2) 轻量预检分诊（设计 §3.2：staged/diff/paths 快扫；repo 全量留给 scan 升级）
-        files = await scope_file_list(root, scope_type, scope_obj.model_dump())
+        files, _skipped = await scope_file_list(root, scope_type, scope_obj.model_dump())
         precheck_hits = 0
         if scope_type != ScopeType.REPO.value:
             precheck_hits = await _precheck_emergency(root, files)

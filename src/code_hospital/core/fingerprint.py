@@ -23,8 +23,9 @@ def canonical_snippet(text: str) -> str:
 
 
 def normalize_path(path: str) -> str:
-    """仓库相对路径统一为 POSIX 形式。"""
-    return path.replace("\\", "/").lstrip("./")
+    """仓库相对路径统一为 POSIX 形式（只去一个前导 './'，保护 .hospital 类点目录）。"""
+    posix = path.replace("\\", "/")
+    return posix[2:] if posix.startswith("./") else posix
 
 
 def context_anchor(before_lines: list[str], after_lines: list[str]) -> str:

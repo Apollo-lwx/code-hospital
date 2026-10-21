@@ -117,6 +117,18 @@ hosp serve                          # 一般由宿主拉起，不必手跑
 |------|------|
 | `HOSP_PROJECT_ROOT` | 显式钉死工作区（推荐在项目级 mcp.json 里配） |
 
+**扫描忽略（三层）**：① repo scope 枚举走 `git ls-files`，原生尊重 `.gitignore`；② 内置排除目录（`node_modules`/`.venv`/`__pycache__`/`dist` 等，全 scope 生效）；③ 项目级自定义——在**被诊疗仓库**根目录建 `code-hospital.yaml`：
+
+```yaml
+# 这些路径在任何 scope 下都不参与扫描（fnmatch，仓库相对路径）
+scan_ignore:
+  - "gen/**"           # 生成代码
+  - "**/*_pb2.py"      # protobuf 产物
+  - "migrations/**"
+```
+
+被忽略的文件数会写进检验报告「覆盖与限制」，跳过不等于看不见。
+
 病历、报告、补丁都在各仓库自己的 `.hospital/`，打开另一个仓库就是另一份，不会串。
 
 ## 开发

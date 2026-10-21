@@ -82,9 +82,9 @@ def normalize(
         try:
             file_path = abs_p.resolve().relative_to(Path(project_root).resolve()).as_posix()
         except ValueError:
-            file_path = file_path.lstrip("./")
-    else:
-        file_path = file_path.lstrip("./")
+            file_path = file_path[2:] if file_path.startswith("./") else file_path
+    elif file_path.startswith("./"):
+        file_path = file_path[2:]
     line_text, before, after = _read_window(project_root, file_path, raw.line_start)
     evidence = raw.evidence or line_text
     anchor = make_anchor(before, after)
@@ -139,8 +139,12 @@ async def scan(
                 next_action="P1 起支持复诊复扫（内嵌于 hosp_discharge）",
             )
 
-        files = await scope_file_list(root, case.scope_type, case.scope.model_dump())
+        files, skipped = await scope_file_list(root, case.scope_type, case.scope.model_dump())
         report_id = new_id("rpt")
+        if skipped:
+            limitations_note = f"忽略规则跳过 {skipped} 个文件（内置排除目录 + code-hospital.yaml scan_ignore）"
+        else:
+            limitations_note = ""
 
         # 设备调度：auto = 全部可用适配器；指定 tools 时按名过滤
         registry: list[ScannerAdapter] = all_adapters()
@@ -148,6 +152,8 @@ async def scan(
             wanted = {t.strip() for t in tools}
             registry = [a for a in registry if a.name in wanted]
         devices, limitations, findings = [], [], []
+        if limitations_note:
+            limitations.append(limitations_note)
         for adapter in registry:
             available = adapter.is_available()
             version = await adapter.version() if available else ""
