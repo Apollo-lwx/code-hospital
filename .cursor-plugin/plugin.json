@@ -1,0 +1,10 @@
+{
+  "name": "code-hospital",
+  "version": "0.1.0",
+  "description": "Orchestrating code-diagnosis MCP: register code as a patient, run deterministic scanners for a PR-pasteable checkup report, and (per roadmap) diagnose, prescribe with approval gates, dispense with embedded nursing checks, and discharge behind a quality gate. Local-first, zero API keys on the main path.",
+  "author": {
+    "name": "wenxing luo"
+  },
+  "license": "MIT",
+  "keywords": ["mcp", "code-review", "code-quality", "static-analysis", "cursor"]
+}
