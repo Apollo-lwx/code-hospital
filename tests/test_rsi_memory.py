@@ -75,7 +75,8 @@ def test_load_memory_brief_absent(tmp_path):
 
 async def test_scan_includes_memory_context(repo_with_rsi):
     reg = await reception.register(
-        title="带记忆体检", scope_type="repo", scope={}, project_root=repo_with_rsi
+        title="带记忆体检", scope_type="repo", scope={},
+        auto_advance=True, project_root=repo_with_rsi
     )
     res = await scanner.scan(case_id=reg["case_id"], project_root=repo_with_rsi)
     mc = res["memory_context"]

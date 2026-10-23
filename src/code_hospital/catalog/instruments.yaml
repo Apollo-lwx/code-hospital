@@ -1,0 +1,120 @@
+- id: ruff
+  concern: Python 语法、未使用导入和变量、格式、import 顺序
+  extensions: [py]
+  triage: [outpatient, checkup]
+  activation: package
+  engine: ruff
+  binary: ruff
+  builtin: false
+  can_autofix: true
+  specialty_id: python
+  requires_contract: false
+  limitation: ruff 未到岗
+- id: semgrep
+  concern: 跨语言的漏洞和危险写法
+  extensions: []
+  triage: [outpatient, checkup]
+  activation: package
+  engine: semgrep
+  binary: semgrep
+  builtin: false
+  can_autofix: false
+  specialty_id: general
+  requires_contract: false
+  limitation: semgrep 未到岗
+- id: gitleaks
+  concern: 密钥、凭据、令牌
+  extensions: []
+  triage: [emergency, outpatient, checkup]
+  activation: package
+  engine: gitleaks
+  binary: gitleaks
+  builtin: false
+  can_autofix: false
+  specialty_id: general
+  requires_contract: false
+  limitation: gitleaks 未到岗
+- id: structure-ruler
+  concern: 函数行数、文件行数、圈复杂度
+  extensions: [py, java, js, jsx, ts, tsx, go]
+  triage: [outpatient, checkup]
+  activation: package
+  engine: builtin
+  binary: ""
+  builtin: true
+  can_autofix: false
+  specialty_id: structure
+  requires_contract: false
+  limitation: 未测量圈复杂度
+- id: eslint
+  concern: JavaScript / TypeScript 的风格和简单正确性
+  extensions: [js, jsx, ts, tsx]
+  triage: [outpatient, checkup]
+  activation: package
+  engine: eslint
+  binary: eslint
+  builtin: false
+  can_autofix: true
+  specialty_id: general
+  requires_contract: false
+  limitation: eslint 未到岗
+- id: jscpd
+  concern: 跨文件的重复代码
+  extensions: [py, java, js, jsx, ts, tsx, go]
+  triage: [outpatient, checkup]
+  activation: package
+  engine: jscpd
+  binary: jscpd
+  builtin: false
+  can_autofix: false
+  specialty_id: structure
+  requires_contract: false
+  limitation: jscpd 未到岗
+- id: java-pack
+  concern: Java 空指针、资源未关、危险 API
+  extensions: [java]
+  triage: [outpatient, checkup]
+  activation: package
+  engine: semgrep
+  binary: semgrep
+  builtin: false
+  can_autofix: false
+  specialty_id: java
+  requires_contract: false
+  limitation: semgrep 未到岗，java-pack 未拍
+- id: layer-ruler
+  concern: 已声明的模块边界是否被 import 打破
+  extensions: [py, java, js, ts]
+  triage: [outpatient]
+  activation: package
+  engine: import-linter
+  binary: ""
+  builtin: false
+  can_autofix: false
+  specialty_id: architecture
+  requires_contract: true
+  limitation: 未配置分层，分层尺未拍
+- id: hotspot-ruler
+  concern: 循环里访问外部资源、无界查询
+  extensions: [py, java]
+  triage: []
+  activation: on_request
+  engine: semgrep
+  binary: semgrep
+  builtin: false
+  can_autofix: false
+  specialty_id: performance
+  requires_contract: false
+  limitation: semgrep 未到岗，热点尺未拍
+- id: type-ruler
+  concern: Python 类型缺口
+  extensions: [py]
+  triage: []
+  activation: on_request
+  engine: mypy
+  binary: mypy
+  builtin: false
+  can_autofix: false
+  specialty_id: python
+  requires_contract: false
+  limitation: 类型尺未到岗

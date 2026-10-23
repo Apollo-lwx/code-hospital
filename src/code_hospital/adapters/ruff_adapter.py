@@ -3,17 +3,26 @@
 from __future__ import annotations
 
 import json
+import re
 
 from .base import AdapterError, RawFinding, ScannerAdapter, _run
 
 
 def map_severity(code: str) -> str:
-    """ruff 规则粗映射：F（pyflakes）/E9（语法级）→ major；E/W → minor；其余 → nit。"""
-    if code.startswith("F") or code.startswith("E9"):
+    """ruff 规则粗映射：F 加数字（pyflakes）/E9（语法级）→ major；E/W → minor；其余 → nit。"""
+    head = code.split(".")[-1]
+    if re.fullmatch(r"F\d+", head) or head.startswith("E9"):
         return "major"
     if code.startswith(("E", "W")):
         return "minor"
     return "nit"
+
+
+def ruff_check_args(select: tuple[str, ...]) -> list[str]:
+    args = ["check", "--output-format", "json", "--no-cache", "--quiet"]
+    if select:
+        args.append("--select=" + ",".join(select))
+    return args
 
 
 def parse_ruff_json(payload: str) -> list[RawFinding]:
@@ -49,11 +58,10 @@ class RuffAdapter(ScannerAdapter):
         targets = self.filter_files(files)
         if not targets:
             return []
-        out, err = await _run(
-            [self.binary, "check", "--output-format", "json", "--no-cache", "--quiet", *targets],
-            cwd=repo_root,
-            timeout=timeout_ms / 1000,
-        )
+        from ..catalog.policy import load_policy
+
+        command = [self.binary, *ruff_check_args(load_policy(repo_root).ruff_select), *targets]
+        out, err = await _run(command, cwd=repo_root, timeout=timeout_ms / 1000)
         # ruff 有发现时 returncode=1，属正常；两者都空才是故障
         if not out.strip() and err.strip():
             raise AdapterError(f"ruff 执行失败：{err[:200]}")

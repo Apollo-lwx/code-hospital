@@ -205,8 +205,9 @@ sequenceDiagram
    - **同仓互斥**：存在活跃病例则 `Conflict`（可先出院或 `force=true` 把旧病例转诊留痕）；
    - **轻量预检分诊**：对 staged/diff/paths 范围跑秒级 gitleaks 快扫，检出密钥/注入特征 → **急诊**；指定 paths/diff → **门诊**；全量 repo → **体检**。全量 repo 挂号时无法预判的，允许 `hosp_scan` 后**升级 triage_level**（写事件留痕；升级只影响审批策略默认值，不影响状态机）；
    - **病例查重**：病案管理员查同指纹/同规则/同文件的历史病例，出参 `duplicate_cases`——「这病上周来过」直接告诉用户；
-   - 建档，下游所有工具只认 `case_id`。
-2. **检验（scan）**：按范围内语言自动选择已安装设备，输出统一归一化 Finding（规则、严重度、位置、证据、**指纹+上下文锚**）。只读，绝不带 fix。
+   - 建档，下游所有工具只认 `case_id`；
+   - **叫号挂起**：默认（`auto_advance=false`）挂号单产出后病例挂起（`pending_gate=registered`），用户确认挂号单后 `hosp_scan(stage_confirmed=true)` 才执行检验——排队叫号、确认进诊室（§4.11 阶段确认门禁）。
+2. **检验（scan）**：按范围内语言自动选择已安装设备，输出统一归一化 Finding（规则、严重度、位置、证据、**指纹+上下文锚**）。只读，绝不带 fix。检验报告产出后同样挂起（`pending_gate=scanned`），用户确认报告后才进入诊断。
 3. **诊断（diagnose）**：指纹去重聚类 → **调档增强归因**（每个 finding 带出 `history_refs`：在历史病例出现次数、历次剂型与疗效、漂移史——「这个 finding 在 case_xxx 出现 3 次，上两次 llm_patch 都失败」显著改善归因与剂型选择）→ 定级 → 可修复性三档。若症状指向仓库外（如跨服务契约变更），产出**会诊转诊单** `referrals`（§4.8）。
 4. **开方（prescribe）**：生成有序处方项（目标、剂型、指令、验收标准、回滚、scope 白名单、风险级），参考病案室的「处方-疗效」统计。先落 `draft` 返回 `confirmation_prompt`；审批时安全网关校验：低危可 `auto`/`host_agent`，中危须 `host_agent` 以上，**高危必须 `approver=user` 且 `user_confirmed=true`**。
 5. **施治（dispense）**：药师对 `approved` 处方按 seq 串行执行，**护理核查内嵌原子完成**：验收环境预检 → 服药前快照 → 执行（成药直接跑设备；煎药走 §4.3 两步协议）→ patch 落盘 → 应用 → scope guard → 验收 → 护理记录随响应返回。同一病例同时只允许一个 dispense 在执行。
@@ -245,6 +246,7 @@ stateDiagram-v2
 - **逆应用冲突挂起**：`rollback_conflict` 时病例停留在 `dispensing`（挂起），dispense 返回 `blocked_on`；人工处置后经 `mode="resolve_conflict"` 续行，或转 `discharging` 走 `referred`——`dispensing` 不是死胡同。
 - `discharging` 内嵌复诊复扫，按**两级瀑布**执行：先判再入院（回 `scanned`），不再入院才做门禁会签。
 - 分诊级（triage_level）可在检验后升级，**只影响审批策略默认值，不是状态、不影响状态机**（升级事件写护理记录留痕）。
+- **阶段确认门禁（`pending_gate`）不是状态**：它是各状态内的挂起标记（§4.11），产物待确认期间病例状态不变；推进类工具入口消费，查询类工具不受影响。
 - `max_rounds` 默认 3（可配置），防止死循环。
 
 ### 4.2 处方与三种剂型
@@ -426,11 +428,24 @@ graph LR
 - **一期（推荐）**：单 MCP `hosp serve`，8 个工具。理由：状态机一致性、共享病例库、零编排损耗；Semgrep MCP 同为「一个二进制多工具」的成功先例。
 - **二期（可选拆分）**：按模块边界拆 `hosp-scanner` / `hosp-clinic`（诊断+处方）/ `hosp-pharmacy`（药师+护理）三个 MCP，病例库抽为共享本地服务（streamable HTTP）。一期模块边界即按此划分，拆分时只换通信层，不动领域模型。
 
-### 4.11 用户介入节点（Question Triggers）
+### 4.11 用户介入节点（Question Triggers）与阶段确认门禁（Stage Gates）
 
 原则：**宁可等，不可猜**——流程在不确定处必须停下来问用户，绝不带着歧义闷头执行；**无人应答一律落安全侧**（不批准、不放行、转人工、暂停）。
 
-机制三条：
+介入分两类，共用 §2.9 `pending_question` 出参与「回答经既有工具参数回流、不单开工具」的纪律：
+
+- **异常触发（Q1–Q10）**：不确定才问——scope 不明、撞单、低置信、高危、漂移、疗程上限、门禁豁免等，见下方触发目录。
+- **常规门禁（stage_confirm，叫号机制）**：默认每一步都问——真实医院里患者挂号后要排队等叫号、确认进诊室医生才开始诊疗；检验完要拿着报告回诊室确认；单子开好要确认去取药还是拍片。代码医院同理：**每个阶段产物产出后即挂起，用户确认产物无误才放行下一阶段**，杜绝「医生一步到位全弄完」。
+
+**阶段确认门禁机制**：
+
+1. **门禁点（全阶段）**：挂号单（`registered`）、检验报告（`scanned`）、诊断书（`diagnosed`）、逐味药护理记录（`dose:<item_id>`）四处挂起确认；**处方沿用既有审批闸门**（approve 参数 + Q4 高危真人，本身就是确认门禁，不重复挂起）；出院小结为终局交付物，`hosp_discharge` 的调用本身即出院申请确认，不再挂起。
+2. **挂起表达**：病例级字段 `pending_gate`（挂起的阶段，空串 = 无挂起）。**门禁是状态内挂起，不改状态机**（同机制 3）；`hosp_case` 查询不受门禁限制——患者随时可以看自己的病历。
+3. **放行**：推进类工具（scan/diagnose/prescribe/dispense/discharge/treat）入口检查 `pending_gate`：非空且入参 `stage_confirmed != true` → 返回 `pending_question(kind="stage_confirm")`（prompt 只含产物元数据与报告路径，附选项「确认进入下一阶段 / 暂停就诊」，default_action=挂起不执行）；`stage_confirmed=true` 时校验并清除门禁后执行。无人应答 = 流程停在原阶段，无副作用。
+4. **委托开关（绿色通道）**：挂号时 `auto_advance=true`（全权委托，如 CI 冒烟、一键体检场景）则全程不设门禁，各阶段自动衔接，出参 `handoff.awaiting_confirmation=false` 明示；默认 `false`——医院默认不叫号不进诊室。
+5. **产物指引**：每个推进类工具出参带 `handoff` 块（契约 §2.10）：刚完成的阶段、产物名、是否待确认、下一阶段工具与确认参数模板——宿主据此把产物呈现给用户并等待回答，不靠猜。
+
+机制三条（异常触发与常规门禁共用）：
 
 1. **统一 `pending_question` 出参变体**（契约 §2.9）：任何工具需要用户决策时返回，含问题种类、仅元数据的 prompt（不拼仓库原文，§6.1 不可信内容边界）、选项、通道、默认安全侧动作、`resume_hint`（回答后应调用的工具与参数模板）。
 2. **回答不为问题单开工具**：经既有工具的确认参数回流（`approve`/`user_confirmed`/`resolution`/`waive`/`force`…），工具数仍守 8；elicitation 通道由服务端发起并忽略入参（§6.1 双通道），convention 降级时宿主原样呈现 prompt 后代用户回答。
@@ -450,6 +465,8 @@ graph LR
 | Q8 `rollback_conflict` | 施治 | 逆应用冲突 | manual_resolved / retry / skip_item / 转院 | 挂起不动 | `hosp_dispense` |
 | Q9 `max_rounds_reached` | 出院 | 疗程上限仍有 `new_related` | 延长疗程 +N / 转院 | `referred` 转院 | `hosp_discharge` |
 | Q10 `gate_waive` | 出院 | 门禁 fail 申请豁免 | 确认豁免（理由必填）/ 接受 fail | fail 生效 | `hosp_discharge` |
+
+常规门禁 `stage_confirm` 不占 Q 编号：它不是异常分支，而是默认路径上每个门禁点都会触发的叫号确认（见本节上半），选项固定为「确认进入下一阶段 / 暂停就诊」，挂点为各推进类工具。
 
 ---
 
@@ -805,8 +822,8 @@ erDiagram
 
 | 工具 | 职责 | 关键入参 | 关键出参 | 注解 |
 |---|---|---|---|---|
-| `hosp_register` | 挂号建档（互斥检查 + 轻量预检分诊 + 病例查重） | `title`、`scope_type`、`scope`、`chief_complaint?`、`max_rounds?=3`、`force?=false` | `case_id`、`triage_level`、`duplicate_cases` | 非幂等、非破坏 |
-| `hosp_scan` | 检验（确定性扫描） | `case_id`、`tools?=auto`、`timeout_ms?` | `report_id`、findings 分页、设备可用性、`triage_upgrade?`、`suggested_acceptance_commands?`（验收白名单为空时探测返回） | `readOnlyHint=true`（写病历） |
+| `hosp_register` | 挂号建档（互斥检查 + 轻量预检分诊 + 病例查重） | `title`、`scope_type`、`scope`、`chief_complaint?`、`max_rounds?=3`、`force?=false`、`auto_advance?=false`（全权委托，跳过各阶段确认门禁） | `case_id`、`triage_level`、`duplicate_cases`、`handoff` | 非幂等、非破坏 |
+| `hosp_scan` | 检验（确定性扫描） | `case_id`、`tools?=auto`、`timeout_ms?`、`stage_confirmed?=false`（确认挂号单后放行） | `report_id`、findings 分页、设备可用性、`triage_upgrade?`、`suggested_acceptance_commands?`（验收白名单为空时探测返回）、`handoff` | `readOnlyHint=true`（写病历） |
 | `hosp_diagnose` | 诊断（调档增强） | `case_id`、`use_llm?=false` | `report_id`、diagnoses（fixability/confidence/`history_refs`/`referrals`） | `readOnlyHint=true`（写病历） |
 | `hosp_prescribe` | 开方 + 审批（含改签审批） | `case_id`、`approve?=false`、`approver?="host_agent"`、`user_confirmed?=false` | `prescription_id`、处方项、`risk_level`、`confirmation_prompt` | `readOnlyHint=true`（写病历） |
 | `hosp_dispense` | **施治 + 内嵌护理核查**（唯一改码工具） | `prescription_id`、`item_id?=下一味`、`mode?="apply"\|"submit_patch"\|"verify_only"\|"resolve_conflict"`、`patch_token?`、`snapshot_hash?`、`patch?`、`resolution?`、`dry_run?=false` | 成药：`dose`+护理结论；煎药：`need_patch`+`patch_token`+`snapshot_hash`+`patch_context`（含 SEARCH 候选）；补验：核查结论；冲突：`blocked_on`+`nextAction` | `destructiveHint=true`、非幂等 |
@@ -850,6 +867,8 @@ graph LR
 
 ## 7. 开源参考与复用映射
 
+内置专科、处方药、检验仪器，以及对 MegaLinter、ast-grep、import-linter、ArchUnit、ESLint、reviewdog、lizard 的「参考 / 搬迁 / 复用」判断，见 [`code-hospital-builtin-catalog.md`](./code-hospital-builtin-catalog.md)。该名册已落盘，运行时尚未读取。
+
 | 环节 | 参考项目 | 直接可借鉴 | License | 注意 |
 |---|---|---|---|---|
 | 扫描师 | [Semgrep MCP](https://github.com/semgrep/semgrep/tree/develop/cli/src/semgrep/mcp)（`semgrep mcp`） | FastMCP 工具注册、临时文件扫描、自定义规则、AST 输出、stdio+HTTP 双传输 | LGPL-2.1（CLI） | 进程外调用二进制，不链入代码 |
@@ -883,6 +902,12 @@ graph LR
 ---
 
 ## 附录：修订记录
+
+### v1.0-rc → v1.1（流程衔接打磨：阶段确认门禁，1 条，含影响面）
+
+| # | 评审意见 | 合入位置 | 影响面 |
+|---|---|---|---|
+| 1 | 常规路径每阶段产物须用户确认才放行（医院叫号机制，仿 superpowers 阶段检查点）：新增阶段确认门禁（`pending_gate` 挂起 + `stage_confirmed` 放行 + `auto_advance` 委托开关 + `handoff` 产物指引），与 Q1–Q10 异常触发共用 §2.9 出参；门禁点覆盖挂号单/检验报告/诊断书/逐味药，处方沿用审批闸门，出院小结为终局交付 | §3.2/§4.1/§4.11/§6.2；契约 §2.9/§2.10/§3.1/§3.2/§3.7/§6 | **行为收紧**（默认路径 register→scan 之间多一轮用户确认；`auto_advance=true` 保留原直通行为） |
 
 ### v0.4 → v1.0-rc（Agent/MCP 协议视角终审，6 条，含影响面）
 

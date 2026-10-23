@@ -1,0 +1,16 @@
+rules:
+  - id: java.null-deref
+    languages: [java]
+    severity: ERROR
+    message: 空引用上的方法调用
+    pattern: |
+      $VAR = null;
+      ...
+      $VAR.$METHOD(...);
+  - id: java.resource-leak
+    languages: [java]
+    severity: WARNING
+    message: 资源没有放进 try-with-resources
+    pattern-either:
+      - pattern: $TYPE $RES = new FileInputStream(...);
+      - pattern: $TYPE $RES = new FileReader(...);

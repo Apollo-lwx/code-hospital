@@ -48,11 +48,13 @@ async def _check(args) -> None:
 
     scope = {"paths": args.paths, "commit": args.commit, "range": args.range_}
     try:
+        # CLI 冒烟是非交互场景：走绿色通道（auto_advance=True），挂号+检验一键跑完
         reg = await reception.register(
             title=args.title,
             scope_type=args.scope_type,
             scope=scope,
             force=args.force,
+            auto_advance=True,
             project_root=args.repo,
         )
     except HospitalError as e:

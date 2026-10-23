@@ -52,8 +52,10 @@ def fake_adapters():
 
 
 async def test_register_and_scan_flow(git_repo):
+    # auto_advance=True 走绿色通道直通（门禁行为见 test_stage_gates.py）
     reg = await reception.register(
-        title="测试就诊", scope_type="staged", scope={}, project_root=git_repo
+        title="测试就诊", scope_type="staged", scope={},
+        auto_advance=True, project_root=git_repo
     )
     assert reg["triage_level"] == "outpatient"
     assert reg["duplicate_cases"] == []
@@ -89,19 +91,24 @@ async def test_one_active_case_per_repo(git_repo):
 
 async def test_duplicate_cases_hit(git_repo):
     reg1 = await reception.register(
-        title="首例", scope_type="staged", scope={}, project_root=git_repo
+        title="首例", scope_type="staged", scope={},
+        auto_advance=True, project_root=git_repo
     )
     await scanner.scan(case_id=reg1["case_id"], project_root=git_repo)
     # 强制转诊后再次挂号：查重应命中首例（same_file）
     reg2 = await reception.register(
-        title="复诊", scope_type="staged", scope={}, force=True, project_root=git_repo
+        title="复诊", scope_type="staged", scope={}, force=True,
+        auto_advance=True, project_root=git_repo
     )
     assert any(d["case_id"] == reg1["case_id"] for d in reg2["duplicate_cases"])
     assert reg2["duplicate_cases"][0]["similarity"] == "same_file"
 
 
 async def test_scan_requires_registered_status(git_repo):
-    reg = await reception.register(title="A", scope_type="staged", scope={}, project_root=git_repo)
+    reg = await reception.register(
+        title="A", scope_type="staged", scope={},
+        auto_advance=True, project_root=git_repo
+    )
     await scanner.scan(case_id=reg["case_id"], project_root=git_repo)
     with pytest.raises(HospitalError) as exc:
         await scanner.scan(case_id=reg["case_id"], project_root=git_repo)

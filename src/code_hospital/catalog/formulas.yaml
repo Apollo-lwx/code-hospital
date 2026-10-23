@@ -1,0 +1,129 @@
+# 处方药名册。药柜归属只写在 specialties.yaml。phase 大于当前阶段的不参与匹配。
+- id: debride
+  name: 清创
+  method: autofix
+  risk: low
+  phase: 1
+  hold: false
+  scope: line_range
+  acceptance_alias: lint
+  indications:
+    - kind: rule
+      rule_ids: [F401, F541, F841, E501, I001]
+      prefixes: [I, UP, W, C4, RET, SIM, PIE, RUF]
+- id: split
+  name: 拆分
+  method: llm_patch
+  risk: medium
+  phase: 1
+  hold: false
+  scope: symbol
+  acceptance_alias: test
+  indications:
+    - kind: rule
+      rule_ids: [structure.function_lines, structure.file_lines, structure.cyclomatic]
+- id: rename
+  name: 正骨
+  method: llm_patch
+  risk: medium
+  phase: 2
+  hold: false
+  scope: reference_closure
+  acceptance_alias: test
+  risk_overrides:
+    - when: touches_public_api
+      risk: high
+  indications:
+    - kind: rule
+      rule_ids: []
+- id: dedupe
+  name: 去重
+  method: llm_patch
+  risk: medium
+  phase: 1
+  hold: false
+  scope: file
+  acceptance_alias: test
+  indications:
+    - kind: rule
+      tools: [jscpd]
+      rule_ids: [clone.duplicate]
+- id: guard
+  name: 补罩
+  method: llm_patch
+  risk: medium
+  phase: 1
+  hold: false
+  scope: symbol
+  acceptance_alias: test
+  indications:
+    - kind: rule
+      rule_ids: [BLE001, java.null-deref, java.resource-leak]
+- id: seal
+  name: 封存
+  method: manual
+  risk: high
+  phase: 1
+  hold: true
+  scope: line_range
+  acceptance_alias: ""
+  indications:
+    - kind: severity
+      value: critical
+    - kind: tool
+      tool: gitleaks
+- id: supply
+  name: 进货
+  method: manual
+  risk: high
+  phase: 1
+  hold: false
+  scope: file
+  acceptance_alias: ""
+  indications:
+    - kind: rule
+      rule_ids: []
+- id: contrast
+  name: 对照
+  method: llm_patch
+  risk: low
+  phase: 1
+  hold: false
+  scope: test_files
+  acceptance_alias: test
+  indications:
+    - kind: companion
+      parents: [split, rename, guard, throttle]
+- id: relocate
+  name: 归位
+  method: manual
+  risk: high
+  phase: 1
+  hold: true
+  scope: contract_rule
+  acceptance_alias: ""
+  indications:
+    - kind: rule
+      tools: [layer-ruler]
+- id: throttle
+  name: 削峰
+  method: llm_patch
+  risk: medium
+  phase: 1
+  hold: false
+  scope: line_range
+  acceptance_alias: test
+  indications:
+    - kind: rule
+      rule_ids: [hotspot.loop-io, hotspot.unbounded-query]
+- id: repair
+  name: 续治
+  method: llm_patch
+  risk: medium
+  phase: 1
+  hold: false
+  scope: line_range
+  acceptance_alias: test
+  indications:
+    - kind: fallback
+      tools: [ruff, semgrep, java-pack, eslint, type-ruler]

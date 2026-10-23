@@ -45,14 +45,18 @@ def git_repo(tmp_path: Path) -> str:
 
 
 async def test_second_admission_marks_recurrence(git_repo):
-    # 首次入院：全部初发
-    reg1 = await reception.register(title="首次", scope_type="staged", scope={}, project_root=git_repo)
+    # 首次入院：全部初发（auto_advance 直通，聚焦复发语义而非门禁）
+    reg1 = await reception.register(
+        title="首次", scope_type="staged", scope={},
+        auto_advance=True, project_root=git_repo
+    )
     res1 = await scanner.scan(case_id=reg1["case_id"], project_root=git_repo)
     assert res1["findings"]["data"][0]["history_refs"] == []
 
     # 二次入院（强制转诊旧病例）：同指纹发现必须标复发并指向首次病例
     reg2 = await reception.register(
-        title="二次入院", scope_type="staged", scope={}, force=True, project_root=git_repo
+        title="二次入院", scope_type="staged", scope={}, force=True,
+        auto_advance=True, project_root=git_repo
     )
     res2 = await scanner.scan(case_id=reg2["case_id"], project_root=git_repo)
     refs = res2["findings"]["data"][0]["history_refs"]

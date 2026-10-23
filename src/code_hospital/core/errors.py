@@ -61,6 +61,10 @@ def conflict(message: str, target: str = "", next_action: str = "") -> HospitalE
     return HospitalError("Conflict", message, target, next_action)
 
 
+def overlimit(message: str, target: str = "", next_action: str = "") -> HospitalError:
+    return HospitalError("Overlimit", message, target, next_action)
+
+
 def forbidden(message: str, target: str = "", next_action: str = "") -> HospitalError:
     return HospitalError("Forbidden", message, target, next_action)
 

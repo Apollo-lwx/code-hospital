@@ -5,3 +5,8 @@ __pycache__/
 .ruff_cache/
 build/
 dist/
+
+# 本地运行数据与个人记忆，不入库
+.hospital/
+.rsi/
+.cursor/mcp.json

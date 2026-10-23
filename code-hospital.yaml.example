@@ -1,0 +1,28 @@
+# 放在被诊疗仓库的根目录，文件名用 code-hospital.yaml。
+# 没有这份文件时用内置默认：函数 80 行、文件 500 行、圈复杂度 15，ruff 报什么就收什么。
+# 检验报告的「覆盖与限制」会写上这次实际生效的口径。
+
+scan_ignore:
+  - "gen/**"
+  - "**/*_pb2.py"
+
+catalog:
+  structure:
+    function_lines: 80   # 0 = 函数多长都不算病
+    file_lines: 500      # 0 = 文件多长都不算病
+    cyclomatic: 15       # 0 = 不量圈复杂度
+  rules:
+    # F401 只丢这一条。FURB 丢掉所有 FURB 开头的规则。
+    # 不要只写一个字母 F，否则 F401 也会被丢掉。
+    ignore:
+      - FURB
+      - BLE
+      - SIM
+      - UP
+      - I
+      - RUF
+      - PYI
+      - PLC
+      - ASYNC
+    min_severity: ""     # 留空全留；写成 major 则只留 critical 和 major
+    ruff_select: []      # 例如 [F, E9]。空列表表示沿用本机 ruff 的默认规则集

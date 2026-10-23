@@ -7,13 +7,16 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import sys
 from pathlib import Path
 
 from ..adapters import all_adapters, register_defaults
 from ..adapters.base import AdapterError, RawFinding, ScannerAdapter
+from ..core.algorithms import lookup_history, stamp_findings
 from ..core.errors import invalid_operation, not_found
 from ..core.fingerprint import context_anchor as make_anchor
-from ..core.fingerprint import fingerprint as make_fingerprint
 from ..core.ids import new_id
 from ..core.models import Finding, ReportRecord
 from ..safety.repo_files import scope_file_list
@@ -22,10 +25,101 @@ from ..storage.db import Database, hospital_root, now_ms
 from ..storage.reports import render_scan_report
 
 
+async def collect_findings(
+    root: str,
+    case,
+    report_id: str,
+    tools: list[str] | None = None,
+    timeout_ms: int = 120_000,
+) -> tuple[list[dict], list[str], list[Finding]]:
+    """跑当前注册的设备并盖双键指纹。不入库，初诊和复诊共用。"""
+    from ..core.models import SEVERITY_ORDER
+
+    files, skipped = await scope_file_list(root, case.scope_type, case.scope.model_dump())
+    limitations: list[str] = []
+    if skipped:
+        limitations.append(
+            f"忽略规则跳过 {skipped} 个文件（内置排除目录 + code-hospital.yaml scan_ignore）"
+        )
+    registry: list[ScannerAdapter] = all_adapters()
+    from ..catalog.formulary import instruments as catalog_instruments
+    from ..catalog.formulary import selected_instrument_ids
+    from ..catalog.structure import scan_structure
+
+    catalog_ids = set(catalog_instruments())
+    if tools and tools != ["auto"]:
+        wanted = {t.strip() for t in tools}
+        registry = [a for a in registry if a.name in wanted]
+        selected = wanted
+    else:
+        selected = set(selected_instrument_ids(
+            case.triage_level, files,
+            getattr(case, "requested_specialties", []),
+            getattr(case, "requested_instruments", []),
+        ))
+        registry = [a for a in registry if a.name not in catalog_ids or a.name in selected]
+    devices: list[dict] = []
+    findings: list[Finding] = []
+    for adapter in registry:
+        available = adapter.is_available()
+        version = await adapter.version() if available else ""
+        if not available:
+            devices.append({"tool": adapter.name, "available": False, "version": "", "outcome": "terminal"})
+            if adapter.name in catalog_ids:
+                limitations.append(catalog_instruments()[adapter.name]["limitation"])
+            else:
+                limitations.append(f"设备不可用: {adapter.name}（未安装或不在 PATH）")
+            continue
+        targets = adapter.filter_files(files)
+        if not targets and adapter.extensions:
+            devices.append({"tool": adapter.name, "available": True, "version": version, "outcome": "ok"})
+            limitations.append(f"{adapter.name}: 本 scope 无适配文件，跳过")
+            continue
+        try:
+            raws = await adapter.scan(root, targets or files, timeout_ms)
+            findings.extend(normalize(r, adapter.name, case.id, report_id, root) for r in raws)
+            devices.append({"tool": adapter.name, "available": True, "version": version, "outcome": "ok"})
+        except AdapterError as e:
+            devices.append({"tool": adapter.name, "available": True, "version": version, "outcome": "retry"})
+            limitations.append(f"{adapter.name}: {e}")
+    if "structure-ruler" in selected:
+        raws, extra = scan_structure(root, files)
+        limitations.extend(extra)
+        for raw in raws:
+            finding = normalize(
+                RawFinding(
+                    rule_id=raw["rule_id"], message=raw["message"], file_path=raw["file_path"],
+                    line_start=raw["line_start"], line_end=raw["line_end"], severity=raw["severity"],
+                ),
+                "structure-ruler", case.id, report_id, root,
+            )
+            if raw.get("symbol"):
+                finding.symbol = raw["symbol"]
+            findings.append(finding)
+        devices.append({"tool": "structure-ruler", "available": True, "version": "builtin", "outcome": "ok"})
+    await _run_catalog_instruments(
+        root, case, report_id, files, selected, devices, findings, limitations, timeout_ms,
+    )
+    if "design" in getattr(case, "requested_specialties", []):
+        limitations.append("设计科第一期无检验仪器")
+    from ..catalog.policy import describe, keeps, load_policy
+
+    policy = load_policy(root)
+    before = len(findings)
+    findings = [item for item in findings if keeps(item.rule_id, item.severity, policy)]
+    limitations.append(describe(policy, before - len(findings)))
+    findings.sort(key=lambda f: (SEVERITY_ORDER.get(f.severity, 9), f.file_path, f.line_start))
+    stamp_findings(findings)
+    return devices, limitations, findings
+
+
 def detect_acceptance_commands(project_root: str) -> list[dict]:
     """验收命令零配置探测（设计 §4.6 冷启动）：探测≠执行。"""
     root = Path(project_root)
     suggestions: list[dict] = []
+    ruff_name = "ruff.exe" if os.name == "nt" else "ruff"
+    if shutil.which("ruff") or (Path(sys.executable).parent / ruff_name).is_file():
+        suggestions.append({"alias": "lint", "command": "ruff check", "source": "ruff"})
     if (root / "pytest.ini").exists() or (
         (root / "pyproject.toml").exists()
         and "[tool.pytest" in (root / "pyproject.toml").read_text(encoding="utf-8", errors="replace")
@@ -88,7 +182,10 @@ def normalize(
     line_text, before, after = _read_window(project_root, file_path, raw.line_start)
     evidence = raw.evidence or line_text
     anchor = make_anchor(before, after)
-    symbol = _symbol_hint(line_text)
+    from ..catalog.packs import tool_for_rule
+
+    tool = tool_for_rule(raw.rule_id, tool)
+    symbol = str((raw.extra or {}).get("symbol") or "") or _symbol_hint(line_text)
     return Finding(
         id=new_id("fnd"),
         case_id=case_id,
@@ -100,9 +197,11 @@ def normalize(
         line_start=raw.line_start,
         line_end=raw.line_end or raw.line_start,
         symbol=symbol,
+        contract_id=str((raw.extra or {}).get("contract_id") or ""),
+        fixable=bool((raw.extra or {}).get("fixable")),
         message=sanitize_text(raw.message),
         evidence=sanitize_evidence(evidence),
-        fingerprint=make_fingerprint(raw.rule_id, file_path, symbol, evidence, anchor),
+        fingerprint="",
         context_anchor=anchor,
         status="new",
         origin="initial",
@@ -111,16 +210,171 @@ def normalize(
     )
 
 
+_PACK_EXTENSIONS = {
+    "java-pack": {".java"},
+    "hotspot-ruler": {".py", ".java"},
+}
+
+
+def _pack_targets(instrument_id: str, files: list[str]) -> list[str]:
+    exts = _PACK_EXTENSIONS.get(instrument_id, set())
+    return [path for path in files if Path(path).suffix.lower() in exts]
+
+
+async def _run_catalog_instruments(root, case, report_id, files, selected, devices, findings, limitations, timeout_ms):
+    """院内仪器不进适配器注册表。java-pack / hotspot 走随包 semgrep，分层尺只跑第一份契约。"""
+    from ..catalog.formulary import instruments as catalog_instruments
+    from ..catalog.layers import scan_layers
+    from ..catalog.packs import scan_pack, semgrep_available
+    from ..catalog.typecheck import type_backend
+
+    catalog = catalog_instruments()
+    for instrument_id in ("java-pack", "hotspot-ruler"):
+        if instrument_id not in selected:
+            continue
+        targets = _pack_targets(instrument_id, files)
+        if not semgrep_available():
+            limitations.append(catalog[instrument_id]["limitation"])
+            devices.append({"tool": instrument_id, "available": False, "version": "", "outcome": "terminal"})
+            continue
+        if not targets:
+            devices.append({"tool": instrument_id, "available": True, "version": "semgrep", "outcome": "ok"})
+            limitations.append(f"{instrument_id}: 本 scope 无适配文件，跳过")
+            continue
+        try:
+            raws = await scan_pack(root, targets, instrument_id, timeout_ms)
+            findings.extend(normalize(raw, instrument_id, case.id, report_id, root) for raw in raws)
+            devices.append({"tool": instrument_id, "available": True, "version": "semgrep", "outcome": "ok"})
+        except AdapterError as exc:
+            devices.append({"tool": instrument_id, "available": True, "version": "semgrep", "outcome": "retry"})
+            limitations.append(f"{instrument_id}: {exc}")
+
+    requested = getattr(case, "requested_specialties", [])
+    if "performance" in requested and "hotspot-ruler" not in selected and not semgrep_available():
+        limitations.append("semgrep 未到岗，热点尺未拍")
+        devices.append({"tool": "hotspot-ruler", "available": False, "version": "", "outcome": "terminal"})
+    requested_instruments = list(getattr(case, "requested_instruments", []) or [])
+    if "type-ruler" in requested_instruments and "type-ruler" not in selected and not type_backend():
+        limitations.append("类型尺未到岗")
+        devices.append({"tool": "type-ruler", "available": False, "version": "", "outcome": "terminal"})
+
+    await _scan_eslint(root, report_id, case, files, selected, devices, findings, limitations, timeout_ms)
+    await _scan_jscpd(root, report_id, case, files, selected, devices, findings, limitations, timeout_ms, catalog)
+    await _scan_type_ruler(root, report_id, case, files, selected, devices, findings, limitations, timeout_ms)
+
+    if "layer-ruler" not in selected:
+        return
+    raws, extra = await scan_layers(root, files, timeout_ms)
+    limitations.extend(extra)
+    for raw in raws:
+        findings.append(normalize(
+            RawFinding(
+                rule_id=raw["rule_id"], message=raw["message"], file_path=raw["file_path"],
+                line_start=raw["line_start"], line_end=raw["line_end"], severity=raw["severity"],
+                extra={"contract_id": raw.get("contract_id") or ""},
+            ),
+            "layer-ruler", case.id, report_id, root,
+        ))
+    failed = any("失败" in item for item in extra)
+    if failed:
+        outcome = "retry"
+    elif extra and not raws:
+        outcome = "terminal"
+    else:
+        outcome = "ok"
+    devices.append({"tool": "layer-ruler", "available": outcome != "terminal", "version": "builtin", "outcome": outcome})
+
+
+async def _scan_eslint(root, report_id, case, files, selected, devices, findings, limitations, timeout_ms):
+    if "eslint" not in selected:
+        return
+    from ..catalog.runners import eslint_binary, eslint_configured, scan_eslint
+
+    targets = [path for path in files if Path(path).suffix.lower() in {".js", ".jsx", ".ts", ".tsx"}]
+    if not eslint_configured(root):
+        limitations.append("项目未配置 eslint")
+        devices.append({"tool": "eslint", "available": False, "version": "", "outcome": "terminal"})
+        return
+    if not eslint_binary():
+        limitations.append("eslint 未到岗")
+        devices.append({"tool": "eslint", "available": False, "version": "", "outcome": "terminal"})
+        return
+    if not targets:
+        devices.append({"tool": "eslint", "available": True, "version": "eslint", "outcome": "ok"})
+        limitations.append("eslint: 本 scope 无适配文件，跳过")
+        return
+    try:
+        raws = await scan_eslint(root, targets, timeout_ms)
+        findings.extend(normalize(raw, "eslint", case.id, report_id, root) for raw in raws)
+        devices.append({"tool": "eslint", "available": True, "version": "eslint", "outcome": "ok"})
+    except AdapterError as exc:
+        devices.append({"tool": "eslint", "available": True, "version": "eslint", "outcome": "retry"})
+        limitations.append(f"eslint: {exc}")
+
+
+async def _scan_type_ruler(root, report_id, case, files, selected, devices, findings, limitations, timeout_ms):
+    if "type-ruler" not in selected:
+        return
+    from ..catalog.typecheck import scan_type_ruler, type_backend
+
+    targets = [path for path in files if Path(path).suffix.lower() == ".py"]
+    if not type_backend():
+        limitations.append("类型尺未到岗")
+        devices.append({"tool": "type-ruler", "available": False, "version": "", "outcome": "terminal"})
+        return
+    if not targets:
+        devices.append({"tool": "type-ruler", "available": True, "version": type_backend(), "outcome": "ok"})
+        limitations.append("type-ruler: 本 scope 无适配文件，跳过")
+        return
+    try:
+        raws = await scan_type_ruler(root, targets, timeout_ms)
+        findings.extend(normalize(raw, "type-ruler", case.id, report_id, root) for raw in raws)
+        devices.append({"tool": "type-ruler", "available": True, "version": type_backend(), "outcome": "ok"})
+    except AdapterError as exc:
+        devices.append({"tool": "type-ruler", "available": True, "version": type_backend(), "outcome": "retry"})
+        limitations.append(f"type-ruler: {exc}")
+
+
+async def _scan_jscpd(root, report_id, case, files, selected, devices, findings, limitations, timeout_ms, catalog):
+    if "jscpd" not in selected:
+        return
+    import shutil
+
+    from ..catalog.runners import scan_jscpd
+
+    exts = {f".{str(item).lstrip('.')}" for item in (catalog["jscpd"].get("extensions") or [])}
+    targets = [path for path in files if Path(path).suffix.lower() in exts]
+    if shutil.which("jscpd") is None:
+        limitations.append(catalog["jscpd"]["limitation"])
+        devices.append({"tool": "jscpd", "available": False, "version": "", "outcome": "terminal"})
+        return
+    if not targets:
+        devices.append({"tool": "jscpd", "available": True, "version": "jscpd", "outcome": "ok"})
+        return
+    try:
+        raws = await scan_jscpd(root, targets, timeout_ms)
+        findings.extend(normalize(raw, "jscpd", case.id, report_id, root) for raw in raws)
+        devices.append({"tool": "jscpd", "available": True, "version": "jscpd", "outcome": "ok"})
+    except AdapterError as exc:
+        devices.append({"tool": "jscpd", "available": True, "version": "jscpd", "outcome": "retry"})
+        limitations.append(f"jscpd: {exc}")
+
+
 async def scan(
     case_id: str,
     tools: list[str] | None = None,
     timeout_ms: int = 120_000,
+    stage_confirmed: bool = False,
     page: int = 1,
     size: int = 50,
     order_by: str = "severity desc",
     project_root: str = "",
 ) -> dict:
-    """hosp_scan 主逻辑，返回契约 §3.2 出参。"""
+    """hosp_scan 主逻辑，返回契约 §3.2 出参。
+
+    阶段确认门禁（设计 §4.11）：病例挂起（pending_gate 非空）且未带
+    stage_confirmed=true 时返回 pending_question 变体，不执行扫描。
+    """
     from .reception import resolve_project_root
 
     # 注册表为空时才装默认适配器——测试注入替身后不再混入真实设备
@@ -132,64 +386,52 @@ async def scan(
         if case is None:
             raise not_found(f"病例不存在：{case_id}", target="case_id",
                             next_action="先 hosp_register 挂号")
+
+        # 叫号检查：挂号单或补片检查单待确认时挂起，用户确认后重调本工具放行
+        if case.pending_gate and not stage_confirmed:
+            from ..core.questions import stage_gate_question
+
+            reports = await db.list_reports(case_id)
+            reg_report = next((r for r in reports if r.stage == "register"), None)
+            prompt_meta = (
+                f"分诊 {case.triage_level}，范围 {case.scope_type}"
+                f"（报告 {reg_report.md_path}）。"
+                if reg_report and reg_report.md_path
+                else f"分诊 {case.triage_level}，范围 {case.scope_type}。"
+            )
+            return stage_gate_question(case_id, case.pending_gate, "hosp_scan", prompt_meta)
+        if case.pending_gate:
+            await db.update_case(case_id, pending_gate="")
+            case.pending_gate = ""
+
+        if case.scan_orders and case.status == "scanned":
+            return await _supplement(db, root, case, timeout_ms)
+
         if case.status != "registered":
             raise invalid_operation(
-                f"病例当前状态为 {case.status}，P0 仅支持 registered 状态下检验",
+                f"病例当前状态为 {case.status}，仅 registered 可初检，scanned 且有检查单时可补片",
                 target="case_id",
-                next_action="P1 起支持复诊复扫（内嵌于 hosp_discharge）",
+                next_action="初检走 hosp_scan；补片需诊断先开出 scan_orders",
             )
 
-        files, skipped = await scope_file_list(root, case.scope_type, case.scope.model_dump())
         report_id = new_id("rpt")
-        if skipped:
-            limitations_note = f"忽略规则跳过 {skipped} 个文件（内置排除目录 + code-hospital.yaml scan_ignore）"
-        else:
-            limitations_note = ""
+        devices, limitations, findings = await collect_findings(
+            root, case, report_id, tools, timeout_ms,
+        )
 
-        # 设备调度：auto = 全部可用适配器；指定 tools 时按名过滤
-        registry: list[ScannerAdapter] = all_adapters()
-        if tools and tools != ["auto"]:
-            wanted = {t.strip() for t in tools}
-            registry = [a for a in registry if a.name in wanted]
-        devices, limitations, findings = [], [], []
-        if limitations_note:
-            limitations.append(limitations_note)
-        for adapter in registry:
-            available = adapter.is_available()
-            version = await adapter.version() if available else ""
-            devices.append({"tool": adapter.name, "available": available, "version": version})
-            if not available:
-                limitations.append(f"设备不可用: {adapter.name}（未安装或不在 PATH）")
-                continue
-            targets = adapter.filter_files(files)
-            if not targets:
-                limitations.append(f"{adapter.name}: 本 scope 无适配文件，跳过")
-                continue
-            try:
-                raws = await adapter.scan(root, targets, timeout_ms)
-                findings.extend(normalize(r, adapter.name, case_id, report_id, root) for r in raws)
-            except AdapterError as e:
-                limitations.append(f"{adapter.name}: {e}")
-
-        # 排序：severity 优先（报告与出参一致）
-        from ..core.models import SEVERITY_ORDER
-        findings.sort(key=lambda f: (SEVERITY_ORDER.get(f.severity, 9), f.file_path, f.line_start))
-
-        # 初诊调档（轻量版）：按指纹关联历史病例，每条发现标「初发/复发」——
-        # 二次入院不从头来（设计 §4.8，P0 提前落地）。
-        # 注意：history_refs 是派生字段不入库，报告与分页出参都要从本映射重挂。
-        fingerprints = sorted({f.fingerprint for f in findings})
-        raw_history = await db.find_fingerprint_history(root, fingerprints, exclude_case_id=case_id)
-        history_notes: dict[str, list[dict]] = {
-            fp: [
-                {**r, "note": f"此前病例曾出现同指纹发现（复发记录 {i + 1}/{len(refs)}）"}
-                for i, r in enumerate(refs)
-            ]
-            for fp, refs in raw_history.items()
-        }
+        # 初诊调档：复发看 content_key（长相），身份指纹只区分同形的多处命中。
+        fingerprints = sorted({f.fingerprint for f in findings if f.fingerprint})
+        content_keys = sorted({f.content_key for f in findings if f.content_key})
+        raw_history = await db.find_fingerprint_history(
+            root, fingerprints, exclude_case_id=case_id, content_keys=content_keys,
+        )
         recurring = 0
         for f in findings:
-            f.history_refs = history_notes.get(f.fingerprint, [])
+            refs = lookup_history(raw_history, f.fingerprint, f.content_key)
+            f.history_refs = [
+                {**r, "note": f"此前病例曾出现同形态发现（复发记录 {i + 1}/{len(refs)}）"}
+                for i, r in enumerate(refs)
+            ]
             if f.history_refs:
                 recurring += 1
         if recurring:
@@ -204,7 +446,7 @@ async def scan(
             triage_upgrade = {
                 "from": case.triage_level,
                 "to": "emergency",
-                "reason": f"检出 {critical_hits} 条 critical 发现（含密钥/高危特征）",
+                "reason": f"检出 {critical_hits} 条必须先处理的问题（密钥或同类安全项）",
             }
             await db.update_case(case_id, triage_level="emergency")
             await db.insert_report(ReportRecord(
@@ -228,16 +470,30 @@ async def scan(
         await db.insert_report(ReportRecord(
             id=report_id, case_id=case_id, stage="scan", round=1,
             md_path=str(report_path),
-            summary=f"{len(findings)} 条发现（critical {critical_hits}）",
+            summary=f"{len(findings)} 条发现，其中必须先处理 {critical_hits} 条",
             created_at=now_ms(),
         ))
-        await db.update_case(case_id, status="scanned")
+        # 检验报告产出后挂起等确认（非委托病例），用户确认后才放行诊断（P1）
+        await db.update_case(
+            case_id,
+            status="scanned",
+            pending_gate="" if case.auto_advance else "scanned",
+            instrument_notes_json=json.dumps(
+                [{"id": d["tool"], "outcome": d.get("outcome", "ok")} for d in devices],
+                ensure_ascii=False,
+            ),
+        )
 
         # 分页出参（DB 重读后重挂派生的 history_refs）
         page_items, total = await db.list_findings(case_id, page=page, size=size, order_by=order_by)
         for f in page_items:
-            f.history_refs = history_notes.get(f.fingerprint, [])
+            refs = lookup_history(raw_history, f.fingerprint, f.content_key)
+            f.history_refs = [
+                {**r, "note": f"此前病例曾出现同形态发现（复发记录 {i + 1}/{len(refs)}）"}
+                for i, r in enumerate(refs)
+            ]
         from ..core.models import page_payload
+        from ..core.questions import handoff
 
         return {
             "case_id": case_id,
@@ -251,4 +507,86 @@ async def scan(
             "suggested_acceptance_commands": detect_acceptance_commands(root),
             "memory_context": memory_context,
             "report_path": str(report_path),
+            "handoff": handoff(case_id, "scanned", case.auto_advance, next_tool="hosp_diagnose"),
         }
+
+
+async def _supplement(db, root: str, case, timeout_ms: int) -> dict:
+    """检查单只跑点名仪器。新发现挂初检 report_id，另写补片报告，不覆盖 scan-r1.md。"""
+    from ..catalog.formulary import instruments as catalog_instruments
+    from ..core.models import page_payload
+    from ..core.questions import handoff
+
+    reports = await db.list_reports(case.id)
+    scan_report = next((r for r in reports if r.stage == "scan"), None)
+    report_id = scan_report.id if scan_report else new_id("rpt")
+    ordered = [row["instrument_id"] for row in case.scan_orders]
+    devices, limitations, findings = await collect_findings(
+        root, case, report_id, ordered, timeout_ms,
+    )
+    catalog = catalog_instruments()
+    seen = {device["tool"] for device in devices}
+    notes = [row for row in case.instrument_notes if row.get("id") not in set(ordered)]
+    for instrument_id in ordered:
+        if instrument_id in seen:
+            device = next(item for item in devices if item["tool"] == instrument_id)
+            notes.append({"id": instrument_id, "outcome": device.get("outcome", "ok")})
+            continue
+        text = catalog[instrument_id]["limitation"] if instrument_id in catalog else f"{instrument_id} 未到岗"
+        limitations.append(text)
+        notes.append({"id": instrument_id, "outcome": "terminal"})
+
+    fingerprints = sorted({f.fingerprint for f in findings if f.fingerprint})
+    content_keys = sorted({f.content_key for f in findings if f.content_key})
+    raw_history = await db.find_fingerprint_history(
+        root, fingerprints, exclude_case_id=case.id, content_keys=content_keys,
+    )
+    for finding in findings:
+        refs = lookup_history(raw_history, finding.fingerprint, finding.content_key)
+        finding.history_refs = [
+            {**ref, "note": "此前病例曾出现同形态发现（复发）"} for ref in refs
+        ]
+    await db.insert_findings(findings)
+
+    lines = [
+        f"# 补片检验 {case.id}",
+        "",
+        "检查单：" + "；".join(
+            f"{row['instrument_id']}（{row['reason']}）" for row in case.scan_orders
+        ),
+        "",
+        f"新发现 {len(findings)} 条。",
+    ]
+    if limitations:
+        lines.extend(["", "## 覆盖与限制", *[f"- {item}" for item in limitations]])
+    report_path = hospital_root(root) / "reports" / case.id / f"scan-r{case.round}-supplement.md"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    supplement_id = new_id("rpt")
+    await db.insert_report(ReportRecord(
+        id=supplement_id, case_id=case.id, stage="scan_supplement", round=case.round,
+        md_path=str(report_path),
+        summary=f"补片 {len(findings)} 条发现",
+        created_at=now_ms(),
+    ))
+    await db.update_case(
+        case.id,
+        scan_orders_json="[]",
+        instrument_notes_json=json.dumps(notes, ensure_ascii=False),
+        pending_gate="" if case.auto_advance else "scanned",
+        status="scanned",
+    )
+    page_items, total = await db.list_findings(case.id, page=1, size=50, order_by="severity desc")
+    return {
+        "case_id": case.id,
+        "report_id": report_id,
+        "supplement_report_id": supplement_id,
+        "round": case.round,
+        "devices": devices,
+        "findings": page_payload(
+            [f.model_dump() for f in page_items], 1, 50, "severity desc", total
+        ),
+        "limitations": limitations,
+        "report_path": str(report_path),
+        "handoff": handoff(case.id, "scanned", case.auto_advance, next_tool="hosp_diagnose"),
+    }

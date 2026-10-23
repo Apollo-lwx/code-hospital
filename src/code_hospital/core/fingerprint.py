@@ -1,7 +1,8 @@
-"""Finding 指纹与上下文锚（设计 §4.5）。
+"""Finding 指纹与上下文锚（设计 §4.5，算法 A1）。
 
-fingerprint = sha256(rule_id | normalized_path | symbol | canonical_snippet | context_anchor)
-context_anchor = 前后各 2 行归一化签名——「修复改变周围代码」时仍可二次匹配。
+content_key = sha256(rule_id | path | symbol | canonical_snippet)  认长相，复发调档用它。
+identity    = sha256(content_key | anchor | occurrence)           认身份，差分与入库指纹用它。
+context_anchor = 前后各 2 行归一化签名。occurrence 必须在一批发现上统一补，见 algorithms.stamp_findings。
 """
 
 from __future__ import annotations
@@ -34,14 +35,29 @@ def context_anchor(before_lines: list[str], after_lines: list[str]) -> str:
     return sha256_str(joined) if joined else ""
 
 
+def make_keys(
+    rule_id: str,
+    file_path: str,
+    symbol: str,
+    snippet: str,
+    anchor: str,
+    occurrence: int = 0,
+) -> tuple[str, str]:
+    """返回 (content_key, identity_fp)。occurrence 区分同文件里复制粘贴的多处命中。"""
+    content = sha256_str(
+        "|".join([rule_id, normalize_path(file_path), symbol, canonical_snippet(snippet)])
+    )
+    identity = sha256_str("|".join([content, anchor, str(occurrence)]))
+    return content, identity
+
+
 def fingerprint(
     rule_id: str,
     file_path: str,
     symbol: str,
     snippet: str,
     anchor: str,
+    occurrence: int = 0,
 ) -> str:
-    material = "|".join(
-        [rule_id, normalize_path(file_path), symbol, canonical_snippet(snippet), anchor]
-    )
-    return sha256_str(material)
+    """单条身份指纹。同一批里有多处同形态命中时，先用 algorithms.stamp_findings 补序号。"""
+    return make_keys(rule_id, file_path, symbol, snippet, anchor, occurrence)[1]

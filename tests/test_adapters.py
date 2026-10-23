@@ -24,6 +24,7 @@ def test_ruff_parse_and_severity():
     assert findings[2].rule_id == "syntax-error"
     assert map_severity("F401") == "major" and map_severity("W605") == "minor"
     assert map_severity("C901") == "nit"
+    assert map_severity("FURB122") == "nit"
 
 
 def test_semgrep_parse():

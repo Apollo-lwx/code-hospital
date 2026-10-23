@@ -26,6 +26,23 @@ def resolve_project_root(project_root: str = "") -> str:
     return str(os.path.abspath(root))
 
 
+def _check_catalog_request(specialties: list[str], instruments: list[str]) -> None:
+    from ..catalog.formulary import REQUESTABLE_INSTRUMENTS, SPECIALTY_IDS
+
+    unknown = [item for item in specialties if item not in SPECIALTY_IDS]
+    if unknown:
+        raise bad_argument(
+            f"requested_specialties 只能是 {list(SPECIALTY_IDS)}",
+            target="requested_specialties",
+        )
+    unknown_tools = [item for item in instruments if item not in REQUESTABLE_INSTRUMENTS]
+    if unknown_tools:
+        raise bad_argument(
+            "第一期 requested_instruments 只接受 type-ruler",
+            target="requested_instruments",
+        )
+
+
 async def register(
     title: str,
     scope_type: str,
@@ -33,9 +50,17 @@ async def register(
     chief_complaint: str = "",
     max_rounds: int = 3,
     force: bool = False,
+    auto_advance: bool = False,
+    requested_specialties: list[str] | None = None,
+    requested_instruments: list[str] | None = None,
     project_root: str = "",
 ) -> dict:
-    """hosp_register 主逻辑，返回契约 §3.1 出参。"""
+    """hosp_register 主逻辑，返回契约 §3.1 出参。
+
+    auto_advance=false（默认）：挂号单产出后病例挂起（pending_gate=registered），
+    用户确认后 hosp_scan(stage_confirmed=true) 才执行检验（设计 §4.11 叫号机制）；
+    auto_advance=true：全权委托/绿色通道，全程不设阶段确认门禁。
+    """
     root = resolve_project_root(project_root)
     if scope_type not in {e.value for e in ScopeType}:
         raise bad_argument(
@@ -45,6 +70,9 @@ async def register(
         raise bad_argument("title 不能为空（给这次就诊起个名字）", target="title")
     if not (1 <= max_rounds <= 10):
         raise bad_argument("max_rounds 须在 1..10", target="max_rounds")
+    specialties = list(requested_specialties or [])
+    instruments = list(requested_instruments or [])
+    _check_catalog_request(specialties, instruments)
     await ensure_git_repo(root)
 
     scope_obj = Scope(
@@ -83,7 +111,7 @@ async def register(
         # 3) 病例查重（same_file 维度）
         duplicates = await db.find_duplicate_cases(root, files)
 
-        # 4) 建档
+        # 4) 建档（默认挂起等叫号：用户确认挂号单后才放行检验）
         ts = now_ms()
         case = Case(
             id=new_id("case"),
@@ -95,6 +123,10 @@ async def register(
             status="registered",
             round=1,
             max_rounds=max_rounds,
+            auto_advance=auto_advance,
+            pending_gate="" if auto_advance else "registered",
+            requested_specialties=specialties,
+            requested_instruments=instruments,
             created_at=ts,
             updated_at=ts,
         )
@@ -122,6 +154,8 @@ async def register(
             )
         )
 
+    from ..core.questions import handoff
+
     return {
         "case_id": case.id,
         "triage_level": triage,
@@ -129,6 +163,7 @@ async def register(
         "duplicate_cases": duplicates,
         "precheck": {"ran": scope_type != ScopeType.REPO.value, "hits": precheck_hits},
         "report_path": str(report_path),
+        "handoff": handoff(case.id, "registered", auto_advance, next_tool="hosp_scan"),
     }
 
 

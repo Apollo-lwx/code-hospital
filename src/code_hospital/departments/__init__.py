@@ -1,4 +1,4 @@
-"""科室层：reception（导诊台）、scanner（检验科）。
+"""科室层：导诊、检验、坐诊、处方、药房。
 
-P1 起增补 clinic（坐诊+处方）、pharmacy（药师+护理）。
+护理与出院编排随后续阶段增补。算法核在 core.algorithms。
 """

@@ -1,0 +1,31 @@
+rules:
+  - id: hotspot.loop-io
+    languages: [python]
+    severity: WARNING
+    message: 循环里访问外部资源
+    patterns:
+      - pattern-inside: |
+          def $FUNC(...):
+              ...
+      - pattern-either:
+          - pattern-inside: |
+              for $I in $ITER:
+                  ...
+          - pattern-inside: |
+              while $COND:
+                  ...
+      - pattern-either:
+          - pattern: open(...)
+          - pattern: requests.$M(...)
+  - id: hotspot.unbounded-query
+    languages: [python]
+    severity: WARNING
+    message: 查询没有限制条数
+    patterns:
+      - pattern-inside: |
+          def $FUNC(...):
+              ...
+      - pattern: $CUR.execute($SQL)
+      - metavariable-regex:
+          metavariable: $SQL
+          regex: (?is).*select(?!.*\blimit\b).*
