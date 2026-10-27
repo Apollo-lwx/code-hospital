@@ -1,6 +1,9 @@
 - id: general
   name: 全科
   formulary: [debride, guard, seal, supply, contrast, repair]
+- id: security
+  name: 安全科
+  formulary: [seal, guard, repair, contrast]
 - id: python
   name: Python 语言科
   formulary: [debride, guard, split, rename, dedupe, contrast, repair]

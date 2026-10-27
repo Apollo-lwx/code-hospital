@@ -85,12 +85,17 @@ async def _ready(git_repo: str, *cls: type[ScannerAdapter], auto: bool = True) -
 async def test_draft_carries_rsi_prohibitions(git_repo, monkeypatch):
     async def fake(_root, task):
         assert "用药禁忌" in task
-        return [{"title": "禁止 eval", "content": "不要用 eval"}]
+        return {
+            "prohibitions": [{"title": "禁止 eval", "content": "不要用 eval"}],
+            "efficacy": [{"title": "疗效账", "content": "F401 autofix 成功 4 次，失败 1 次"}],
+        }
 
-    monkeypatch.setattr(rsi_bridge, "recall_prohibitions", fake)
+    monkeypatch.setattr("code_hospital.integrations.rsi.recall_for_prescribe", fake)
     case_id = await _ready(git_repo, SecretAdapter)
     draft = await prescriber.prescribe(case_id=case_id, project_root=git_repo)
+    assert "rsi_prohibitions" in draft, list(draft)
     assert draft["rsi_prohibitions"] == [{"title": "禁止 eval", "content": "不要用 eval"}]
+    assert draft["rsi_efficacy"][0]["title"] == "疗效账"
 
 
 async def test_diagnosis_gate_blocks_prescribe(git_repo):

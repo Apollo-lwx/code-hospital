@@ -44,7 +44,7 @@ def test_match_order_and_confidences():
     leaked = match_finding("gitleaks", "generic-api-key", "critical")
     assert leaked.formula.id == "seal"
     assert leaked.confidence == 0.92
-    assert leaked.specialty_id == "general"
+    assert leaked.specialty_id == "security"
 
     ruff_critical = match_finding("ruff", "S105", "critical")
     assert ruff_critical.formula.id == "seal"
@@ -90,6 +90,7 @@ def test_structure_ruler_keeps_function_span(tmp_path: Path):
     raws, limits = scan_structure(str(tmp_path), ["a.py"])
     spanned = next(row for row in raws if row["rule_id"] == "structure.function_lines")
     assert spanned["symbol"] == "big"
+    assert spanned["severity"] == "nit"
     assert spanned["line_start"] == 1
     assert spanned["line_end"] >= 80
     if shutil.which("lizard"):

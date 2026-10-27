@@ -1,13 +1,14 @@
 """报告渲染（契约 §5 模板定死）。
 
 已实现：挂号单（register）、检验报告（scan，PR 可贴）、诊断书（diagnose，模板归因）。
-所有 evidence 以代码块包裹（防 PR 评论二次注入）；位置一律仓库相对路径。
+所有 evidence 以代码块包裹（防 PR 评论二次注入）。位置标签用仓库相对路径，链接指向该文件的指定行。
 """
 
 from __future__ import annotations
 
 import datetime as _dt
 import re
+from pathlib import Path
 
 from .. import __version__
 from ..catalog.policy import SEVERITY_PLAIN
@@ -43,6 +44,8 @@ _RULE_IN_TEXT = re.compile(r"规则 ([A-Za-z0-9_.]+)")
 _RULE_PLAIN = {
     "F401": "没用到的导入",
     "F541": "f-string 里没有占位",
+    "F811": "重复定义了同一个名字",
+    "F821": "用了还没有定义的名字",
     "F841": "赋值了但没用到",
     "E501": "行太长",
     "I001": "import 没有排好序",
@@ -51,6 +54,48 @@ _RULE_PLAIN = {
     "structure.function_lines": "函数超过行数",
     "structure.file_lines": "文件超过行数",
     "structure.cyclomatic": "圈复杂度过高",
+    "security.exec": "执行任意代码",
+    "security.shell": "通过 shell 执行命令",
+    "security.deserialize": "不可信反序列化",
+    "security.sql-format": "SQL 被拼接",
+    "security.hardcoded-secret": "密钥写在源码里",
+    "security.tls-verify": "关闭了证书校验",
+    "security.weak-hash": "弱摘要算法",
+    "security.weak-random": "可预测的随机数",
+    "security.debug": "调试模式留在源码里",
+    "security.trust-html": "把字符串当成安全 HTML",
+    "security.dom-write": "把字符串写入页面",
+    "defect.swallowed": "异常被吃掉",
+    "defect.bare-except": "裸 except",
+    "defect.mutable-default": "可变默认参数",
+    "defect.identical-branches": "两个分支完全一样",
+    "defect.duplicate-key": "字典键重复",
+    "defect.self-compare": "自己和自己比较",
+    "defect.is-literal": "用 is 比较字面量",
+    "defect.unreachable": "后面的语句到不了",
+    "defect.empty-catch": "空的 catch",
+    "algo.nested-loop": "多层循环",
+    "algo.sort-in-loop": "循环里排序",
+    "algo.string-concat-loop": "循环里拼接字符串",
+    "algo.linear-membership": "循环里做成员判断",
+    "perf.loop-io": "循环里访问外部资源",
+    "perf.unbounded-query": "查询没有条数限制",
+    "supply.unpinned": "依赖没有钉死版本",
+    "supply.unpinned-vcs": "Git 依赖没有钉到提交",
+    "supply.http-source": "依赖走了明文 HTTP",
+    "supply.wildcard": "依赖版本是通配",
+    "supply.missing-lock": "没有锁文件",
+    "supply.known-vuln": "依赖有已知漏洞",
+    "test.uncovered-file": "没有对应测试",
+    "business.illegal-transition": "状态迁移不在契约里",
+    "business.money-float": "金额用了浮点数",
+    "business.missing-auth": "写操作没有权限校验",
+    "business.unverified-invariant": "业务规则待复核",
+    "severe.taint-sql": "外部输入流进了 SQL",
+    "severe.taint-command": "外部输入流进了命令",
+    "severe.taint-path": "外部输入流进了文件路径",
+    "severe.taint-request": "外部输入流进了对外请求",
+    "severe.review-impact": "改动的调用影响待复核",
 }
 _FORMULA_PLAIN = {
     "debride": "删掉确定多余的代码",
@@ -67,6 +112,14 @@ _FORMULA_PLAIN = {
 }
 
 
+def _visit_label(case: Case) -> str:
+    from ..catalog.visits import VISIT_LABELS
+
+    kind = getattr(case, "visit_kind", "") or "checkup"
+    label = VISIT_LABELS.get(kind, kind)
+    return f"{label}（{kind}）"
+
+
 def _iso(ts_ms: int) -> str:
     return _dt.datetime.fromtimestamp(ts_ms / 1000).astimezone().isoformat(timespec="seconds")
 
@@ -76,7 +129,7 @@ def _header(stage_name: str, case: Case, report_id: str, devices: str = "") -> s
         f"# {stage_name} · {case.title}",
         "",
         f"> case: `{case.id}` ｜ report: `{report_id}` ｜ round: {case.round}/{case.max_rounds}"
-        f" ｜ 分诊: {case.triage_level}",
+        f" ｜ 分诊: {case.triage_level} ｜ 号别: {_visit_label(case)}",
         f"> 时间: {_iso(case.updated_at)}"
         + (f" ｜ 设备: {devices}" if devices else ""),
         "",
@@ -140,7 +193,7 @@ def _style_lines(styled: list[tuple[str, list]], count_of) -> list[str]:
     return lines
 
 
-def _scan_cards(findings: list[Finding]) -> list[str]:
+def _scan_cards(case: Case, findings: list[Finding]) -> list[str]:
     tagged = [(f.rule_id, f) for f in findings]
     opened, styled = _bucket(tagged, lambda item: item[1].severity)
     lines = [
@@ -161,7 +214,7 @@ def _scan_cards(findings: list[Finding]) -> list[str]:
             "",
         ]
         sample = rows[:_PREVIEW]
-        places = "、".join(f"`{f.file_path}:{f.line_start}`" for f in sample)
+        places = "、".join(_file_link(case.project_root, f.file_path, f.line_start) for f in sample)
         lines.append(f"- 举例: {places}")
         extra = len(rows) - len(sample)
         if extra:
@@ -188,7 +241,7 @@ def _cluster_rule(diagnosis, members: list[Finding]) -> str:
     return diagnosis.category
 
 
-def _diagnose_cards(clusters: list[tuple]) -> list[str]:
+def _diagnose_cards(case: Case, clusters: list[tuple]) -> list[str]:
     tagged = [(_cluster_rule(diagnosis, members), (diagnosis, members)) for diagnosis, members in clusters]
     opened, styled = _bucket(tagged, lambda item: item[1][0].severity)
     lines = [
@@ -217,7 +270,9 @@ def _diagnose_cards(clusters: list[tuple]) -> list[str]:
         ]
         sample = rows[:_PREVIEW]
         if sample:
-            lines.append("- 举例: " + "、".join(f"`{f.file_path}:{f.line_start}`" for f in sample))
+            lines.append("- 举例: " + "、".join(
+                _file_link(case.project_root, f.file_path, f.line_start) for f in sample
+            ))
         if len(rows) > _PREVIEW:
             lines.append(f"- 另有 {len(rows) - _PREVIEW} 处，见下方问题分组")
         lines.append("")
@@ -226,8 +281,28 @@ def _diagnose_cards(clusters: list[tuple]) -> list[str]:
     return lines
 
 
+def _file_link(root: str, file_path: str, line: int | None = None) -> str:
+    """报告里的文件位置。点开后跳到仓库里的那一行。"""
+    if not file_path or file_path in {"—", "-"}:
+        return "—"
+    shown = file_path.replace("\\", "/")
+    label = f"{shown}:{line}" if line else shown
+    target = Path(file_path)
+    if not target.is_absolute():
+        target = Path(root) / file_path
+    try:
+        uri = target.resolve().as_uri()
+    except OSError:
+        uri = target.as_uri()
+    if line:
+        uri = f"{uri}#L{int(line)}"
+    return f"[{label}]({uri})"
+
+
 def _severity_from_rule(rule_id: str) -> str:
     """处方项入库前会丢掉 severity。展示时按规则补一档，和检验的分档对齐。"""
+    if rule_id in {"structure.function_lines", "structure.file_lines"}:
+        return Severity.NIT.value
     if rule_id.startswith("structure."):
         return Severity.MAJOR.value
     head = rule_id.split(".")[-1]
@@ -253,15 +328,18 @@ def _item_rule(item: dict) -> str:
     return item.get("formula_id") or "未命名"
 
 
-def _item_place(item: dict) -> str:
-    if item.get("target_symbol"):
-        return f"`{item.get('target_file') or '—'}` · {item['target_symbol']}"
-    if item.get("target_file"):
-        return f"`{item['target_file']}`"
+def _item_place(root: str, item: dict) -> str:
+    spans = item.get("scope_lines") or []
+    line = spans[0][0] if spans and spans[0] else None
+    path = item.get("target_file") or ""
+    if item.get("target_symbol") and path:
+        return f"{_file_link(root, path, line)} · {item['target_symbol']}"
+    if path:
+        return _file_link(root, path, line)
     return "—"
 
 
-def _prescribe_cards(items: list[dict]) -> list[str]:
+def _prescribe_cards(root: str, items: list[dict]) -> list[str]:
     primaries = [item for item in items if not item.get("parent_formula_id")]
     lines = [
         "## 按规则看",
@@ -285,7 +363,7 @@ def _prescribe_cards(items: list[dict]) -> list[str]:
         ]
         places: list[str] = []
         for item in rows:
-            place = _item_place(item)
+            place = _item_place(root, item)
             if place not in places:
                 places.append(place)
             if len(places) == _PREVIEW:
@@ -328,11 +406,13 @@ def render_register_report(case: Case, report_id: str, precheck_hits: int, dupli
     parts = [
         _header("挂号单", case, report_id),
         "## 就诊信息\n",
-        "| 范围类型 | 分诊级别 | 疗程上限 | 预检急诊特征 |",
-        "|---|---|---|---|",
-        f"| {case.scope_type} | {case.triage_level} | {case.max_rounds} | {precheck_hits} 处 |",
+        "| 范围类型 | 分诊级别 | 号别 | 疗程上限 | 预检急诊特征 |",
+        "|---|---|---|---|---|",
+        f"| {case.scope_type} | {case.triage_level} | {_visit_label(case)} | {case.max_rounds} | {precheck_hits} 处 |",
         "",
     ]
+    if getattr(case, "chief_complaint", ""):
+        parts += [f"主诉：{case.chief_complaint}", ""]
     if duplicates:
         parts += [
             "## 病例查重（历史就诊记录）\n",
@@ -352,6 +432,7 @@ def render_scan_report(
     findings: list[Finding],
     limitations: list[str],
     memory_context: dict | None = None,
+    checks: list[dict] | None = None,
 ) -> str:
     counts = {sev: 0 for sev in _SEV_LABEL}
     for f in findings:
@@ -377,11 +458,11 @@ def render_scan_report(
         f" | {counts['minor']} | {counts['nit'] + counts['info']} |",
         "",
         "> 这五档是检查工具自己的分法，不是漏洞通告里的超危、高危。"
-        "必须先处理指密钥或同类安全项；明确缺陷指已经能指出的代码问题，例如没用到的导入、超过行数；"
-        "一般问题偏格式；风格建议是可改可不改的写法；参考信息并进「风格与提示」。",
+        "必须先处理指密钥或同类安全项；明确缺陷指已经能指出的代码问题，例如没用到的导入；"
+        "一般问题偏格式；风格建议是可改可不改的写法，函数超过行数和文件超过行数也算在这里；参考信息并进「风格与提示」。",
         "",
     ]
-    parts += _scan_cards(findings)
+    parts += _scan_cards(case, findings)
     parts += [
         "## 发现明细（按严重度排序）\n",
         "| # | 严重度 | 规则 | 位置 | 摘要 | 病史 |",
@@ -391,7 +472,7 @@ def render_scan_report(
         msg = f.message.replace("|", "\\|").replace("\n", " ")[:80]
         history = f"复发×{len(f.history_refs)}" if f.history_refs else "初发"
         parts.append(
-            f"| {i} | {_SEV_LABEL.get(f.severity, f.severity)} | {f.rule_id} | `{f.file_path}:{f.line_start}` | {msg} | {history} |"
+            f"| {i} | {_SEV_LABEL.get(f.severity, f.severity)} | {f.rule_id} | {_file_link(case.project_root, f.file_path, f.line_start)} | {msg} | {history} |"
         )
     if findings:
         parts.append("\n> 明细逐条列出全部位置。卡片上每种规则只举了前 3 处。")
@@ -401,7 +482,7 @@ def render_scan_report(
         parts += ["", "## 证据", ""]
         for i, f in enumerate(evidenced, 1):
             parts += [
-                f"### {i}. `{f.file_path}:{f.line_start}` · {f.rule_id}",
+                f"### {i}. {_file_link(case.project_root, f.file_path, f.line_start)} · {f.rule_id}",
                 "",
                 "```",
                 f.evidence,
@@ -425,6 +506,8 @@ def render_scan_report(
             parts.append(f"- [{item['type']}·pending] **{item['title']}**：{item['snippet']}")
         parts.append("")
 
+    if checks:
+        parts += _check_section(checks)
     parts += [
         "## 覆盖与限制",
         "",
@@ -432,6 +515,42 @@ def render_scan_report(
     parts += [f"- {ln}" for ln in limitations] if limitations else ["- 无"]
     parts.append(_footer(case))
     return "\n".join(parts)
+
+
+def _check_section(checks: list[dict]) -> list[str]:
+    parts = [
+        "## 检查事项",
+        "",
+        "事项按名册顺序执行。代码和外部工具先交事实，宿主 LLM 再交判断。"
+        "待交卷的事项不能写成已经分析过。",
+        "",
+    ]
+    labels = {"code": "代码", "external": "外部工具", "llm": "宿主 LLM"}
+    status_labels = {
+        "done": "已交卷",
+        "pending": "待交卷",
+        "absent": "未到岗",
+        "partial": "只到岗一部分",
+        "open": "待交卷",
+        "blocked": "被前置挡住",
+    }
+    for item in checks:
+        parts.append(f"### {item['id']} · {item['question']}")
+        parts.append("")
+        parts.append(f"- 状态：{status_labels.get(item['status'], item['status'])}")
+        if item.get("artifact"):
+            parts.append(f"- 要交出：{item['artifact']}")
+        if item.get("note"):
+            parts.append(f"- {item['note']}")
+        for executor in item.get("executors") or []:
+            label = labels.get(executor["kind"], executor["kind"])
+            state = status_labels.get(executor["status"], executor["status"])
+            parts.append(f"- {label}：{state}")
+            text = (executor.get("text") or "").strip()
+            if text:
+                parts += ["", "```", text[:1500], "```", ""]
+        parts.append("")
+    return parts
 
 
 def render_diagnose_report(
@@ -457,12 +576,14 @@ def render_diagnose_report(
         parts += ["> 宿主声明将自行增强解读。本诊断书仍是模板归因，未调用模型。", ""]
     else:
         parts += ["> 分组和处置建议来自规则表，不是模型判断。", ""]
-    parts += _diagnose_cards(clusters)
+    parts += _diagnose_cards(case, clusters)
     parts += ["## 问题分组", ""]
     if not clusters:
         parts.append("没有发现。")
     for i, (diagnosis, members) in enumerate(clusters, 1):
-        places = "、".join(f"`{f.file_path}:{f.line_start}`" for f in members[:5])
+        places = "、".join(
+            _file_link(case.project_root, f.file_path, f.line_start) for f in members[:5]
+        )
         if len(members) > 5:
             places += f" 等 {len(members)} 处"
         review = "⚠ 待复核" if diagnosis.confidence < 0.5 else f"{diagnosis.confidence:.2f}"
@@ -526,7 +647,7 @@ def render_reading_report(
         path, symbol, line = _lesion_head(pairs)
         files.setdefault(path or "—", []).append((line, symbol, pairs))
     for path in sorted(files, key=lambda name: (name == "—", name)):
-        parts += [f"### `{path}`", ""]
+        parts += [f"### {_file_link(case.project_root, path)}", ""]
         functions = sorted(
             ((line, symbol, pairs) for line, symbol, pairs in files[path] if symbol),
             key=lambda row: (row[0], row[1]),
@@ -541,7 +662,7 @@ def render_reading_report(
             else:
                 styled.extend(pairs)
         for line, symbol, pairs in functions:
-            parts += [f"#### `{symbol}`（{line} 行）", ""]
+            parts += [f"#### {_file_link(case.project_root, path, line)} · `{symbol}`", ""]
             parts += _lesion_lines(pairs, items_by_diag)
             parts.append("")
         if loose:
@@ -624,6 +745,27 @@ def _lesion_lines(pairs: list[tuple], items_by_diag: dict[str, list[dict]]) -> l
     return lines or ["- 没有要处理的问题"]
 
 
+def _efficacy_lines(rows: list[dict]) -> list[str]:
+    if not rows:
+        return []
+    from ..core.efficacy import posterior
+
+    lines = ["## 以往疗效", "", "只作参考。这次的处理顺序仍按名册。", ""]
+    for row in rows:
+        success = int(row.get("success") or 0)
+        failure = int(row.get("failure") or 0)
+        if success + failure <= 0:
+            continue
+        percent = round(100 * posterior(success, failure))
+        lines.append(
+            f"- {_card_title(row.get('rule_id') or '')}"
+            f" · {_METHOD_PLAIN.get(row.get('method') or '', row.get('method') or '')}"
+            f"：成功 {success} 次，失败 {failure} 次，估计成功率 {percent}%"
+        )
+    lines.append("")
+    return lines
+
+
 def render_prescribe_report(case: Case, prescription_id: str, rx: dict, report_path: str) -> str:
     """处方（契约 §5.5）。confirmation 正文不含仓库源码。"""
     items = rx.get("items") or []
@@ -641,7 +783,8 @@ def render_prescribe_report(case: Case, prescription_id: str, rx: dict, report_p
         ),
         "",
     ]
-    parts += _prescribe_cards(items)
+    parts += _prescribe_cards(case.project_root, items)
+    parts += _efficacy_lines(rx.get("efficacy") or [])
     parts += [
         "## 处理清单（按顺序）\n",
         "| # | 改哪里 | 怎么处理 | 风险 | 怎么算改完 | 允许碰到的范围 |",
@@ -653,10 +796,8 @@ def render_prescribe_report(case: Case, prescription_id: str, rx: dict, report_p
     for it in items:
         mark = "⚠ " if it["risk"] == "high" else ""
         expect = it["acceptance"].get("expect", "").replace("|", "\\|")
-        scope = ", ".join(f"`{p}`" for p in it["scope_paths"]) or "—"
-        target = f"`{it['target_file']}`" if it["target_file"] else "—"
-        if it["target_symbol"]:
-            target += f" · {it['target_symbol']}"
+        scope = ", ".join(_file_link(case.project_root, p) for p in it["scope_paths"]) or "—"
+        target = _item_place(case.project_root, it)
         parts.append(
             f"| {mark}{it['seq']} | {target} | {_METHOD_PLAIN.get(it['method'], it['method'])}"
             f" | {_RISK_PLAIN.get(it['risk'], it['risk'])} | {expect} | {scope} |"
@@ -667,7 +808,7 @@ def render_prescribe_report(case: Case, prescription_id: str, rx: dict, report_p
     if manuals:
         parts += ["## 需要你自己改", ""]
         for it in manuals:
-            parts.append(f"- `{it['target_file'] or '—'}`：{it['instructions'][:180]}")
+            parts.append(f"- {_item_place(case.project_root, it)}：{it['instructions'][:180]}")
         parts.append("")
     parts.append(_footer(case))
     _ = report_path

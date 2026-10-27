@@ -29,6 +29,9 @@ CREATE TABLE IF NOT EXISTS cases (
     max_rounds INTEGER NOT NULL DEFAULT 3,
     auto_advance INTEGER NOT NULL DEFAULT 0,
     pending_gate TEXT NOT NULL DEFAULT '',
+    visit_kind TEXT NOT NULL DEFAULT 'checkup',
+    chief_complaint TEXT NOT NULL DEFAULT '',
+    coverage_json TEXT NOT NULL DEFAULT '{}',
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
 );
@@ -56,7 +59,10 @@ CREATE TABLE IF NOT EXISTS findings (
     first_seen_round INTEGER NOT NULL DEFAULT 1,
     last_seen_round INTEGER NOT NULL DEFAULT 1,
     contract_id TEXT NOT NULL DEFAULT '',
-    fixable INTEGER NOT NULL DEFAULT 0
+    fixable INTEGER NOT NULL DEFAULT 0,
+    verdict TEXT NOT NULL DEFAULT '',
+    unresolved TEXT NOT NULL DEFAULT '',
+    attack_class TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_findings_case_fp ON findings(case_id, fingerprint);
 CREATE INDEX IF NOT EXISTS idx_findings_fp ON findings(fingerprint);
@@ -162,6 +168,13 @@ def _json_list(row: aiosqlite.Row, key: str) -> list:
     return json.loads(row[key] or "[]")
 
 
+def _json_object(row: aiosqlite.Row, key: str) -> dict:
+    if key not in row.keys():
+        return {}
+    loaded = json.loads(row[key] or "{}")
+    return loaded if isinstance(loaded, dict) else {}
+
+
 class Database:
     def __init__(self, project_root: str) -> None:
         self.project_root = project_root
@@ -213,6 +226,13 @@ class Database:
             await self.conn.execute(
                 "ALTER TABLE findings ADD COLUMN fixable INTEGER NOT NULL DEFAULT 0"
             )
+        for name, ddl in (
+            ("verdict", "TEXT NOT NULL DEFAULT ''"),
+            ("unresolved", "TEXT NOT NULL DEFAULT ''"),
+            ("attack_class", "TEXT NOT NULL DEFAULT ''"),
+        ):
+            if name not in finding_cols:
+                await self.conn.execute(f"ALTER TABLE findings ADD COLUMN {name} {ddl}")
         await self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_findings_content ON findings(content_key)"
         )
@@ -233,6 +253,9 @@ class Database:
             ("requested_instruments_json", "TEXT NOT NULL DEFAULT '[]'"),
             ("scan_orders_json", "TEXT NOT NULL DEFAULT '[]'"),
             ("instrument_notes_json", "TEXT NOT NULL DEFAULT '[]'"),
+            ("visit_kind", "TEXT NOT NULL DEFAULT 'checkup'"),
+            ("chief_complaint", "TEXT NOT NULL DEFAULT ''"),
+            ("coverage_json", "TEXT NOT NULL DEFAULT '{}'"),
         ):
             if name not in cols:
                 await self.conn.execute(f"ALTER TABLE cases ADD COLUMN {name} {ddl}")
@@ -267,8 +290,8 @@ class Database:
             "INSERT INTO cases (id, project_root, title, scope_type, scope_json,"
             " triage_level, status, round, max_rounds, auto_advance, pending_gate,"
             " requested_specialties_json, requested_instruments_json, scan_orders_json,"
-            " instrument_notes_json, created_at, updated_at)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " instrument_notes_json, visit_kind, chief_complaint, created_at, updated_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 case.id, case.project_root, case.title, case.scope_type,
                 json.dumps(case.scope.model_dump(), ensure_ascii=False),
@@ -278,6 +301,8 @@ class Database:
                 json.dumps(case.requested_instruments, ensure_ascii=False),
                 json.dumps(case.scan_orders, ensure_ascii=False),
                 json.dumps(case.instrument_notes, ensure_ascii=False),
+                case.visit_kind or "checkup",
+                (case.chief_complaint or "")[:500],
                 case.created_at, case.updated_at,
             ),
         )
@@ -297,8 +322,24 @@ class Database:
             requested_instruments=_json_list(row, "requested_instruments_json"),
             scan_orders=_json_list(row, "scan_orders_json"),
             instrument_notes=_json_list(row, "instrument_notes_json"),
+            visit_kind=row["visit_kind"] if "visit_kind" in keys else "checkup",
+            chief_complaint=row["chief_complaint"] if "chief_complaint" in keys else "",
+            coverage=_json_object(row, "coverage_json"),
             created_at=row["created_at"], updated_at=row["updated_at"],
         )
+
+    async def prior_coverage(self, project_root: str, exclude_case_id: str) -> dict:
+        """同一仓库上一场已经写下的覆盖账。没有则是空字典。"""
+        cur = await self.conn.execute(
+            "SELECT coverage_json FROM cases WHERE project_root=? AND id!=?"
+            " AND coverage_json NOT IN ('', '{}', '[]') ORDER BY updated_at DESC LIMIT 1",
+            (project_root, exclude_case_id),
+        )
+        row = await cur.fetchone()
+        if row is None:
+            return {}
+        loaded = json.loads(row["coverage_json"] or "{}")
+        return loaded if isinstance(loaded, dict) else {}
 
     async def get_case(self, case_id: str) -> Case | None:
         cur = await self.conn.execute("SELECT * FROM cases WHERE id=?", (case_id,))
@@ -383,14 +424,15 @@ class Database:
             "INSERT INTO findings (id, case_id, report_id, tool, rule_id, severity,"
             " file_path, line_start, line_end, symbol, message, evidence, fingerprint,"
             " content_key, context_anchor, status, origin, first_seen_round, last_seen_round,"
-            " contract_id, fixable)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " contract_id, fixable, verdict, unresolved, attack_class)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             [
                 (
                     f.id, f.case_id, f.report_id, f.tool, f.rule_id, f.severity,
                     f.file_path, f.line_start, f.line_end, f.symbol, f.message,
                     f.evidence, f.fingerprint, f.content_key, f.context_anchor, f.status, f.origin,
                     f.first_seen_round, f.last_seen_round, f.contract_id, int(f.fixable),
+                    f.verdict, f.unresolved, f.attack_class,
                 )
                 for f in findings
             ],
@@ -710,6 +752,32 @@ class Database:
             ),
         )
         await self.conn.commit()
+
+    async def list_efficacy_rows(self) -> list[dict]:
+        """本仓库已有药味的规则、剂型和结果。供开方时现算疗效，不写回。"""
+        cur = await self.conn.execute(
+            "SELECT d.category AS rule_id, pi.method AS method, doses.result AS result,"
+            " pi.acceptance_json AS acceptance_json"
+            " FROM doses"
+            " JOIN prescription_items pi ON pi.id = doses.item_id"
+            " JOIN diagnoses d ON d.id = pi.diagnosis_id"
+            " WHERE doses.result IN ('success', 'failed')",
+        )
+        rows = []
+        for row in await cur.fetchall():
+            try:
+                acceptance = json.loads(row["acceptance_json"] or "{}")
+            except json.JSONDecodeError:
+                acceptance = {}
+            if not isinstance(acceptance, dict):
+                acceptance = {}
+            rows.append({
+                "rule_id": row["rule_id"],
+                "method": row["method"],
+                "result": row["result"],
+                "acceptance": acceptance,
+            })
+        return rows
 
     async def latest_dose(self, item_id: str) -> dict | None:
         cur = await self.conn.execute(

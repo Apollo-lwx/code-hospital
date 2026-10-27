@@ -31,7 +31,7 @@
   binary: gitleaks
   builtin: false
   can_autofix: false
-  specialty_id: general
+  specialty_id: security
   requires_contract: false
   limitation: gitleaks 未到岗
 - id: structure-ruler
@@ -118,3 +118,123 @@
   specialty_id: python
   requires_contract: false
   limitation: 类型尺未到岗
+- id: security-ruler
+  concern: 命令执行、反序列化、SQL 拼接、硬编码密钥、关闭证书校验
+  extensions: [py, java, js, jsx, ts, tsx, go]
+  triage: []
+  activation: on_request
+  engine: builtin
+  binary: ""
+  builtin: true
+  can_autofix: false
+  specialty_id: security
+  requires_contract: false
+  limitation: 安全尺只覆盖能从语法上确定的写法
+- id: defect-ruler
+  concern: 吞掉的异常、可变默认参数、相同分支、不可达代码、自己和自己比较
+  extensions: [py, java]
+  triage: []
+  activation: on_request
+  engine: builtin
+  binary: ""
+  builtin: true
+  can_autofix: false
+  specialty_id: python
+  requires_contract: false
+  limitation: 缺陷尺不跨函数推断业务不变量
+- id: perf-ruler
+  concern: 循环里的外部调用和无界查询
+  extensions: [py]
+  triage: []
+  activation: on_request
+  engine: builtin
+  binary: ""
+  builtin: true
+  can_autofix: false
+  specialty_id: performance
+  requires_contract: false
+  limitation: 性能尺只看语法上的热点，不测量耗时
+- id: algo-ruler
+  concern: 循环里排序、字符串拼接、成员扫描和三层以上循环
+  extensions: [py]
+  triage: []
+  activation: on_request
+  engine: builtin
+  binary: ""
+  builtin: true
+  can_autofix: false
+  specialty_id: performance
+  requires_contract: false
+  limitation: 算法尺根据写法估计复杂度，不证明渐近界
+- id: supply-ruler
+  concern: 未钉版本、明文源、缺少锁文件；扫描器在岗时再查已知漏洞
+  extensions: []
+  triage: []
+  activation: on_request
+  engine: builtin
+  binary: ""
+  builtin: true
+  can_autofix: false
+  specialty_id: general
+  requires_contract: false
+  limitation: 已知漏洞需要本机的 pip-audit 或 osv-scanner
+- id: business-ruler
+  concern: 已写明的状态机迁移、金额字段是否用了浮点数、写操作是否做了约定的权限校验
+  extensions: [py, java]
+  triage: []
+  activation: on_request
+  engine: builtin
+  binary: ""
+  builtin: true
+  can_autofix: false
+  specialty_id: general
+  requires_contract: true
+  limitation: 业务未查：没有写下来的状态机、金额字段或权限校验
+- id: taint-ruler
+  concern: 函数内从请求或环境流进 SQL、命令、路径、对外请求
+  extensions: [py]
+  triage: []
+  activation: on_request
+  engine: builtin
+  binary: ""
+  builtin: true
+  can_autofix: false
+  specialty_id: security
+  requires_contract: false
+  limitation: 污点只在单个函数内跟着赋值走，跨函数没有追
+- id: impact-review
+  concern: 改过的函数被谁调用，以及数据归属、失败返回、状态是否跳步
+  extensions: [py]
+  triage: []
+  activation: on_request
+  engine: builtin
+  binary: ""
+  builtin: true
+  can_autofix: false
+  specialty_id: general
+  requires_contract: false
+  limitation: 调用影响只列调用方，不能写成逻辑正常
+- id: spotbugs
+  concern: Java 字节码上的缺陷模式，如空指针和资源问题
+  extensions: [java]
+  triage: []
+  activation: on_request
+  engine: spotbugs
+  binary: spotbugs
+  builtin: false
+  can_autofix: false
+  specialty_id: java
+  requires_contract: false
+  limitation: spotbugs 未到岗，findbugs 也未到岗
+- id: test-gap
+  concern: 范围内的源文件没有同名测试文件
+  extensions: [py]
+  triage: []
+  activation: on_request
+  engine: builtin
+  binary: ""
+  builtin: true
+  can_autofix: false
+  specialty_id: general
+  requires_contract: false
+  limitation: 测试尺只认 test_模块.py 这几种文件名，不执行测试

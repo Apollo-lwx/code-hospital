@@ -15,6 +15,7 @@ from ..catalog.formulary import (
     build_conditions,
     effective_method,
     match_finding,
+    opening_verdict,
     scan_orders_for,
     scope_key,
 )
@@ -125,7 +126,9 @@ def cluster_findings(
         head = min(members, key=lambda f: (SEVERITY_ORDER.get(f.severity, 9), f.line_start))
         severity = _worst(members)
         matched = match_finding(
-            head.tool, head.rule_id, severity, fixable=bool(getattr(head, "fixable", False)),
+            head.tool, head.rule_id, severity,
+            fixable=bool(getattr(head, "fixable", False)),
+            verdict=opening_verdict(members),
         )
         fixability = matched.method
         if matched.formula is not None:

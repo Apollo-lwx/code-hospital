@@ -53,12 +53,15 @@ def test_scan_cards_preview_three_and_keep_every_row():
     head, _, tail = md.partition("## 发现明细")
     assert "没用到的导入" in head
     assert "另有 1 处" in head
-    assert head.count("`a.py:") == 3
+    assert head.count("a.py:") == 3
+    assert head.count("#L") == 3
     assert "style.py" not in head
     assert "import 没有排好序" in head
-    assert "`style.py:9`" in tail
+    assert "style.py:9" in tail
+    assert "#L9" in tail
     for line in range(1, 5):
-        assert f"`a.py:{line}`" in tail
+        assert f"a.py:{line}" in tail
+        assert f"#L{line}" in tail
 
 
 def test_prescribe_card_nests_check_step_without_dropping_rows():
@@ -136,7 +139,7 @@ def test_reading_page_groups_one_function():
         {"diagnosis_id": "d-imp", "method": "autofix", "parent_formula_id": ""},
     ]
     md = render_reading_report(case, clusters, items)
-    body = md.split("#### `ingest`", 1)[1]
+    body = md.split("ingest", 1)[1]
     assert "函数超过行数" in body
     assert "没用到的导入" in body
     assert "改完要核对行为" in body

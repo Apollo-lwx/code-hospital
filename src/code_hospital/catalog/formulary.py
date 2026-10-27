@@ -13,8 +13,9 @@ import yaml
 
 CURRENT_PHASE = 1
 SPECIALTY_IDS = (
-    "general", "python", "java", "structure", "architecture", "design", "performance",
+    "general", "security", "python", "java", "structure", "architecture", "design", "performance",
 )
+_SECURITY_TOOLS = frozenset({"gitleaks", "security-ruler", "taint-ruler"})
 REQUESTABLE_INSTRUMENTS = frozenset({"type-ruler"})
 _FUNCTION_RULES = frozenset({"structure.function_lines", "structure.cyclomatic"})
 
@@ -22,7 +23,7 @@ _FUNCTION_RULES = frozenset({"structure.function_lines", "structure.cyclomatic"}
 _ROUTES: tuple[tuple[str, str, str], ...] = (
     ("ruff", "*", "python"),
     ("semgrep", "*", "general"),
-    ("gitleaks", "*", "general"),
+    ("gitleaks", "*", "security"),
     ("structure-ruler", "structure.", "structure"),
     ("eslint", "*", "general"),
     ("jscpd", "*", "structure"),
@@ -30,6 +31,17 @@ _ROUTES: tuple[tuple[str, str, str], ...] = (
     ("layer-ruler", "*", "architecture"),
     ("hotspot-ruler", "hotspot.", "performance"),
     ("type-ruler", "*", "python"),
+    ("security-ruler", "security.", "security"),
+    ("defect-ruler", "defect.empty-catch", "java"),
+    ("defect-ruler", "defect.", "python"),
+    ("perf-ruler", "perf.", "performance"),
+    ("algo-ruler", "algo.", "performance"),
+    ("supply-ruler", "supply.", "general"),
+    ("test-gap", "test.", "general"),
+    ("business-ruler", "business.", "general"),
+    ("taint-ruler", "severe.taint-", "security"),
+    ("impact-review", "severe.review-", "general"),
+    ("spotbugs", "*", "java"),
 )
 
 
@@ -118,9 +130,21 @@ def instruments() -> dict[str, dict]:
     return load()[2]
 
 
+def opening_verdict(members) -> str:
+    """待验证和已排除不入方。同一簇里有一条被挡住，整簇都不开药。"""
+    rank = {"rejected": 0, "needs_validation": 1}
+    blocked = [getattr(item, "verdict", "") or "" for item in members]
+    blocked = [item for item in blocked if item in rank]
+    if not blocked:
+        return ""
+    return min(blocked, key=lambda item: rank[item])
+
+
 def route(tool: str, rule_id: str, severity: str) -> str:
-    """一条发现的接诊专科。critical 与 gitleaks 先改到全科。"""
-    if tool == "gitleaks" or severity == "critical":
+    """一条发现的接诊专科。安全科优先于 critical 封存；其余 critical 仍改到全科。"""
+    if tool in _SECURITY_TOOLS:
+        return "security"
+    if severity == "critical":
         return "general"
     best = (-1, "general")
     for inst, pattern, specialty in _ROUTES:
@@ -128,7 +152,9 @@ def route(tool: str, rule_id: str, severity: str) -> str:
             continue
         if pattern == "*":
             rank = 0
-        elif pattern.endswith(".") and rule_id.startswith(pattern):
+        elif pattern == rule_id:
+            rank = 2
+        elif pattern.endswith((".", "-")) and rule_id.startswith(pattern):
             rank = 1
         else:
             continue
@@ -179,10 +205,13 @@ def _confidence(formula: Formula, tool: str) -> float:
 def match_finding(
     tool: str, rule_id: str, severity: str,
     specialty_id: str | None = None, fixable: bool = False,
+    verdict: str = "",
 ) -> Match:
     """按 §4.3 的顺序从该专科药柜里选主药。对不上则待复核。"""
     books, specs, _instruments = load()
     specialty_id = specialty_id or route(tool, rule_id, severity)
+    if verdict in {"needs_validation", "rejected"}:
+        return Match(None, specialty_id, 0.40, False)
     cabinet = [
         books[fid]
         for fid in specs[specialty_id]["formulary"]
@@ -190,7 +219,7 @@ def match_finding(
     ]
     if tool == "gitleaks" or severity == "critical":
         seal = next(f for f in cabinet if f.id == "seal")
-        return Match(seal, "general", _confidence(seal, tool), True)
+        return Match(seal, specialty_id, _confidence(seal, tool), True)
 
     if tool == "eslint" and fixable and severity != "critical":
         debride = next((item for item in cabinet if item.id == "debride"), None)
@@ -351,11 +380,31 @@ def _condition(locus: dict, requested: list[str]) -> dict:
     }
 
 
-def selected_instrument_ids(triage: str, files: list[str], requested_specialties: list[str], requested_instruments: list[str]) -> list[str]:
-    """初检套餐。点名的 on_request 仪器不在这里，留给检查单。"""
-    suffixes = {Path(path).suffix.lstrip(".").lower() for path in files}
+def _file_suffixes(files: list[str]) -> set[str]:
+    return {Path(path).suffix.lstrip(".").lower() for path in files}
+
+
+def _fits_files(inst: dict, suffixes: set[str]) -> bool:
+    exts = {str(item).lstrip(".").lower() for item in (inst.get("extensions") or [])}
+    if not exts or not suffixes:
+        return True
+    return bool(suffixes & exts)
+
+
+def selected_instrument_ids(
+    triage: str,
+    files: list[str],
+    requested_specialties: list[str],
+    requested_instruments: list[str],
+    visit_kind: str = "checkup",
+) -> list[str]:
+    """初检套餐。号别决定加做哪些深度尺；点名的类型尺仍留给检查单。"""
+    from .visits import panel
+
+    suffixes = _file_suffixes(files)
+    catalog = instruments()
     chosen: list[str] = []
-    for inst in instruments().values():
+    for inst in catalog.values():
         if inst["activation"] != "package":
             continue
         if triage == "emergency":
@@ -366,14 +415,25 @@ def selected_instrument_ids(triage: str, files: list[str], requested_specialties
             continue
         if triage not in (inst.get("triage") or []):
             continue
-        exts = set(inst.get("extensions") or [])
-        if exts and suffixes and not (suffixes & exts):
+        if not _fits_files(inst, suffixes):
             continue
         chosen.append(inst["id"])
     if triage == "checkup" and "architecture" in requested_specialties:
         chosen.append("layer-ruler")
+    mode, extra = panel(visit_kind or "checkup")
     # requested_instruments 里的类型尺不进初检，避免和「点名专科不等于点名仪器」搅在一起。
     _ = requested_instruments
+    if mode == "only":
+        focused = [
+            inst_id for inst_id in extra
+            if inst_id in catalog and _fits_files(catalog[inst_id], suffixes)
+        ]
+        return focused
+    for inst_id in extra:
+        if inst_id in chosen or inst_id not in catalog:
+            continue
+        if _fits_files(catalog[inst_id], suffixes):
+            chosen.append(inst_id)
     return chosen
 
 

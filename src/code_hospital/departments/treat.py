@@ -96,6 +96,7 @@ async def treat(
     force: bool = False,
     requested_specialties: list[str] | None = None,
     requested_instruments: list[str] | None = None,
+    visit_kind: str = "checkup",
     project_root: str = "",
     timeout_ms: int = 120_000,
     progress: ProgressFn | None = None,
@@ -121,6 +122,7 @@ async def treat(
             auto_advance=True,
             requested_specialties=requested_specialties,
             requested_instruments=requested_instruments,
+            visit_kind=visit_kind,
             project_root=root,
         )
         if _paused(opened):

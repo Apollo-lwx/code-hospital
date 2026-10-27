@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import shlex
 from pathlib import Path
 
@@ -106,6 +107,28 @@ def save_detected(root: str, detected: list[dict]) -> dict[str, str]:
     return {str(key): str(value) for key, value in commands.items()}
 
 
+def acceptance_argv(
+    command: str,
+    alias: str,
+    scope_paths: list[str] | None = None,
+    rule_id: str = "",
+) -> list[str]:
+    """白名单命令拆成参数。lint 只核对本味范围；test 等别名保持整段命令。"""
+    argv = shlex.split(command, posix=(os.name != "nt"))
+    if alias != "lint":
+        return argv
+    extra: list[str] = []
+    name = Path(argv[0]).name.lower() if argv else ""
+    if rule_id and name in {"ruff", "ruff.exe"} and "--select" not in argv:
+        if re.fullmatch(r"[A-Za-z][A-Za-z0-9]+", rule_id):
+            extra.extend(["--select", rule_id])
+    for rel in scope_paths or []:
+        cleaned = str(rel).replace("\\", "/").strip()
+        if cleaned and cleaned not in argv and cleaned not in extra:
+            extra.append(cleaned)
+    return [*argv, *extra]
+
+
 def scrub_env() -> dict[str, str]:
     kept: dict[str, str] = {}
     for key, value in os.environ.items():
@@ -118,14 +141,23 @@ def scrub_env() -> dict[str, str]:
     return kept
 
 
-async def run_alias(root: str, alias: str) -> dict:
-    """执行一个已确认别名。未入白名单或含元字符时不启动进程。"""
+async def run_alias(
+    root: str,
+    alias: str,
+    scope_paths: list[str] | None = None,
+    rule_id: str = "",
+) -> dict:
+    """执行一个已确认别名。未入白名单或含元字符时不启动进程。
+
+    别名 lint 会带上本味 scope_paths。命令是 ruff 且给出规则号时再加 --select。
+    出院门禁不传范围，仍按白名单整段执行。
+    """
     command = load_commands(root).get(alias, "")
     if not command:
         return {"verdict": "skipped", "detail": f"{alias} 不在白名单，未执行"}
     if command_unsafe(command):
         return {"verdict": "fail", "detail": f"{alias} 含禁止字符，未执行"}
-    argv = shlex.split(command, posix=(os.name != "nt"))
+    argv = acceptance_argv(command, alias, scope_paths, rule_id)
     if not argv:
         return {"verdict": "fail", "detail": f"{alias} 命令为空，未执行"}
     timeout = load_timeout(root)

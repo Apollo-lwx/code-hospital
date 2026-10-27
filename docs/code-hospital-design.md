@@ -376,11 +376,13 @@ hosp_dispense(prescription_id, item_id, mode="submit_patch",
 2. **环境隔离**：子进程 env scrubbing——默认不透传任何 `*_KEY` / `*_TOKEN` / 秘密变量，仅保留 `PATH`/`HOME` 等最小集，配置可显式放行个别变量；
 3. **资源上限**：默认超时 120s（可配）、输出截断（默认 64KB）、可选禁网。
 
+施治护理里，别名 `lint` 只检查本味 `scope_paths`。命令是 ruff、处方说明里写了规则号时，再追加 `--select` 该规则。其它文件里还没修的问题不让这味回滚。`test` 等别名仍按白名单整段执行。出院门禁不传范围，仍是整仓。
+
 ### 4.7 并发与同仓互斥
 
 - **一仓一活跃病例**：`cases` 表部分唯一索引（`project_root` WHERE status ∉ {discharged, referred}）；撞单返回 `Conflict` + `nextAction`。
 - **进程级锁**：`.hospital/active_case.lock`（case_id + pid + 时间戳），防多 MCP 进程并发；陈旧锁自动回收。
-- **施治串行**：服务端对每个 case 持互斥锁；处方项按 seq 串行，禁止跨项并发。
+- **施治串行**：服务端对每个 case 持互斥锁；处方项按 seq 串行，禁止跨项并发。默认一次 `hosp_dispense` 只做一味。`follow_autofix=true` 时同一次调用按序做完后续成药，遇到煎药、失败或 40 味上限停下，并清掉待确认的逐味门禁。这样宿主不必一味一调用。
 
 ### 4.8 病案管理：查重、调档、会诊转诊与随访
 

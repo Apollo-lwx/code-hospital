@@ -149,13 +149,15 @@ sequenceDiagram
 
 `Finding.tool` 就是仪器 id。`java-pack`、`hotspot-ruler` 即使引擎是 semgrep，`tool` 也写仪器 id，不写 `semgrep`。引擎名只放在仪器的 `engine` 字段。已经在岗的三台 id 保持 `ruff`、`semgrep`、`gitleaks`，现有发现不用改写。
 
-分流时前缀比通配更优先。一台仪器对不上任何一行时，接诊专科记全科，再按适应证决定入不入方。有一条安全覆盖写在表前：`tool=gitleaks`，或 `severity=critical`，接诊专科改为全科，只开封存。语言科分流表不覆盖这一档，因此 ruff 的 critical 不再由 Python 语言科走煎药或待复核。
+分流时前缀比通配更优先。一台仪器对不上任何一行时，接诊专科记全科，再按适应证决定入不入方。`gitleaks`、安全尺、污点尺先交给安全科。其余 `severity=critical` 仍改到全科，只开封存。语言科分流表不覆盖这一档，因此 ruff 的 critical 不再由 Python 语言科走煎药或待复核。
 
 | 仪器 id（Finding.tool） | rule_id | 接诊专科 |
 |---|---|---|
 | ruff | `*` | python |
 | semgrep | `*` | general |
-| gitleaks | `*` | general |
+| gitleaks | `*` | security |
+| security-ruler | `security.*` | security |
+| taint-ruler | `severe.taint-*` | security |
 | structure-ruler | `structure.*` | structure |
 | eslint | `*` | general |
 | java-pack | `java.*` | java |
@@ -167,7 +169,7 @@ sequenceDiagram
 
 这条路径描述的是**一条诊断簇**。分簇键见 §4.1.1，一个簇一个 `scope_key`、一位接诊专科。这位专科的柜子里仍可以有多味药。Python 语言科看到 `F841` 开清创，看到 `BLE001` 开补罩；补罩同时放在 Python 语言科和 Java 语言科的柜子里，谁接这簇谁开。同一个病灶上若还有别的簇，那些簇另请专科，合在 §4.1.1 的病症里一起开方。
 
-gitleaks 的命中由全科接诊，从全科药柜里开封存，剂型是外购，`hold=true`。函数超过 80 行由结构科接诊，从结构科药柜里开拆分；拆分是煎药时，再按伴随药规则加对照。仓库写了分层契约且低层 import 了高层，由架构科接诊，从架构科药柜里开归位：不自动改代码，交接清单写明违反的是哪一条契约。
+gitleaks 和已经独立核实的密钥字面量由安全科接诊，开封存，剂型是外购，`hold=true`。待验证和已排除不入方。函数超过 80 行由结构科接诊，从结构科药柜里开拆分；拆分是煎药时，再按伴随药规则加对照。仓库写了分层契约且低层 import 了高层，由架构科接诊，从架构科药柜里开归位：不自动改代码，交接清单写明违反的是哪一条契约。
 
 ### 4.1.1 一个病症：多台仪器、多位专科、多味药
 
@@ -236,7 +238,8 @@ graph TD
 
 | id | 专科 | 药柜 | 说明 |
 |---|---|---|---|
-| general | 全科 | 清创、补罩、封存、进货、对照、续治 | 分流表落全科，或 critical / gitleaks 覆盖到全科时接诊 |
+| general | 全科 | 清创、补罩、封存、进货、对照、续治 | 分流表落全科，或其他仪器的 critical 改到全科时接诊 |
+| security | 安全科 | 封存、补罩、续治、对照 | 接 gitleaks、安全尺、污点尺。待验证和已排除不入方。已确认的密钥开封存；函数内污点走通了才开续治 |
 | python | Python 语言科 | 清创、补罩、拆分、正骨、去重、对照、续治 | 接 ruff 与类型尺。能成药的规则开清创，其余非 critical 的 ruff 与类型尺发现开续治 |
 | java | Java 语言科 | 补罩、拆分、正骨、去重、对照、续治 | 接 `java-pack`。`.java` 上的结构尺仍由结构科按分流表接诊。第一期没有 Java 成药执行器。对得上的规则开补罩，其余非 critical 开续治 |
 | structure | 结构科 | 拆分、去重、对照 | 接结构尺。一次只动一个符号或一个文件 |
@@ -340,7 +343,7 @@ risk_overrides:
 | hotspot-ruler | semgrep | 循环里访问外部资源、无界查询 | 随包 semgrep YAML。`Finding.tool=hotspot-ruler`。`can_autofix=false` | 不进默认套餐 | on_request，仅当 `requested_specialties` 含 `performance` | semgrep 未到岗且被点名：终态「semgrep 未到岗，热点尺未拍」。没点名则不上台、不写限制项 |
 | type-ruler | mypy 或 pyright | Python 类型缺口 | 外部二进制。`can_autofix=false` | 不进默认套餐 | on_request，仅当 `requested_instruments` 含 `type-ruler` | 未到岗且被点名：终态「类型尺未到岗」。点了 Python 语言科但没点这台仪器，则不上台、不写限制项 |
 
-结构尺的默认阈值：函数 80 行、文件 500 行、圈复杂度 15（仅 lizard 在岗时）。超过阈值的发现 `severity=major`。函数级与圈复杂度的 `rule_id` 为 `structure.function_lines`、`structure.cyclomatic`，并带上函数名和函数全行区间。文件级的 `rule_id` 为 `structure.file_lines`，`symbol` 留空，`scope_key` 用 `#file`。
+结构尺的默认阈值：函数 80 行、文件 500 行、圈复杂度 15（仅 lizard 在岗时）。函数行数和文件行数的发现是 `severity=nit`（风格建议）。圈复杂度仍是 `severity=major`。函数级与圈复杂度的 `rule_id` 为 `structure.function_lines`、`structure.cyclomatic`，并带上函数名和函数全行区间。文件级的 `rule_id` 为 `structure.file_lines`，`symbol` 留空，`scope_key` 用 `#file`。
 
 仓库用 `code-hospital.yaml` 覆盖阈值。写成 `0` 表示这把尺不算病。`catalog.rules.ignore` 按规则号或前缀丢掉发现，`min_severity` 只留不低于该档的发现，`ruff_select` 传给 ruff。示例见仓库根目录 `code-hospital.yaml.example`。分层契约只采用优先级最高的一份，不把多份契约的违例叠在一起：
 
@@ -391,6 +394,46 @@ catalog:
 
 点名专科只并入绑在该专科上的 `on_request` 仪器（热点尺绑性能科），且前置条件要满足。点名仪器只并入 `requested_instruments` 里的 id（类型尺）。分层尺是 `package`，`triage` 只有门诊：按 §4.4 的优先级找到契约时随门诊上台；体检默认不上，只有点了架构科且契约存在才并入体检。没有契约时并入失败，报告里保留终态限制，不临时编一套分层，也不写入 `scan_orders`。
 
+### 4.5.1 号别
+
+分诊回答急不急，范围回答查哪里，号别回答这场要查什么。`visit_kind` 写在病例上，默认 `checkup`，不改变原来的体检套餐。
+
+| 号别 | 含义 | 仪器 |
+|---|---|---|
+| checkup | 体检 | 现有分诊套餐 |
+| admission | 合入门诊 | 分诊套餐，再加安全尺、缺陷尺、测试缺口 |
+| security | 安全 | 安全尺、gitleaks、semgrep、有 Java 时 java-pack |
+| performance | 性能 | 性能尺；semgrep 在岗时再加热点尺 |
+| defect | 缺陷 | 缺陷尺、有 Java 时 java-pack 和 spotbugs、有 Python 时 ruff |
+| algorithm | 算法 | 算法尺 |
+| types | 类型契约 | 类型尺 |
+| architecture | 架构 | 分层尺 |
+| test | 测试 | 测试缺口。全仓库也逐文件查，最多列 40 个 |
+| supply | 供应链 | 供应链尺。pip-audit 或 osv-scanner 在岗时再查已知漏洞 |
+| business | 业务 | 业务尺。只核对 `catalog.business` 和挂号主诉里写下来的规则 |
+| severe | 重症 | 只看本次 diff：函数内污点、改动影响；有 Java 且已有 class 时再跑 spotbugs |
+| general | 全科 | 分诊套餐加上深度尺、业务尺，有 Java 时再加 spotbugs。不跑污点和改动影响，报告写明重症未查 |
+
+安全尺、缺陷尺、性能尺、算法尺、供应链尺、测试缺口是院内仪器，不依赖外部二进制。它们只报告语法上能够确定的写法：命令执行、反序列化、SQL 拼接、硬编码密钥、吞掉的异常、相同分支、循环里的外部调用和排序。跨函数的业务不变量和实测耗时不在这几把尺里。循环里排序、三层循环、循环里访问外部资源是写法估计，严重度是一般问题，不和没用到的导入、相同分支放在明确缺陷这一档。只为探测可选模块而接住导入失败、后面还有退路的，不算异常被吃掉。
+
+已知漏洞没有内置数据库。本机没有 pip-audit 或 osv-scanner 时，供应链号写明「已知漏洞未查」，不能把锁文件核对当成漏洞扫描已经通过。号别覆盖写在检验报告的限制项里：没拍成的仪器不能写成正常。全仓库的体检、合入门诊和全科不逐文件开测试缺口，避免把每个源文件都当成缺测试；测试号会逐文件查。
+
+业务号读 `catalog.business`。没有状态机、金额字段、权限约定，也没有主诉时，报告写「业务未查」。三种机械规则：
+
+- `machines`：在「当前状态是 A」的分支里把字段改成 B，而 B 不在 `transitions` 里。
+- `money_fields`：这些名字被注解成 `float` / `double`，或被赋了浮点字面量、`float()`。Java 只看同名的 `float` / `double` 声明。
+- `auth.checks` 配 `auth.writes`：函数名命中 `writes`（以 `_` 结尾的是前缀），函数上没有这些校验装饰器，函数体里也没有调用它们。
+
+`invariants` 和主诉只记入待复核，不生成自动修改。状态机和权限这一期只看 Python。没写成「当前是某一状态」再赋值的代码不会被状态机核对。
+
+重症号只看本次 diff。全仓库挂号用 `git diff HEAD` 加上未跟踪文件；指定路径、暂存、提交或区间沿用这次送进来的文件。没有 diff 时写「重症未查」，不当成正常。污点只在单个 Python 函数里跟着赋值走，出口是 SQL、命令、路径、对外请求，并写明跨函数没有追。改动影响只列这次 diff 改到的函数，并留下三句待复核：这是谁的数据、失败时返回了什么、状态有没有跳步。这三条不自动改代码。同名函数只认本文件里的使用，或全仓库只有这一处定义时的调用；把函数交给注册表也算使用。全科不跑这两项，报告里写「重症未查」。
+
+SpotBugs（没有时试 FindBugs）是外部仪器，分析已编译的 class，不在医院里编译项目。class 目录认 `target/classes`、`build/classes/java/main`、`build/classes/main`、`build/classes`。命令或 class 不在时，这台仪器没拍成。同类仪器的接法是：实现一个 Engine，登记到 `catalog/engines.py` 的 `ENGINES`，在 `instruments.yaml` 加一行，再写进号别。扫描流程不写新命令，配置里也不执行任意命令。
+
+安全尺、gitleaks 和污点尺的命中先是候选。另一段只读复核重走源码：参数是字面量、行已经不在、或只是占位符，记为已排除；能重走出函数内数据流的污点记为已确认，有界结果只到这条数据流，不表示已经执行过目标代码；其余记为待验证，严重度降为一般问题，写明缺的那一个事实。待验证和已排除不入方。密钥字面量若仍能在源码里读到，保持已确认并封存。没有隔离执行，就不把语法命中写成已经打穿边界。
+
+安全号和重症号另写覆盖账，落在检验报告的限制项和病例的 `coverage` 上。注入、反序列化、密钥、传输、输出信任以安全尺是否跑完记账；认证边界、租户隔离、跨函数污点和隔离执行没有仪器，保持未覆盖。查过不等于没有问题。源码哈希没变时，已查单元沿用上次；变了就按这次重查。semgrep 跑过也只记「外部规则未做独立核实」。
+
 ### 4.6 开源项目：参考、搬迁、复用
 
 判断口径：
@@ -412,6 +455,8 @@ catalog:
 | [ast-grep](https://github.com/ast-grep/ast-grep) | 三层：匹配核、YAML 规则、语言文法。规则用 `id`、`language`、`rule`、`fix` 表达「找到并替换」 | MIT | 第一期 Java 与热点仍走已接入的 semgrep。ast-grep 作为下一台仪器，专管能写成结构替换的成药 |
 | [reviewdog](https://github.com/reviewdog/reviewdog) | 把各 linter 的输出收成统一诊断（rdjson / SARIF），再按 diff 过滤。诊断上可以带 `suggestions`（一段替换文本） | MIT | 我们已有自己的 `Finding` 归一。建议以后给 `RawFinding.extra` 留 `suggestion`，让成药不只有 ruff 一条路。不引入 reviewdog 的评论机器人 |
 | [lizard](https://github.com/terryyin/lizard) | 多语言圈复杂度，不要求头文件或完整编译 | MIT | 结构尺的行数自己数。圈复杂度在 lizard 在岗时复用其 CLI |
+| [security-audit](https://github.com/cloudflare/security-audit-skill) | 发现和核实分开；裁决分已确认、待验证、已排除；按攻击类记账，没查的不能写成正常 | MIT | 搬进安全科的裁决和安全号、重症号的覆盖账。不拷技能正文，不新开 `hosp_*` 工具，不在医院进程里跑狩猎子代理 |
+| [REA](https://github.com/morluto/rea) | 每条结论带证据、局限和未知；缺引擎就保持未查 | MIT | 只学「结论不超出证据」。无源码的二进制、安装包和抓包不进这一期。以后若有这类病人，再进程外当仪器，不把仓库嵌进来 |
 
 [dependency-cruiser](https://github.com/sverweij/dependency-cruiser)（MIT）是 JavaScript 侧和 import-linter 同构的依赖契约。仓库里已经有它的配置时，分层尺可以复用其 CLI，规则仍以仓库契约为准。
 
@@ -628,7 +673,7 @@ acceptance_alias: test
 
 | 位置 | 字段 | 说明 |
 |---|---|---|
-| `hosp_register` 入参 | `requested_specialties` | 可选字符串数组，默认 `[]`。元素限于专科 id：`general`、`python`、`java`、`structure`、`architecture`、`design`、`performance`。未知 id 返回 `bad_argument`。`general` 不额外加仪器。点名 `python` 不启动类型尺 |
+| `hosp_register` 入参 | `requested_specialties` | 可选字符串数组，默认 `[]`。元素限于专科 id：`general`、`security`、`python`、`java`、`structure`、`architecture`、`design`、`performance`。未知 id 返回 `bad_argument`。`general` 不额外加仪器。点名 `python` 不启动类型尺 |
 | `hosp_register` 入参 | `requested_instruments` | 可选字符串数组，默认 `[]`。第一期只接受 `type-ruler`。未知 id 返回 `bad_argument` |
 | `hosp_treat` 入参 | 同 `hosp_register` | 一键全程把这两个字段原样交给挂号 |
 | 病例 | `scan_orders` | `[{instrument_id, reason}]`。`hosp_case` 能读到。空数组表示没有待补仪器 |

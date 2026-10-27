@@ -59,6 +59,7 @@
   indications:
     - kind: rule
       rule_ids: [BLE001, java.null-deref, java.resource-leak]
+      prefixes: [security., defect.]
 - id: seal
   name: 封存
   method: manual
@@ -82,7 +83,7 @@
   acceptance_alias: ""
   indications:
     - kind: rule
-      rule_ids: []
+      prefixes: [supply.]
 - id: contrast
   name: 对照
   method: llm_patch
@@ -94,6 +95,8 @@
   indications:
     - kind: companion
       parents: [split, rename, guard, throttle]
+    - kind: rule
+      rule_ids: [test.uncovered-file]
 - id: relocate
   name: 归位
   method: manual
@@ -116,6 +119,7 @@
   indications:
     - kind: rule
       rule_ids: [hotspot.loop-io, hotspot.unbounded-query]
+      prefixes: [algo., perf.]
 - id: repair
   name: 续治
   method: llm_patch
@@ -125,5 +129,7 @@
   scope: line_range
   acceptance_alias: test
   indications:
+    - kind: rule
+      rule_ids: [business.illegal-transition, business.money-float, business.missing-auth, severe.taint-sql, severe.taint-command, severe.taint-path, severe.taint-request]
     - kind: fallback
-      tools: [ruff, semgrep, java-pack, eslint, type-ruler]
+      tools: [ruff, semgrep, java-pack, eslint, type-ruler, security-ruler, defect-ruler, perf-ruler, algo-ruler, supply-ruler, test-gap, spotbugs]

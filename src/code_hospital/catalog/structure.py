@@ -143,7 +143,7 @@ def scan_structure(project_root: str, files: list[str]) -> tuple[list[dict], lis
                 "file_path": rel.replace("\\", "/"),
                 "line_start": 1,
                 "line_end": len(lines),
-                "severity": "major",
+                "severity": "nit",
                 "symbol": "",
             })
         if path.suffix.lower() != ".py":
@@ -156,7 +156,7 @@ def scan_structure(project_root: str, files: list[str]) -> tuple[list[dict], lis
                     "file_path": rel.replace("\\", "/"),
                     "line_start": start,
                     "line_end": end,
-                    "severity": "major",
+                    "severity": "nit",
                     "symbol": name,
                 })
     limitations = []

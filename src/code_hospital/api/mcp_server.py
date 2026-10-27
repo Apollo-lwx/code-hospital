@@ -60,6 +60,7 @@ async def hosp_register(
     auto_advance: bool = False,
     requested_specialties: list[str] | None = None,
     requested_instruments: list[str] | None = None,
+    visit_kind: str = "checkup",
     project_root: str = "",
 ) -> dict:
     try:
@@ -73,6 +74,7 @@ async def hosp_register(
             auto_advance=auto_advance,
             requested_specialties=requested_specialties,
             requested_instruments=requested_instruments,
+            visit_kind=visit_kind,
             project_root=project_root,
         )
     except HospitalError as e:
@@ -186,6 +188,7 @@ async def hosp_dispense(
     resolution: str = "",
     dry_run: bool = False,
     stage_confirmed: bool = False,
+    follow_autofix: bool = False,
     project_root: str = "",
 ) -> dict:
     try:
@@ -199,6 +202,7 @@ async def hosp_dispense(
             resolution=resolution,
             dry_run=dry_run,
             stage_confirmed=stage_confirmed,
+            follow_autofix=follow_autofix,
             project_root=project_root,
         )
     except HospitalError as e:
@@ -263,6 +267,7 @@ async def hosp_treat(
     force: bool = False,
     requested_specialties: list[str] | None = None,
     requested_instruments: list[str] | None = None,
+    visit_kind: str = "checkup",
     project_root: str = "",
     timeout_ms: int = 120_000,
     ctx: Context | None = None,
@@ -285,6 +290,7 @@ async def hosp_treat(
             force=force,
             requested_specialties=requested_specialties,
             requested_instruments=requested_instruments,
+            visit_kind=visit_kind,
             project_root=project_root,
             timeout_ms=timeout_ms,
             progress=_report,
@@ -338,6 +344,7 @@ async def _case_query(
                     "triage_level": c.triage_level, "round": c.round,
                     "max_rounds": c.max_rounds,
                     "pending_gate": c.pending_gate, "auto_advance": c.auto_advance,
+                    "visit_kind": c.visit_kind,
                     "counts": counts,
                     "created_at": c.created_at, "updated_at": c.updated_at,
                 })
@@ -348,7 +355,8 @@ async def _case_query(
             raise not_found(f"病例不存在：{case_id}", target="case_id")
         result = {
             "id": case.id, "title": case.title, "status": case.status,
-            "triage_level": case.triage_level, "scope_type": case.scope_type,
+            "triage_level": case.triage_level, "visit_kind": case.visit_kind,
+            "scope_type": case.scope_type,
             "scope": case.scope.model_dump(), "round": case.round,
             "max_rounds": case.max_rounds,
             "pending_gate": case.pending_gate, "auto_advance": case.auto_advance,

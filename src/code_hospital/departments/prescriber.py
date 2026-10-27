@@ -16,9 +16,11 @@ from ..catalog.formulary import (
     companion_for,
     effective_method,
     match_finding,
+    opening_verdict,
     scope_key,
 )
 from ..core.algorithms import order_prescription_items
+from ..core.efficacy import tally
 from ..core.errors import bad_argument, forbidden, invalid_operation, not_found
 from ..core.ids import new_id
 from ..core.models import SEVERITY_ORDER, ReportRecord
@@ -110,11 +112,13 @@ def _handoff(case_id: str, approved: bool) -> dict:
 
 
 async def _with_rsi(root: str, payload: dict) -> dict:
-    from ..integrations.rsi import recall_prohibitions
+    from ..integrations.rsi import recall_for_prescribe
 
-    rows = await recall_prohibitions(root, "开方前召回用药禁忌")
-    if rows:
-        payload["rsi_prohibitions"] = rows
+    found = await recall_for_prescribe(root, "开方前召回用药禁忌和疗效账")
+    if found["prohibitions"]:
+        payload["rsi_prohibitions"] = found["prohibitions"]
+    if found["efficacy"]:
+        payload["rsi_efficacy"] = found["efficacy"]
     return payload
 
 
@@ -276,6 +280,7 @@ def build_items(
         matched = match_finding(
             head.tool, head.rule_id, diagnosis.severity,
             fixable=bool(getattr(head, "fixable", False)),
+            verdict=opening_verdict(members),
         )
         if matched.formula is None:
             continue
@@ -366,6 +371,29 @@ def _mark_conflicts(items: list[dict]) -> None:
             for item in (left, right):
                 item["formulary_conflict"] = 1
                 item["conflict_reason"] = reason
+
+
+def _efficacy_for(items: list[dict], diagnoses: list, history: dict) -> list[dict]:
+    """本张处方里、本仓库已有成败记录的规则。不改变 items 的顺序。"""
+    category = {diagnosis.id: diagnosis.category for diagnosis in diagnoses}
+    seen: set[tuple[str, str]] = set()
+    rows = []
+    for item in items:
+        rule_id = category.get(item.get("diagnosis_id") or "") or ""
+        key = (rule_id, item.get("method") or "")
+        if not rule_id or key in seen:
+            continue
+        counts = history.get(key)
+        if not counts or counts[0] + counts[1] <= 0:
+            continue
+        seen.add(key)
+        rows.append({
+            "rule_id": rule_id,
+            "method": key[1],
+            "success": counts[0],
+            "failure": counts[1],
+        })
+    return rows
 
 
 def _skip_acceptance(items: list[dict]) -> None:
@@ -494,7 +522,11 @@ async def prescribe(
             "created_at": created,
         }
         await db.insert_prescription(header, items)
-        rx = {"id": prescription_id, "case_id": case_id, "status": "draft", "risk_level": risk, "items": items}
+        rx = {
+            "id": prescription_id, "case_id": case_id, "status": "draft",
+            "risk_level": risk, "items": items,
+            "efficacy": _efficacy_for(items, diagnoses, tally(await db.list_efficacy_rows())),
+        }
         case.updated_at = created
         clusters = []
         for diagnosis in diagnoses:

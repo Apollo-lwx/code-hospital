@@ -48,6 +48,42 @@ class SecretAdapter(ScannerAdapter):
         )]
 
 
+class TwoFixAdapter(ScannerAdapter):
+    name = "ruff"
+    binary = "git"
+    extensions = frozenset({".py"})
+
+    async def scan(self, repo_root, files, timeout_ms):
+        return [
+            RawFinding(
+                rule_id="F841", message="unused", file_path="src/a.py",
+                line_start=2, line_end=2, severity="major",
+            ),
+            RawFinding(
+                rule_id="F841", message="unused", file_path="src/b.py",
+                line_start=2, line_end=2, severity="major",
+            ),
+        ]
+
+
+class FixThenPatchAdapter(ScannerAdapter):
+    name = "ruff"
+    binary = "git"
+    extensions = frozenset({".py"})
+
+    async def scan(self, repo_root, files, timeout_ms):
+        return [
+            RawFinding(
+                rule_id="F401", message="unused import", file_path="src/a.py",
+                line_start=1, line_end=1, severity="major",
+            ),
+            RawFinding(
+                rule_id="F821", message="undefined", file_path="src/c.py",
+                line_start=2, line_end=2, severity="major",
+            ),
+        ]
+
+
 class LogicAdapter(ScannerAdapter):
     name = "ruff"
     binary = "git"
@@ -383,3 +419,71 @@ async def test_verify_only_reports_without_writing(git_repo):
     assert poisoned["nursing"]["content_check"] == "fail"
     assert poisoned["nursing"]["verdict"] == "fail"
     assert 'eval("x")' in source.read_text(encoding="utf-8")
+
+
+def _unused(name: str) -> str:
+    return f"def {name}():\n    x = 1\n    return 2\n"
+
+
+async def test_default_dispense_stops_after_one_autofix(git_repo):
+    if not _ruff_binary():
+        pytest.skip("需要 ruff")
+    (Path(git_repo) / "src" / "b.py").write_text(_unused("g"), encoding="utf-8")
+    rx_id = await _approved(git_repo, TwoFixAdapter)
+    done = await pharmacist.dispense(prescription_id=rx_id, project_root=git_repo)
+    assert done["status"] == "applied"
+    assert "batch" not in done
+    assert "follow_autofix" in done["handoff"]["confirm_hint"]
+    changed = [
+        path.name
+        for path in (Path(git_repo) / "src").glob("*.py")
+        if "x = 1" not in path.read_text(encoding="utf-8")
+    ]
+    assert changed == ["a.py"] or changed == ["b.py"]
+    assert len(changed) == 1
+
+
+async def test_follow_autofix_applies_remaining_and_stops_before_patch(git_repo):
+    if not _ruff_binary():
+        pytest.skip("需要 ruff")
+    (Path(git_repo) / "src" / "a.py").write_text("import os\n\ndef f():\n    return 1\n", encoding="utf-8")
+    (Path(git_repo) / "src" / "c.py").write_text("def g():\n    return missing\n", encoding="utf-8")
+    rx_id = await _approved(git_repo, FixThenPatchAdapter)
+    done = await pharmacist.dispense(
+        prescription_id=rx_id, follow_autofix=True, project_root=git_repo,
+    )
+    assert done["status"] == "applied"
+    assert done["batch"]["applied"] == 1
+    assert done["batch"]["stopped"] == "llm_patch"
+    assert "import os" not in (Path(git_repo) / "src" / "a.py").read_text(encoding="utf-8")
+    assert "missing" in (Path(git_repo) / "src" / "c.py").read_text(encoding="utf-8")
+
+
+async def test_follow_autofix_applies_both_autofix_items(git_repo):
+    if not _ruff_binary():
+        pytest.skip("需要 ruff")
+    (Path(git_repo) / "src" / "b.py").write_text(_unused("g"), encoding="utf-8")
+    rx_id = await _approved(git_repo, TwoFixAdapter)
+    both = await pharmacist.dispense(
+        prescription_id=rx_id, follow_autofix=True, project_root=git_repo,
+    )
+    assert both["batch"]["applied"] == 2
+    assert both["batch"]["stopped"] == "done"
+    assert both["batch"]["remaining"] == 0
+    assert "x = 1" not in (Path(git_repo) / "src" / "a.py").read_text(encoding="utf-8")
+    assert "x = 1" not in (Path(git_repo) / "src" / "b.py").read_text(encoding="utf-8")
+
+
+async def test_follow_autofix_stops_at_cap(git_repo, monkeypatch):
+    if not _ruff_binary():
+        pytest.skip("需要 ruff")
+    (Path(git_repo) / "src" / "b.py").write_text(_unused("g"), encoding="utf-8")
+    monkeypatch.setattr(pharmacist, "_FOLLOW_CAP", 1)
+    rx_id = await _approved(git_repo, TwoFixAdapter)
+    capped = await pharmacist.dispense(
+        prescription_id=rx_id, follow_autofix=True, project_root=git_repo,
+    )
+    assert capped["batch"]["applied"] == 1
+    assert capped["batch"]["stopped"] == "limit"
+    assert capped["batch"]["remaining"] == 1
+    assert "follow_autofix" in capped["handoff"]["confirm_hint"]

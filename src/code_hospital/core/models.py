@@ -101,9 +101,15 @@ class Case(BaseModel):
     pending_gate: str = ""
     requested_specialties: list[str] = Field(default_factory=list)
     requested_instruments: list[str] = Field(default_factory=list)
+    # 号别：这场要查什么。checkup 是原来的体检套餐。
+    visit_kind: str = "checkup"
+    # 挂号主诉。业务号把它当作写下来、但这一期不能机械核对的规则。
+    chief_complaint: str = ""
     scan_orders: list[dict] = Field(default_factory=list)
     # 本轮仪器结局：[{id, outcome}]，outcome 为 ok / terminal / retry。检查单靠它判断「还没跑」。
     instrument_notes: list[dict] = Field(default_factory=list)
+    # 安全号 / 重症号覆盖账。{source_hash, units}。空字典表示这场没建账。
+    coverage: dict = Field(default_factory=dict)
     created_at: int
     updated_at: int
 
@@ -124,6 +130,10 @@ class Finding(BaseModel):
     # 分层尺采用的契约 id，写入 scope_key 的 contract: 段。
     contract_id: str = ""
     fixable: bool = False
+    # 安全科裁决。空字符串表示这台仪器不走独立核实。
+    verdict: str = ""
+    unresolved: str = ""
+    attack_class: str = ""
     message: str
     evidence: str = ""
     fingerprint: str

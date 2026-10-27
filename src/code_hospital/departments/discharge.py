@@ -3,7 +3,7 @@
 全部药味终态后调用。先复扫差分：有医源性新症且疗程未满则再入院，不跑门禁。
 否则做四维会签。门禁失败先问是否接受未愈/转院，或由用户本人豁免。
 本工具不改仓库代码。白名单里已有的别名会执行；为空时验收项仍记通过且不跑命令。
-distill_to_rsi 为真且本机有 rsi 命令时，把结局计数写入 documentation；没有命令则记未写入。
+distill_to_rsi 为真且本机有 rsi 命令时，把结局计数写入 documentation，并把疗效账写成 experience；没有命令则记未写入。
 """
 
 from __future__ import annotations
@@ -224,7 +224,7 @@ async def discharge(
             )
 
         report_id = new_id("rpt")
-        _devices, _limits, current = await collect_findings(root, case, report_id)
+        _devices, _limits, current, _ledger = await collect_findings(root, case, report_id)
         buckets, devices = await _compare(db, case, current)
         _apply_overrides(buckets, overrides)
         public = _diff_public(case.round, buckets, devices)
@@ -357,6 +357,13 @@ async def _close(db, root, case, buckets, current, public, gate, outcome, report
                 "发现原文不写入记忆。"
             ),
         )
+        from ..core.efficacy import lesson_text, tally
+        from ..integrations.rsi import distill_efficacy
+
+        lesson = lesson_text(tally(await db.list_efficacy_rows()))
+        extra = await distill_efficacy(root, lesson)
+        if extra:
+            note = f"{note} {extra}".strip()
     return {
         "status": "discharged",
         "case_id": case.id,

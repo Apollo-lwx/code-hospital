@@ -104,6 +104,39 @@ def _sha(text: str) -> str:
     return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+_FOLLOW_CAP = 40
+
+
+def _rule_id_from_item(item: dict) -> str:
+    selected = re.search(r"规则\s+([A-Za-z][A-Za-z0-9]+)", item.get("instructions") or "")
+    return selected.group(1) if selected else ""
+
+
+def _pending_after(items: list[dict], after_seq: int) -> dict | None:
+    pending = [it for it in items if it["status"] == "pending" and it["seq"] > after_seq]
+    return pending[0] if pending else None
+
+
+def _first_pending(items: list[dict]) -> dict | None:
+    pending = [it for it in items if it["status"] == "pending"]
+    return pending[0] if pending else None
+
+
+def _suggest_follow(payload: dict) -> dict:
+    handoff = payload.get("handoff")
+    if not isinstance(handoff, dict) or not handoff.get("awaiting_confirmation"):
+        return payload
+    copied = dict(payload)
+    hint = dict(handoff)
+    nxt = payload.get("next_item_id") or ""
+    hint["confirm_hint"] = (
+        "后续成药请同一次调用 hosp_dispense(prescription_id=…, follow_autofix=true) 连续做完，"
+        f"不要一味一调用。下一味 {nxt}。"
+    )[:300]
+    copied["handoff"] = hint
+    return copied
+
+
 def _handoff(case_id: str, item_id: str, next_item_id: str, auto_advance: bool) -> dict:
     waiting = bool(next_item_id) and not auto_advance
     return {
@@ -143,9 +176,10 @@ async def dispense(
     resolution: str = "",
     dry_run: bool = False,
     stage_confirmed: bool = False,
+    follow_autofix: bool = False,
     project_root: str = "",
 ) -> dict:
-    """hosp_dispense。一次只处理一味药。"""
+    """hosp_dispense。默认一味一停；follow_autofix 时连续做完后续成药。"""
     from .reception import resolve_project_root
 
     if mode not in _MODES:
@@ -179,6 +213,9 @@ async def dispense(
             return await _resolve_conflict(
                 db, root, case, rx, item_id, resolution, stage_confirmed,
             )
+        if follow_autofix and (case.pending_gate or "").startswith("dose:"):
+            await db.update_case(case.id, pending_gate="")
+            case.pending_gate = ""
         if case.pending_gate and not stage_confirmed:
             return ask(
                 "stage_confirm",
@@ -197,29 +234,82 @@ async def dispense(
             await db.update_case(case.id, pending_gate="")
             case.pending_gate = ""
 
-        pending = [it for it in rx["items"] if it["status"] == "pending"]
-        if item_id:
-            item = next((it for it in rx["items"] if it["id"] == item_id), None)
+        batching = follow_autofix and mode == "apply" and not dry_run
+        cap = _FOLLOW_CAP if batching else 1
+        specified = item_id
+        after_seq = -1
+        last: dict | None = None
+        counts = {"applied": 0, "failed": 0, "skipped": 0, "remaining": 0, "stopped": "done"}
+        for _step in range(cap):
+            rx = await db.get_prescription(prescription_id)
+            if specified:
+                item = next((it for it in rx["items"] if it["id"] == specified), None)
+                if item is None:
+                    raise not_found(f"药味不存在：{specified}", target="item_id")
+                if item["status"] != "pending":
+                    raise invalid_operation(f"药味状态为 {item['status']}，不能再次抓药", target="item_id")
+                specified = ""
+            elif after_seq < 0:
+                item = _first_pending(rx["items"])
+            else:
+                item = _pending_after(rx["items"], after_seq)
             if item is None:
-                raise not_found(f"药味不存在：{item_id}", target="item_id")
-            if item["status"] != "pending":
-                raise invalid_operation(f"药味状态为 {item['status']}，不能再次抓药", target="item_id")
-        elif pending:
-            item = pending[0]
-        else:
+                if last is None:
+                    raise invalid_operation(
+                        "没有待执行的药味", target="item_id", next_action="可请求 hosp_discharge 出院",
+                    )
+                counts["stopped"] = "done"
+                break
+            if batching and after_seq >= 0 and item["method"] == "llm_patch":
+                counts["stopped"] = "llm_patch"
+                break
+            if mode == "submit_patch":
+                return await _submit_patch(
+                    db, root, case, rx, item, patch_token, snapshot_hash, patch, dry_run,
+                )
+            if item["method"] == "manual":
+                last = await _skip_manual(db, case, rx, item)
+            elif item["method"] == "llm_patch":
+                last = await _need_patch(db, case, item, await _focus_line(db, case.id, item))
+                counts["stopped"] = "llm_patch"
+                break
+            elif item["method"] != "autofix":
+                raise invalid_operation(f"未知剂型 {item['method']}", target="item_id")
+            else:
+                last = await _apply_autofix(db, root, case, rx, item, dry_run)
+            after_seq = int(item["seq"])
+            status = last.get("status")
+            if status == "applied":
+                counts["applied"] += 1
+            elif status == "failed":
+                counts["failed"] += 1
+                counts["stopped"] = "failed"
+                break
+            elif status == "skipped":
+                counts["skipped"] += 1
+            else:
+                counts["stopped"] = str(status or "stopped")
+                break
+            if not batching:
+                break
+        if last is None:
             raise invalid_operation("没有待执行的药味", target="item_id", next_action="可请求 hosp_discharge 出院")
-
-        if mode == "submit_patch":
-            return await _submit_patch(
-                db, root, case, rx, item, patch_token, snapshot_hash, patch, dry_run,
+        rx = await db.get_prescription(prescription_id)
+        if batching:
+            counts["remaining"] = sum(
+                1 for it in rx["items"] if it["status"] == "pending" and it["method"] == "autofix"
             )
-        if item["method"] == "manual":
-            return await _skip_manual(db, case, rx, item)
-        if item["method"] == "llm_patch":
-            return await _need_patch(db, case, item, await _focus_line(db, case.id, item))
-        if item["method"] != "autofix":
-            raise invalid_operation(f"未知剂型 {item['method']}", target="item_id")
-        return await _apply_autofix(db, root, case, rx, item, dry_run)
+            if counts["stopped"] == "done" and counts["remaining"] > 0:
+                counts["stopped"] = "limit"
+            last = dict(last)
+            last["batch"] = counts
+            if counts["stopped"] == "limit":
+                last = _suggest_follow(last)
+        else:
+            nxt = next((it for it in rx["items"] if it["id"] == last.get("next_item_id")), None)
+            if nxt is not None and nxt["method"] == "autofix":
+                last = _suggest_follow(last)
+        return last
 
 
 async def _focus_line(db, case_id: str, item: dict) -> int:
@@ -495,9 +585,9 @@ async def _apply_autofix(db, root: str, case, rx, item: dict, dry_run: bool) -> 
         if not binary:
             return await _fail(db, case, rx, item, "未找到 ruff，成药未执行，文件未改")
         command = [binary, "check", "--fix", "--unsafe-fixes", "--no-cache", "--quiet"]
-        selected = re.search(r"规则\s+([A-Za-z][A-Za-z0-9]+)", item["instructions"])
+        selected = _rule_id_from_item(item)
         if selected:
-            command += ["--select", selected.group(1)]
+            command += ["--select", selected]
         command += paths
         executor = "ruff --fix"
 
@@ -843,7 +933,12 @@ async def _verify_item(db, root, case, item: dict, latest: dict) -> dict:
     nursing["content_check"] = content
     alias = (item.get("acceptance") or {}).get("alias") or ""
     if alias:
-        ran = await run_alias(root, alias)
+        ran = await run_alias(
+            root,
+            alias,
+            scope_paths=list(item.get("scope_paths") or []),
+            rule_id=_rule_id_from_item(item),
+        )
         nursing["acceptance"] = ran["verdict"]
         nursing["env_precheck"] = "pass" if ran["verdict"] != "skipped" else "skipped"
         if ran["verdict"] == "fail":
@@ -1045,7 +1140,12 @@ async def _reject_if_acceptance_failed(db, root, case, rx, item, before: dict, n
     alias = (item.get("acceptance") or {}).get("alias") or ""
     if not alias:
         return None
-    result = await run_alias(root, alias)
+    result = await run_alias(
+        root,
+        alias,
+        scope_paths=list(item.get("scope_paths") or []),
+        rule_id=_rule_id_from_item(item),
+    )
     nursing["env_precheck"] = "pass"
     nursing["acceptance"] = result["verdict"]
     if result["verdict"] == "warn" and nursing.get("verdict") == "pass":

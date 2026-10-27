@@ -12,7 +12,7 @@ from code_hospital import adapters
 from code_hospital.adapters import RawFinding, ScannerAdapter
 from code_hospital.departments import diagnostician, pharmacist, prescriber, reception, scanner
 from code_hospital.departments.pharmacist import _ruff_binary
-from code_hospital.safety.acceptance import load_commands, run_alias, save_detected
+from code_hospital.safety.acceptance import acceptance_argv, load_commands, run_alias, save_detected
 
 
 class RuffFixAdapter(ScannerAdapter):
@@ -80,6 +80,48 @@ def git_repo(tmp_path: Path) -> str:
     (tmp_path / "src" / "a.py").write_text("def f():\n    x = 1\n    return 2\n", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
     return str(tmp_path)
+
+
+def test_lint_argv_selects_rule_and_scope():
+    assert acceptance_argv("ruff check", "lint", ["src/libdiff.py"], "F541") == [
+        "ruff", "check", "--select", "F541", "src/libdiff.py",
+    ]
+    assert acceptance_argv("pytest -q", "test", ["src/a.py"], "F541") == ["pytest", "-q"]
+    assert acceptance_argv("ruff check --select F401", "lint", ["src/a.py"], "F541") == [
+        "ruff", "check", "--select", "F401", "src/a.py",
+    ]
+
+
+async def test_lint_acceptance_ignores_other_files(git_repo):
+    if not _ruff_binary() or shutil.which("ruff") is None:
+        pytest.skip("需要 PATH 上的 ruff")
+    (Path(git_repo) / "src" / "b.py").write_text(
+        "def g():\n    y = 1\n    return 2\n", encoding="utf-8",
+    )
+    (Path(git_repo) / "code-hospital.yaml").write_text(
+        yaml.safe_dump({"acceptance": {"commands": {"lint": "ruff check"}}}),
+        encoding="utf-8",
+    )
+    adapters.clear()
+    adapters.register(RuffFixAdapter())
+    reg = await reception.register(
+        title="验收范围", scope_type="staged", scope={}, auto_advance=False, project_root=git_repo,
+    )
+    case_id = reg["case_id"]
+    await scanner.scan(case_id=case_id, stage_confirmed=True, project_root=git_repo)
+    await diagnostician.diagnose(case_id=case_id, stage_confirmed=True, project_root=git_repo)
+    draft = await prescriber.prescribe(
+        case_id=case_id, stage_confirmed=True, low_confidence="exclude", project_root=git_repo,
+    )
+    assert draft["status"] == "draft"
+    await prescriber.prescribe(
+        case_id=case_id, approve=True, approver="host_agent", project_root=git_repo,
+    )
+    kept = await pharmacist.dispense(prescription_id=draft["prescription_id"], project_root=git_repo)
+    assert kept["status"] == "applied"
+    assert kept["nursing"]["acceptance"] == "pass"
+    assert "x = 1" not in (Path(git_repo) / "src" / "a.py").read_text(encoding="utf-8")
+    assert "y = 1" in (Path(git_repo) / "src" / "b.py").read_text(encoding="utf-8")
 
 
 async def test_failed_acceptance_restores_file(git_repo):

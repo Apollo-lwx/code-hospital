@@ -53,6 +53,7 @@ async def register(
     auto_advance: bool = False,
     requested_specialties: list[str] | None = None,
     requested_instruments: list[str] | None = None,
+    visit_kind: str = "checkup",
     project_root: str = "",
 ) -> dict:
     """hosp_register 主逻辑，返回契约 §3.1 出参。
@@ -73,6 +74,12 @@ async def register(
     specialties = list(requested_specialties or [])
     instruments = list(requested_instruments or [])
     _check_catalog_request(specialties, instruments)
+    from ..catalog.visits import normalize_visit_kind
+
+    try:
+        kind = normalize_visit_kind(visit_kind)
+    except ValueError as exc:
+        raise bad_argument(f"visit_kind 只能是 {exc}", target="visit_kind") from exc
     await ensure_git_repo(root)
 
     scope_obj = Scope(
@@ -127,6 +134,8 @@ async def register(
             pending_gate="" if auto_advance else "registered",
             requested_specialties=specialties,
             requested_instruments=instruments,
+            visit_kind=kind,
+            chief_complaint=chief_complaint.strip()[:500],
             created_at=ts,
             updated_at=ts,
         )
@@ -159,6 +168,7 @@ async def register(
     return {
         "case_id": case.id,
         "triage_level": triage,
+        "visit_kind": kind,
         "status": "registered",
         "duplicate_cases": duplicates,
         "precheck": {"ran": scope_type != ScopeType.REPO.value, "hits": precheck_hits},

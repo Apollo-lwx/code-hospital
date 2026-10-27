@@ -31,7 +31,8 @@ async def collect_findings(
     report_id: str,
     tools: list[str] | None = None,
     timeout_ms: int = 120_000,
-) -> tuple[list[dict], list[str], list[Finding]]:
+    prior_coverage: dict | None = None,
+) -> tuple[list[dict], list[str], list[Finding], dict]:
     """跑当前注册的设备并盖双键指纹。不入库，初诊和复诊共用。"""
     from ..core.models import SEVERITY_ORDER
 
@@ -56,6 +57,7 @@ async def collect_findings(
             case.triage_level, files,
             getattr(case, "requested_specialties", []),
             getattr(case, "requested_instruments", []),
+            getattr(case, "visit_kind", "checkup"),
         ))
         registry = [a for a in registry if a.name not in catalog_ids or a.name in selected]
     devices: list[dict] = []
@@ -97,6 +99,10 @@ async def collect_findings(
                 finding.symbol = raw["symbol"]
             findings.append(finding)
         devices.append({"tool": "structure-ruler", "available": True, "version": "builtin", "outcome": "ok"})
+    _attach_depth(root, case, report_id, files, selected, devices, findings, limitations, timeout_ms)
+    _attach_business(root, case, report_id, files, selected, devices, findings, limitations)
+    _attach_severe(root, case, report_id, files, selected, devices, findings, limitations)
+    _attach_engines(root, case, report_id, files, selected, devices, findings, limitations, timeout_ms)
     await _run_catalog_instruments(
         root, case, report_id, files, selected, devices, findings, limitations, timeout_ms,
     )
@@ -108,9 +114,25 @@ async def collect_findings(
     before = len(findings)
     findings = [item for item in findings if keeps(item.rule_id, item.severity, policy)]
     limitations.append(describe(policy, before - len(findings)))
+    from ..catalog.adjudicate import adjudicate_findings
+    from ..catalog.coverage import build_ledger
+    from ..catalog.visits import coverage_line
+
+    adjudicate_findings(root, findings)
+    full_scan = not tools or tools == ["auto"]
+    ledger_lines, ledger = build_ledger(
+        getattr(case, "visit_kind", "checkup") or "checkup",
+        devices, root, files, prior_coverage, full_scan,
+    )
+    limitations.extend(ledger_lines)
+    limitations.append(coverage_line(
+        getattr(case, "visit_kind", "checkup") or "checkup",
+        sorted(selected),
+        devices,
+    ))
     findings.sort(key=lambda f: (SEVERITY_ORDER.get(f.severity, 9), f.file_path, f.line_start))
     stamp_findings(findings)
-    return devices, limitations, findings
+    return devices, limitations, findings, ledger
 
 
 def detect_acceptance_commands(project_root: str) -> list[dict]:
@@ -208,6 +230,150 @@ def normalize(
         first_seen_round=1,
         last_seen_round=1,
     )
+
+
+_DEPTH_IDS = (
+    "security-ruler", "defect-ruler", "perf-ruler", "algo-ruler", "supply-ruler", "test-gap",
+)
+
+
+def _attach_business(root, case, report_id, files, selected, devices, findings, limitations):
+    """业务号。没有写下来的规则时记为未查，不当成正常。"""
+    if "business-ruler" not in selected:
+        return
+    from ..catalog.business import scan_business
+
+    raws, extra, outcome = scan_business(
+        root, files, getattr(case, "chief_complaint", "") or "",
+    )
+    limitations.extend(extra)
+    for raw in raws:
+        findings.append(normalize(
+            RawFinding(
+                rule_id=raw["rule_id"], message=raw["message"], file_path=raw["file_path"],
+                line_start=raw["line_start"], line_end=raw["line_end"], severity=raw["severity"],
+                extra={"symbol": raw.get("symbol") or ""},
+            ),
+            "business-ruler", case.id, report_id, root,
+        ))
+    devices.append({
+        "tool": "business-ruler",
+        "available": outcome == "ok",
+        "version": "builtin",
+        "outcome": outcome,
+    })
+
+
+def _remember(limitations: list[str], notes: list[str]) -> None:
+    for note in notes:
+        if note and note not in limitations:
+            limitations.append(note)
+
+
+def _append_raws(root, case, report_id, findings, raws, tool: str) -> None:
+    for raw in raws:
+        findings.append(normalize(
+            RawFinding(
+                rule_id=raw["rule_id"], message=raw["message"], file_path=raw["file_path"],
+                line_start=raw["line_start"], line_end=raw["line_end"], severity=raw["severity"],
+                extra={"symbol": raw.get("symbol") or ""},
+            ),
+            tool, case.id, report_id, root,
+        ))
+
+
+def _attach_severe(root, case, report_id, files, selected, devices, findings, limitations):
+    """重症号只看本次改动。没有 diff 时两把尺都记为没拍成。"""
+    wanted = [item for item in ("taint-ruler", "impact-review") if item in selected]
+    if not wanted:
+        return
+    from ..catalog.severe import resolve_change_set, scan_impact, scan_taint
+
+    narrowed, notes, usable = resolve_change_set(
+        root, files, getattr(case, "scope_type", "repo") or "repo",
+    )
+    _remember(limitations, notes)
+    runners = {"taint-ruler": scan_taint, "impact-review": scan_impact}
+    for instrument_id in wanted:
+        if not usable:
+            devices.append({
+                "tool": instrument_id, "available": False, "version": "builtin", "outcome": "terminal",
+            })
+            continue
+        raws, extra, outcome = runners[instrument_id](root, narrowed)
+        _remember(limitations, extra)
+        _append_raws(root, case, report_id, findings, raws, instrument_id)
+        devices.append({
+            "tool": instrument_id,
+            "available": outcome == "ok",
+            "version": "builtin",
+            "outcome": outcome,
+        })
+
+
+def _attach_engines(root, case, report_id, files, selected, devices, findings, limitations, timeout_ms):
+    """外部仪器只从登记表取。重症号把同一份 diff 交给这些引擎。"""
+    from ..catalog.engines import engines_for
+    from ..catalog.severe import resolve_change_set
+
+    engines = engines_for(selected)
+    if not engines:
+        return
+    scan_files = files
+    if (getattr(case, "visit_kind", "") or "") == "severe":
+        scan_files, notes, usable = resolve_change_set(
+            root, files, getattr(case, "scope_type", "repo") or "repo",
+        )
+        _remember(limitations, notes)
+        if not usable:
+            for engine in engines:
+                devices.append({
+                    "tool": engine.instrument_id, "available": False, "version": "", "outcome": "terminal",
+                })
+            return
+    timeout_s = min(90.0, max(timeout_ms, 0) / 1000)
+    for engine in engines:
+        raws, extra, outcome = engine.run(root, scan_files, timeout_s)
+        _remember(limitations, extra)
+        _append_raws(root, case, report_id, findings, raws, engine.instrument_id)
+        devices.append({
+            "tool": engine.instrument_id,
+            "available": outcome == "ok",
+            "version": engine.instrument_id,
+            "outcome": outcome,
+        })
+
+
+def _attach_depth(root, case, report_id, files, selected, devices, findings, limitations, timeout_ms):
+    """号别点名的院内深度尺。外部漏洞扫描器没到岗时只留下限制项。"""
+    wanted = [item for item in _DEPTH_IDS if item in selected]
+    if not wanted:
+        return
+    from ..catalog.depth import run_supply_cve, scan_depth
+
+    grouped, extra = scan_depth(
+        root, files, wanted,
+        scope_type=getattr(case, "scope_type", "repo"),
+        visit_kind=getattr(case, "visit_kind", "checkup") or "checkup",
+    )
+    limitations.extend(extra)
+    if "supply-ruler" in wanted:
+        cve_raws, cve_notes = run_supply_cve(root, min(20.0, max(timeout_ms, 0) / 1000))
+        grouped.setdefault("supply-ruler", []).extend(cve_raws)
+        limitations.extend(cve_notes)
+    for instrument_id in wanted:
+        for raw in grouped.get(instrument_id) or []:
+            findings.append(normalize(
+                RawFinding(
+                    rule_id=raw["rule_id"], message=raw["message"], file_path=raw["file_path"],
+                    line_start=raw["line_start"], line_end=raw["line_end"], severity=raw["severity"],
+                    extra={"symbol": raw.get("symbol") or ""},
+                ),
+                instrument_id, case.id, report_id, root,
+            ))
+        devices.append({
+            "tool": instrument_id, "available": True, "version": "builtin", "outcome": "ok",
+        })
 
 
 _PACK_EXTENSIONS = {
@@ -415,9 +581,16 @@ async def scan(
             )
 
         report_id = new_id("rpt")
-        devices, limitations, findings = await collect_findings(
-            root, case, report_id, tools, timeout_ms,
+        prior = await db.prior_coverage(root, case_id)
+        devices, limitations, findings, ledger = await collect_findings(
+            root, case, report_id, tools, timeout_ms, prior,
         )
+        files, _skipped_files = await scope_file_list(root, case.scope_type, case.scope.model_dump())
+        from ..catalog.checks import run_checks, summarize_checks
+
+        checks, check_notes = run_checks(root, files)
+        limitations.extend(check_notes)
+        limitations.append(summarize_checks(checks))
 
         # 初诊调档：复发看 content_key（长相），身份指纹只区分同形的多处命中。
         fingerprints = sorted({f.fingerprint for f in findings if f.fingerprint})
@@ -463,7 +636,9 @@ async def scan(
 
         # 检验报告（PR 可贴）
         case.updated_at = now_ms()
-        md = render_scan_report(case, report_id, devices, findings, limitations, memory_context)
+        md = render_scan_report(
+            case, report_id, devices, findings, limitations, memory_context, checks,
+        )
         report_path = hospital_root(root) / "reports" / case_id / "scan-r1.md"
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text(md, encoding="utf-8")
@@ -482,6 +657,7 @@ async def scan(
                 [{"id": d["tool"], "outcome": d.get("outcome", "ok")} for d in devices],
                 ensure_ascii=False,
             ),
+            coverage_json=json.dumps(ledger, ensure_ascii=False),
         )
 
         # 分页出参（DB 重读后重挂派生的 history_refs）
@@ -506,6 +682,7 @@ async def scan(
             "triage_upgrade": triage_upgrade,
             "suggested_acceptance_commands": detect_acceptance_commands(root),
             "memory_context": memory_context,
+            "checks": checks,
             "report_path": str(report_path),
             "handoff": handoff(case_id, "scanned", case.auto_advance, next_tool="hosp_diagnose"),
         }
@@ -521,8 +698,8 @@ async def _supplement(db, root: str, case, timeout_ms: int) -> dict:
     scan_report = next((r for r in reports if r.stage == "scan"), None)
     report_id = scan_report.id if scan_report else new_id("rpt")
     ordered = [row["instrument_id"] for row in case.scan_orders]
-    devices, limitations, findings = await collect_findings(
-        root, case, report_id, ordered, timeout_ms,
+    devices, limitations, findings, ledger = await collect_findings(
+        root, case, report_id, ordered, timeout_ms, case.coverage,
     )
     catalog = catalog_instruments()
     seen = {device["tool"] for device in devices}
@@ -575,6 +752,7 @@ async def _supplement(db, root: str, case, timeout_ms: int) -> dict:
         instrument_notes_json=json.dumps(notes, ensure_ascii=False),
         pending_gate="" if case.auto_advance else "scanned",
         status="scanned",
+        coverage_json=json.dumps(ledger, ensure_ascii=False),
     )
     page_items, total = await db.list_findings(case.id, page=1, size=50, order_by="severity desc")
     return {

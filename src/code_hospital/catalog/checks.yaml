@@ -1,0 +1,44 @@
+# 内置检查事项。仓库 code-hospital.yaml 的 catalog.checks.disable 可以关掉事项，items 可以追加。
+# executors：code 抽出事实，external 看外部工具在不在岗，llm 交给宿主模型交卷。
+- id: arch.map
+  question: 当前架构和设计是什么
+  needs: []
+  executors: [code, external, llm]
+  code: arch_map
+  external: [lint-imports, dependency-cruiser]
+  artifact: 模块、依赖、入口，以及结构名称
+- id: arch.tradeoff
+  question: 这个架构的优缺点
+  needs: [arch.map]
+  executors: [llm]
+  artifact: 指到具体模块的优缺点
+- id: arch.duplication
+  question: 哪些重复值得收
+  needs: [arch.map]
+  executors: [external, llm]
+  external: [jscpd]
+  artifact: 架构级重复，以及值不值得收
+- id: arch.problems
+  question: 架构上有问题的地方
+  needs: [arch.map]
+  executors: [code, llm]
+  code: arch_problems
+  artifact: 依赖方向，以及契约覆盖不到的结构问题
+- id: arch.patterns
+  question: 哪些地方可以按设计模式重构
+  needs: [arch.map, arch.problems]
+  executors: [llm]
+  artifact: 模式名称、动哪些模块、依据的是前面哪份产物
+- id: complexity.bound
+  question: 带循环的函数复杂度是多少
+  needs: []
+  executors: [code, llm]
+  code: complexity
+  artifact: 规模变量、估计的界、依据的写法、这个界有没有证明
+- id: resource.leak
+  question: 有没有资源或连接没有归还
+  needs: []
+  executors: [code, external, llm]
+  code: resources
+  external: [spotbugs]
+  artifact: 没放进 with 的资源，以及跨函数有没有归还、缓存有没有上限
