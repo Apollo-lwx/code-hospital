@@ -33,6 +33,7 @@ Take your code to the hospital instead of letting AI practice "barefoot-doctor m
 - **Recurrence tracking** — fingerprinting links findings to historical cases: each finding is labeled "new" or "recurrence ×N", with its first-seen case and outcome.
 - **Local-first & private** — no API keys, no cloud calls on the main path; all records stay in the repo's own `.hospital/` (auto git-excluded).
 - **Repo-owned policy** — `code-hospital.yaml` in the treated repo decides what counts as a disease: structure thresholds, ignored rules/prefixes, severity floors.
+- **Outside help at every stage** — visits, doctors, instruments, drugs, check items, diagnosis questions, and discharge questions are added in that same file. The hospital schedules them; judgment stays with the host. Drugs that edit code automatically, and arbitrary commands, do not enter through this file.
 
 ## Installation
 
@@ -160,6 +161,21 @@ The number of ignored files is written into the lab report's "Coverage & Limitat
 
 **What counts as a disease** lives in the same `code-hospital.yaml`. The structure ruler defaults to 80 lines per function, 500 lines per file, cyclomatic complexity 15; write `0` to turn a ruler off. Rule IDs or prefixes listed in `catalog.rules.ignore` are dropped at the initial scan. See the full example in `code-hospital.yaml.example`. The effective criteria are written into the lab report's "Coverage & Limitations".
 
+**Outside help** lives under `catalog` in that file. You do not edit the hospital source. An entry that reuses a builtin id does not replace the builtin. Paths must stay inside the treated repo.
+
+| Key | What you can add | Boundary |
+|-----|------------------|----------|
+| `catalog.checks` | Check packs, in-repo yaml, single items | Executors are `llm` or `external`. `external` only records whether the command is on `PATH` |
+| `catalog.visits` | A visit that combines existing instruments and check packs | `only` runs just the listed instruments; `plus` adds them to the checkup panel |
+| `catalog.specialties` | A doctor whose cabinet lists existing drugs or drugs you added | A new way of editing code is not accepted |
+| `catalog.instruments` | A semgrep rules file, or one external command | Semgrep runs the rules file inside the repo. `external` only records presence |
+| `catalog.formulas` | A drug, with the rule ids it treats | The method is `llm_patch` or `manual` |
+| `catalog.routes` | Send one rule to one doctor | Give a concrete `rule` or `prefix`. Security findings and critical severity keep their original specialty |
+| `catalog.diagnose.items` | Questions for the host at diagnosis | An unanswered item is not a finished analysis |
+| `catalog.discharge.items` | Questions for the host at discharge | They do not change the gate |
+
+Business rules stay in `catalog.business`. If they are absent, the report says the business was not checked. It does not say the business is fine.
+
 Records, reports, and patches all live in each repo's own `.hospital/`; open another repo and you get another set — no cross-contamination.
 
 ## Development
@@ -187,6 +203,9 @@ Python via ruff is the P0 workhorse; semgrep and gitleaks plug in as optional in
 
 **Will Code Hospital modify my code without asking?**
 No. By default the flow suspends at every stage gate for your confirmation, and high-risk prescription items always require explicit human approval. For CI or one-click check-ups you can declare `auto_advance=true`: then only low-risk items self-approve, and high-risk ones are downgraded to "over-the-counter" (skipped).
+
+**Can I add my own rules, tools, or check types?**
+Yes. Put them in `code-hospital.yaml` at the treated repo's root. Check items go to the host, or record whether an external command is present. An instrument can point at a semgrep rules file in the repo. A drug can only ask the host for a patch, or be marked manual. Diagnosis and discharge can add questions; until the host answers, they are not a finished analysis. See [Configuration](#configuration) and `code-hospital.yaml.example`.
 
 **How do I use Code Hospital with Cursor or other MCP hosts?**
 Add one block to the treated project's `.cursor/mcp.json` pointing at `hosp serve` (see [Connecting to Cursor](#connecting-to-cursor)); for Qoder, Codex, or any MCP-compatible host, register the same `hosp serve` command — that's all.

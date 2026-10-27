@@ -20,12 +20,29 @@ _CAP = 4000
 _CODE = {}
 
 
+_PACK_DIR = Path(__file__).resolve().parent / "check_packs"
+
+
 def _load_builtin() -> list[dict]:
-    path = Path(__file__).with_name("checks.yaml")
-    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    rows, problem = _read_list(_PACK_DIR / "base.yaml", "基础名册")
+    if problem:
+        raise RuntimeError(problem)
+    return rows
+
+
+def _read_list(path: Path, label: str) -> tuple[list[dict], str]:
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except yaml.YAMLError:
+        return [], f"{label} 无法解析"
+    except OSError:
+        return [], f"{label} 读不了"
     if not isinstance(data, list):
-        raise RuntimeError("检查事项名册必须是列表")
-    return [_normalize(row) for row in data]
+        return [], f"{label} 必须是列表"
+    try:
+        return [_normalize(row) for row in data], ""
+    except ValueError as exc:
+        return [], f"{label} 没有采用：{exc}"
 
 
 def _normalize(row: dict) -> dict:
@@ -46,55 +63,106 @@ def _normalize(row: dict) -> dict:
     }
 
 
-def _overlay(project_root: str) -> tuple[set[str], list[dict], list[str], str]:
+def _overlay(project_root: str) -> tuple[set[str], list[dict], list, list[str], str]:
     path = Path(project_root) / "code-hospital.yaml"
     if not path.is_file():
-        return set(), [], [], ""
+        return set(), [], [], [], ""
     try:
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except yaml.YAMLError:
-        return set(), [], [], "code-hospital.yaml 无法解析，这次只用内置检查事项"
+        return set(), [], [], [], "code-hospital.yaml 无法解析，这次只用内置检查事项"
     if not isinstance(data, dict):
-        return set(), [], [], "code-hospital.yaml 不是映射，这次只用内置检查事项"
+        return set(), [], [], [], "code-hospital.yaml 不是映射，这次只用内置检查事项"
     block = (data.get("catalog") or {}).get("checks") or {}
     if not isinstance(block, dict):
-        return set(), [], [], "catalog.checks 不是映射，这次只用内置检查事项"
+        return set(), [], [], [], "catalog.checks 不是映射，这次只用内置检查事项"
     off = {str(item) for item in (block.get("disable") or [])}
-    packs = [str(item) for item in (block.get("packs") or [])]
+    packs = block.get("packs") or []
+    if not isinstance(packs, list):
+        packs = []
+    dirs = [str(item) for item in (block.get("pack_dirs") or [])]
     extra = []
     try:
         for row in block.get("items") or []:
             extra.append(_normalize(row))
     except ValueError as exc:
-        return set(), [], packs, f"catalog.checks 没有采用：{exc}"
-    return off, extra, packs, ""
+        return set(), [], packs, dirs, f"catalog.checks 没有采用：{exc}"
+    return off, extra, packs, dirs, ""
 
 
-_PACK_FILES = {
-    "principles": "principles.yaml",
-    "patterns": "patterns.yaml",
-    "effective-java": "effective-java.yaml",
-    "concurrency": "concurrency.yaml",
-    "serialization": "serialization.yaml",
-    "naming": "naming.yaml",
-    "access": "access.yaml",
-}
-_VISIT_PACKS = {
-    "architecture": ("principles", "patterns", "concurrency", "serialization", "naming", "access"),
-    "security": ("concurrency", "serialization", "access"),
-}
+def _builtin_packs() -> dict[str, Path]:
+    if not _PACK_DIR.is_dir():
+        return {}
+    return {
+        path.stem: path
+        for path in sorted(_PACK_DIR.glob("*.yaml"))
+        if path.stem not in {"base", "visits"}
+    }
 
 
-def _load_pack(name: str) -> list[dict]:
-    path = Path(__file__).with_name(_PACK_FILES[name])
-    data = yaml.safe_load(path.read_text(encoding="utf-8"))
-    if not isinstance(data, list):
-        raise RuntimeError(f"检查包 {name} 必须是列表")
-    return [_normalize(row) for row in data]
+def _visit_policy() -> tuple[dict[str, list[str]], list[dict], dict]:
+    path = _PACK_DIR / "visits.yaml"
+    if not path.is_file():
+        return {}, [], {}
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError:
+        return {}, [], {}
+    if not isinstance(data, dict):
+        return {}, [], {}
+    visits_raw = data.get("visits") or {}
+    visits: dict[str, list[str]] = {}
+    if isinstance(visits_raw, dict):
+        for key, names in visits_raw.items():
+            if isinstance(names, list):
+                visits[str(key)] = [str(item) for item in names]
+    gates = [row for row in (data.get("when") or []) if isinstance(row, dict) and row.get("pack")]
+    requires = data.get("requires") or {}
+    if not isinstance(requires, dict):
+        requires = {}
+    return visits, gates, requires
 
 
-def _has_java(files: list[str] | None) -> bool:
-    return any(Path(item).suffix.lower() == ".java" for item in (files or []))
+def _inside(root: Path, raw: str) -> tuple[Path | None, str]:
+    text = str(raw).strip()
+    if not text:
+        return None, "检查包路径是空的"
+    candidate = Path(text)
+    if candidate.is_absolute() or ".." in candidate.parts:
+        return None, f"检查包路径必须在仓库内：{text}"
+    path = (root / candidate).resolve()
+    try:
+        path.relative_to(root.resolve())
+    except ValueError:
+        return None, f"检查包路径越出仓库：{text}"
+    return path, ""
+
+
+def _pack_target(entry) -> tuple[str, str]:
+    if isinstance(entry, dict):
+        return "file", str(entry.get("file") or entry.get("path") or "")
+    text = str(entry).strip()
+    if text.endswith((".yaml", ".yml")) or "/" in text or "\\" in text:
+        return "file", text
+    return "name", text
+
+
+def _gate_matches(gate: dict, visit_kind: str, files: list[str] | None) -> bool:
+    if str(gate.get("visit") or "") != visit_kind:
+        return False
+    suffixes = [str(item).lower() for item in (gate.get("any_suffix") or [])]
+    if not suffixes:
+        return True
+    return any(Path(item).suffix.lower() in suffixes for item in (files or []))
+
+
+def _blocked_by(rule: dict, files: list[str] | None, name: str) -> str:
+    if not isinstance(rule, dict):
+        return ""
+    suffixes = [str(item).lower() for item in (rule.get("any_suffix") or [])]
+    if suffixes and not any(Path(item).suffix.lower() in suffixes for item in (files or [])):
+        return str(rule.get("missing") or f"{name} 这次没排")
+    return ""
 
 
 def load_checks(
@@ -103,23 +171,79 @@ def load_checks(
     files: list[str] | None = None,
 ) -> tuple[list[dict], str]:
     builtin = _load_builtin()
-    off, extra, configured, note = _overlay(project_root)
+    off, extra, configured, pack_dirs, note = _overlay(project_root)
     notes = [note] if note else []
-    enabled = list(configured)
-    for name in _VISIT_PACKS.get(visit_kind, ()):
-        if name not in enabled:
-            enabled.append(name)
-    if visit_kind == "architecture" and _has_java(files) and "effective-java" not in enabled:
-        enabled.append("effective-java")
+    from .outside import overlay as outside_overlay
+
+    user_visit = outside_overlay(project_root)["visits"].get(visit_kind)
+    if user_visit:
+        configured = list(configured) + list(user_visit["packs"])
+    known = _builtin_packs()
+    visits, gates, requires = _visit_policy()
+    names: list[str] = []
+    user_files: list[tuple[str, Path]] = []
+    seen_files: set[Path] = set()
+
+    def add_name(name: str) -> None:
+        if name and name not in names:
+            names.append(name)
+
+    def add_file(label: str, path: Path) -> None:
+        if path in seen_files:
+            return
+        seen_files.add(path)
+        user_files.append((label, path))
+
+    root = Path(project_root)
+    for entry in configured:
+        kind, value = _pack_target(entry)
+        if kind == "name":
+            add_name(value)
+            continue
+        path, problem = _inside(root, value)
+        if problem:
+            notes.append(problem)
+            continue
+        if path is None or not path.is_file():
+            notes.append(f"检查包文件不存在：{value}")
+            continue
+        add_file(value, path)
+    for name in visits.get(visit_kind, []):
+        add_name(name)
+    for gate in gates:
+        if _gate_matches(gate, visit_kind, files):
+            add_name(str(gate.get("pack")))
+    for raw_dir in pack_dirs:
+        folder, problem = _inside(root, raw_dir)
+        if problem:
+            notes.append(problem)
+            continue
+        if folder is None or not folder.is_dir():
+            notes.append(f"检查包目录不存在：{raw_dir}")
+            continue
+        found = sorted(folder.glob("*.yaml")) + sorted(folder.glob("*.yml"))
+        for path in found:
+            add_file(path.name, path)
     pack_rows: list[dict] = []
-    for name in enabled:
-        if name not in _PACK_FILES:
+    for name in names:
+        if name not in known:
             notes.append(f"未知检查包 {name}，这次没排")
             continue
-        if name == "effective-java" and not _has_java(files):
-            notes.append("effective-java 需要 Java 文件，这次没排")
+        blocked = _blocked_by(requires.get(name) or {}, files, name)
+        if blocked:
+            notes.append(blocked)
             continue
-        pack_rows.extend(_load_pack(name))
+        rows, problem = _read_list(known[name], name)
+        if problem:
+            notes.append(problem)
+            continue
+        pack_rows.extend(rows)
+    for label, path in user_files:
+        rows, problem = _read_list(path, label)
+        if problem:
+            notes.append(problem)
+            continue
+        pack_rows.extend(rows)
     by_id = {row["id"]: row for row in builtin if row["id"] not in off}
     for row in pack_rows + extra:
         if row["id"] in off:

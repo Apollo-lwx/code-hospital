@@ -33,6 +33,7 @@
 - **复发追踪**——指纹关联历史病例，每条发现标注「初发」或「复发×N」（含首次病例与当时结局）。
 - **本地优先、隐私可控**——主链路零 API Key、零云端调用；所有数据只落本仓库 `.hospital/`（自动加入 git exclude）。
 - **口径归仓库所有**——被诊疗仓库的 `code-hospital.yaml` 决定什么算病：结构阈值、忽略规则与前缀、严重度下限。
+- **每个阶段都能请外援**——号别、医生、仪器、药方、检查事项、诊断问题和出院问题都写在同一份配置里。医院负责调度；判断交给宿主。会自动改代码的药，以及任意命令，不从这份配置进入。
 
 ## 安装
 
@@ -160,6 +161,21 @@ scan_ignore:
 
 **什么算病**也写在同一份 `code-hospital.yaml`。结构尺默认函数 80 行、文件 500 行、圈复杂度 15，写成 `0` 就关掉这把尺。规则号或前缀放进 `catalog.rules.ignore` 后，初检直接丢掉。完整例子在 `code-hospital.yaml.example`。生效口径写在检验报告的「覆盖与限制」里。
 
+**外援**也写在这份文件的 `catalog` 下，不用改医院源码。重名条目不覆盖内置名册，路径必须留在被诊疗仓库内。
+
+| 配置 | 可以追加 | 边界 |
+|------|----------|------|
+| `catalog.checks` | 检查包、仓库内 yaml、单条事项 | 执行方是 `llm` 或 `external`。`external` 只登记命令是否在 PATH 上 |
+| `catalog.visits` | 号别，组合已有仪器和检查包 | `only` 只拍列出的仪器，`plus` 在体检套餐上加做 |
+| `catalog.specialties` | 医生，药柜里挂已有的药或自己追加的药 | 不能定义新的改码方式 |
+| `catalog.instruments` | semgrep 规则文件，或一个外部命令 | semgrep 会跑仓库内的规则文件。`external` 只登记到岗，不执行 |
+| `catalog.formulas` | 一味药，并写明它治哪些规则号 | 剂型只能是 `llm_patch` 或 `manual` |
+| `catalog.routes` | 把某条规则分到某位医生 | 要写具体 `rule` 或 `prefix`。安全发现和 critical 仍走原专科 |
+| `catalog.diagnose.items` | 诊断时要宿主回答的问题 | 没交卷不能写成已经分析过 |
+| `catalog.discharge.items` | 出院时要宿主回答的问题 | 不改变门禁结论 |
+
+业务规则仍在 `catalog.business`。不写就报告「业务未查」，不会出具业务正常。
+
 病历、报告、补丁都在各仓库自己的 `.hospital/`，打开另一个仓库就是另一份，不会串。
 
 ## 开发
@@ -187,6 +203,9 @@ P0 主力是 Python（ruff）；semgrep、gitleaks 作为可选设备接入。�
 
 **它会不问我就改代码吗？**
 不会。默认每个阶段门禁都挂起等你确认，高危处方项必须人工批准。CI 或一键体检可声明 `auto_advance=true`：此时只自批低危项，高危项一律降级为「外购」跳过。
+
+**能不能加自己的规则、工具或检查类型？**
+能。写在被诊疗仓库根目录的 `code-hospital.yaml`，不用改医院源码。检查事项交给宿主判断，或登记一个外部命令在不在。仪器可以指向仓库里的 semgrep 规则。药只能请宿主写补丁，或标成人工处理。诊断和出院可以追加问题；没回答之前，不能写成已经分析过。完整字段见[配置](#配置)和 `code-hospital.yaml.example`。
 
 **怎么接到 Cursor 或其他 MCP 宿主？**
 在被诊疗项目的 `.cursor/mcp.json` 加一段指向 `hosp serve` 的配置（见[接到 Cursor](#接到-cursor)）；Qoder、Codex 等任意 MCP 宿主注册同一条 `hosp serve` 命令即可。

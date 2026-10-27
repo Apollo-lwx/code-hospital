@@ -42,6 +42,11 @@ async def collect_findings(
         limitations.append(
             f"忽略规则跳过 {skipped} 个文件（内置排除目录 + code-hospital.yaml scan_ignore）"
         )
+    from ..catalog.outside import overlay as outside_overlay
+
+    for item in outside_overlay(root)["notes"]:
+        if item not in limitations:
+            limitations.append(item)
     registry: list[ScannerAdapter] = all_adapters()
     from ..catalog.formulary import instruments as catalog_instruments
     from ..catalog.formulary import selected_instrument_ids
@@ -58,6 +63,7 @@ async def collect_findings(
             getattr(case, "requested_specialties", []),
             getattr(case, "requested_instruments", []),
             getattr(case, "visit_kind", "checkup"),
+            root,
         ))
         registry = [a for a in registry if a.name not in catalog_ids or a.name in selected]
     devices: list[dict] = []
@@ -106,6 +112,9 @@ async def collect_findings(
     await _run_catalog_instruments(
         root, case, report_id, files, selected, devices, findings, limitations, timeout_ms,
     )
+    await _attach_user_instruments(
+        root, case, report_id, files, selected, devices, findings, limitations, timeout_ms,
+    )
     if "design" in getattr(case, "requested_specialties", []):
         limitations.append("设计科第一期无检验仪器")
     from ..catalog.policy import describe, keeps, load_policy
@@ -129,6 +138,7 @@ async def collect_findings(
         getattr(case, "visit_kind", "checkup") or "checkup",
         sorted(selected),
         devices,
+        root,
     ))
     findings.sort(key=lambda f: (SEVERITY_ORDER.get(f.severity, 9), f.file_path, f.line_start))
     stamp_findings(findings)
@@ -385,6 +395,50 @@ _PACK_EXTENSIONS = {
 def _pack_targets(instrument_id: str, files: list[str]) -> list[str]:
     exts = _PACK_EXTENSIONS.get(instrument_id, set())
     return [path for path in files if Path(path).suffix.lower() in exts]
+
+
+async def _attach_user_instruments(root, case, report_id, files, selected, devices, findings, limitations, timeout_ms):
+    """用户仪器：semgrep 规则文件会跑；external 只登记命令在不在。"""
+    from ..catalog.formulary import books_for
+    from ..catalog.packs import scan_rules, semgrep_available
+
+    catalog = {
+        key: row for key, row in books_for(root)[2].items() if row.get("user")
+    }
+    for instrument_id in selected:
+        inst = catalog.get(instrument_id)
+        if inst is None:
+            continue
+        if inst["engine"] == "external":
+            present = shutil.which(inst["binary"]) is not None
+            devices.append({
+                "tool": instrument_id,
+                "available": present,
+                "version": inst["binary"],
+                "outcome": "ok" if present else "terminal",
+            })
+            if not present:
+                limitations.append(inst["limitation"])
+            continue
+        targets = files
+        exts = {f".{item}" for item in inst.get("extensions") or []}
+        if exts:
+            targets = [path for path in files if Path(path).suffix.lower() in exts]
+        if not semgrep_available():
+            limitations.append(inst["limitation"])
+            devices.append({"tool": instrument_id, "available": False, "version": "", "outcome": "terminal"})
+            continue
+        if not targets:
+            devices.append({"tool": instrument_id, "available": True, "version": "semgrep", "outcome": "ok"})
+            limitations.append(f"{instrument_id}: 本 scope 无适配文件，跳过")
+            continue
+        try:
+            raws = await scan_rules(root, targets, inst["rules"], instrument_id, timeout_ms)
+            findings.extend(normalize(raw, instrument_id, case.id, report_id, root) for raw in raws)
+            devices.append({"tool": instrument_id, "available": True, "version": "semgrep", "outcome": "ok"})
+        except AdapterError as exc:
+            devices.append({"tool": instrument_id, "available": True, "version": "semgrep", "outcome": "retry"})
+            limitations.append(f"{instrument_id}: {exc}")
 
 
 async def _run_catalog_instruments(root, case, report_id, files, selected, devices, findings, limitations, timeout_ms):

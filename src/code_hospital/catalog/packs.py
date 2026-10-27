@@ -91,3 +91,21 @@ async def scan_pack(repo_root: str, files: list[str], instrument_id: str, timeou
     if not out.strip():
         raise AdapterError(f"{instrument_id} 执行失败：{err[:200] or '无输出'}")
     return parse_pack_json(out, instrument_id)
+
+
+async def scan_rules(
+    repo_root: str, files: list[str], config: str, instrument_id: str, timeout_ms: int,
+) -> list[RawFinding]:
+    """跑仓库内的一份 semgrep 规则。配置路径由外援名册事先限定在仓库里。"""
+    if not semgrep_available():
+        raise AdapterError("semgrep 未到岗")
+    if not files:
+        return []
+    out, err = await _run(
+        ["semgrep", "scan", "--json", "--quiet", "--metrics=off", "--config", config, "--", *files],
+        cwd=repo_root,
+        timeout=max(timeout_ms / 1000, 1),
+    )
+    if not out.strip():
+        raise AdapterError(f"{instrument_id} 执行失败：{err[:200] or '无输出'}")
+    return parse_pack_json(out, instrument_id)

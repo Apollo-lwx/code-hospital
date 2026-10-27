@@ -1,0 +1,22 @@
+# 号别自动排哪些内置包。新增内置包：往本目录放一份 yaml，再在这里点名。
+# 用户自己的包不要写在这里，写在被诊疗仓库的 code-hospital.yaml。
+visits:
+  architecture:
+    - principles
+    - patterns
+    - concurrency
+    - serialization
+    - naming
+    - access
+  security:
+    - concurrency
+    - serialization
+    - access
+when:
+  - pack: effective-java
+    visit: architecture
+    any_suffix: [".java"]
+requires:
+  effective-java:
+    any_suffix: [".java"]
+    missing: effective-java 需要 Java 文件，这次没排

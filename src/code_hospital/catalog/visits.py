@@ -56,21 +56,49 @@ _PANELS: dict[str, tuple[str, tuple[str, ...]]] = {
 }
 
 
-def normalize_visit_kind(value: str) -> str:
+def normalize_visit_kind(value: str, project_root: str = "") -> str:
     kind = (value or "checkup").strip() or "checkup"
-    if kind not in _PANELS:
-        allowed = "、".join(VISIT_KINDS)
-        raise ValueError(allowed)
+    if kind in _PANELS:
+        return kind
+    from .outside import overlay
+
+    if kind in overlay(project_root)["visits"]:
+        return kind
+    allowed = list(VISIT_KINDS) + list(overlay(project_root)["visits"])
+    raise ValueError("、".join(allowed))
+
+
+def panel(kind: str, project_root: str = "") -> tuple[str, tuple[str, ...]]:
+    kind = normalize_visit_kind(kind, project_root)
+    if kind in _PANELS:
+        return _PANELS[kind]
+    from .outside import overlay
+
+    visit = overlay(project_root)["visits"][kind]
+    return visit["mode"], tuple(visit["instruments"])
+
+
+def label_for(kind: str, project_root: str = "") -> str:
+    if kind in VISIT_LABELS:
+        return VISIT_LABELS[kind]
+    if not project_root:
+        return kind
+    from .outside import overlay
+
+    visit = overlay(project_root)["visits"].get(kind)
+    if visit:
+        return visit["label"]
     return kind
 
 
-def panel(kind: str) -> tuple[str, tuple[str, ...]]:
-    return _PANELS[normalize_visit_kind(kind)]
-
-
-def coverage_line(visit_kind: str, selected: list[str], devices: list[dict]) -> str:
+def coverage_line(
+    visit_kind: str,
+    selected: list[str],
+    devices: list[dict],
+    project_root: str = "",
+) -> str:
     """计划内仪器有没有拍成。没拍成的维度不能当成正常。"""
-    label = VISIT_LABELS.get(visit_kind, visit_kind)
+    label = label_for(visit_kind, project_root)
     by_tool: dict[str, dict] = {}
     for row in devices:
         by_tool.setdefault(row.get("tool", ""), row)

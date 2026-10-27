@@ -118,6 +118,31 @@ def _validate(formulas: dict[str, Formula], specialties: dict[str, dict]) -> Non
         raise RuntimeError(f"当前阶段的药没有放进任何药柜：{missing}")
 
 
+def books_for(project_root: str = "") -> tuple[dict[str, Formula], dict[str, dict], dict[str, dict]]:
+    """内置名册加上这个仓库的外援。外援不写进缓存。"""
+    formulas, specs, instruments = load()
+    if not project_root:
+        return formulas, specs, instruments
+    from .outside import overlay
+
+    extra = overlay(project_root)
+    formulas = dict(formulas)
+    specs = {key: {**row, "formulary": list(row["formulary"])} for key, row in specs.items()}
+    instruments = dict(instruments)
+    for row in extra["formulas"].values():
+        formulas[row["id"]] = Formula(
+            id=row["id"], name=row["name"], method=row["method"], risk=row["risk"],
+            phase=row["phase"], hold=row["hold"], scope=row["scope"],
+            acceptance_alias=row["acceptance_alias"], indications=list(row["indications"]),
+            risk_overrides=list(row["risk_overrides"]),
+        )
+    for row in extra["specialties"].values():
+        specs[row["id"]] = row
+    for row in extra["instruments"].values():
+        instruments[row["id"]] = row
+    return formulas, specs, instruments
+
+
 def formulas() -> dict[str, Formula]:
     return load()[0]
 
@@ -140,7 +165,7 @@ def opening_verdict(members) -> str:
     return min(blocked, key=lambda item: rank[item])
 
 
-def route(tool: str, rule_id: str, severity: str) -> str:
+def route(tool: str, rule_id: str, severity: str, project_root: str = "") -> str:
     """一条发现的接诊专科。安全科优先于 critical 封存；其余 critical 仍改到全科。"""
     if tool in _SECURITY_TOOLS:
         return "security"
@@ -160,6 +185,20 @@ def route(tool: str, rule_id: str, severity: str) -> str:
             continue
         if rank >= best[0]:
             best = (rank, specialty)
+    if project_root:
+        from .outside import overlay
+
+        for inst, pattern, specialty in overlay(project_root)["routes"]:
+            if inst != tool:
+                continue
+            if pattern == rule_id:
+                rank = 2
+            elif rule_id.startswith(pattern):
+                rank = 1
+            else:
+                continue
+            if rank >= best[0]:
+                best = (rank, specialty)
     return best[1]
 
 
@@ -206,10 +245,13 @@ def match_finding(
     tool: str, rule_id: str, severity: str,
     specialty_id: str | None = None, fixable: bool = False,
     verdict: str = "",
+    project_root: str = "",
 ) -> Match:
     """按 §4.3 的顺序从该专科药柜里选主药。对不上则待复核。"""
-    books, specs, _instruments = load()
-    specialty_id = specialty_id or route(tool, rule_id, severity)
+    books, specs, _instruments = books_for(project_root)
+    specialty_id = specialty_id or route(tool, rule_id, severity, project_root)
+    if specialty_id not in specs:
+        specialty_id = "general"
     if verdict in {"needs_validation", "rejected"}:
         return Match(None, specialty_id, 0.40, False)
     cabinet = [
@@ -249,11 +291,11 @@ def effective_method(formula: Formula, acceptance_open: bool) -> str:
     return formula.method
 
 
-def companion_for(formula_id: str, method: str, specialty_id: str) -> Formula | None:
+def companion_for(formula_id: str, method: str, specialty_id: str, project_root: str = "") -> Formula | None:
     if method != "llm_patch":
         return None
-    books, specs, _ = load()
-    if "contrast" not in specs[specialty_id]["formulary"]:
+    books, specs, _ = books_for(project_root)
+    if specialty_id not in specs or "contrast" not in specs[specialty_id]["formulary"]:
         return None
     contrast = books["contrast"]
     if contrast.phase > CURRENT_PHASE:
@@ -397,12 +439,13 @@ def selected_instrument_ids(
     requested_specialties: list[str],
     requested_instruments: list[str],
     visit_kind: str = "checkup",
+    project_root: str = "",
 ) -> list[str]:
     """初检套餐。号别决定加做哪些深度尺；点名的类型尺仍留给检查单。"""
     from .visits import panel
 
     suffixes = _file_suffixes(files)
-    catalog = instruments()
+    catalog = books_for(project_root)[2]
     chosen: list[str] = []
     for inst in catalog.values():
         if inst["activation"] != "package":
@@ -420,7 +463,7 @@ def selected_instrument_ids(
         chosen.append(inst["id"])
     if triage == "checkup" and "architecture" in requested_specialties:
         chosen.append("layer-ruler")
-    mode, extra = panel(visit_kind or "checkup")
+    mode, extra = panel(visit_kind or "checkup", project_root)
     # requested_instruments 里的类型尺不进初检，避免和「点名专科不等于点名仪器」搅在一起。
     _ = requested_instruments
     if mode == "only":

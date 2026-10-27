@@ -26,17 +26,28 @@ catalog:
       - ASYNC
     min_severity: ""     # 留空全留；写成 major 则只留 critical 和 major
     ruff_select: []      # 例如 [F, E9]。空列表表示沿用本机 ruff 的默认规则集
-  # 检查事项的内置名单在 catalog/checks.yaml。这里可以关掉或追加。
-  # 执行方是 code、external、llm。llm 由宿主交卷，医院不代写判断。
+  # 内置事项在医院的 catalog/check_packs。号别排哪些包写在 visits.yaml。
+  # 下面是被诊疗仓库自己的外援，不用改医院源码。
+  # 执行方是 code、external、llm。code 只能点医院已经有的事实采集。
+  # llm 由宿主交卷。external 只登记命令是否在 PATH 上，医院不代跑。
   # checks:
   #   disable: [arch.patterns]
-  #   packs: [principles]   # 还可写 patterns、effective-java、concurrency、serialization、naming、access
+  #   packs:
+  #     - principles
+  #     - hospital/team.yaml    # 仓库内的 yaml。也可以写成 {file: hospital/team.yaml}
+  #   pack_dirs:
+  #     - hospital/checks        # 这个目录下每份 yaml 都是一组事项
   #   items:
   #     - id: custom.note
   #       question: 这次还要看什么
   #       needs: [arch.map]
   #       executors: [llm]
   #       artifact: 一段结论
+  #     - id: custom.tool
+  #       question: 外部工具有没有到岗
+  #       executors: [external]
+  #       external: [my-linter]
+  #       artifact: 工具是否在 PATH 上
   # 业务号只核对写在这里的规则。不写就报告「业务未查」，不会出具业务正常。
   # business:
   #   machines:
@@ -53,3 +64,42 @@ catalog:
   #   invariants:
   #     - id: refund-balance
   #       text: 退款必须把余额加回去
+  # 外援。重名的不覆盖内置。路径必须在本仓库内。
+  # visits:
+  #   - id: pay-review
+  #     label: 支付复查
+  #     mode: only          # only 只拍下面这些；plus 在体检套餐上加做
+  #     instruments: [ruff, team-semgrep]
+  #     packs: [access]     # 内置检查包，或本仓库的 yaml 路径
+  # specialties:
+  #   - id: payments
+  #     name: 支付科
+  #     formulary: [team-note, guard]
+  # routes:
+  #   - {tool: ruff, rule: PAY001, specialty: payments}
+  # instruments:
+  #   - id: team-semgrep
+  #     concern: 小组规则
+  #     engine: semgrep
+  #     rules: hospital/team.yml
+  #     extensions: [py]
+  #   - id: team-tool
+  #     concern: 到岗登记
+  #     engine: external
+  #     binary: my-linter
+  # formulas:
+  #   - id: team-note
+  #     name: 补记
+  #     method: llm_patch    # 只能是 llm_patch 或 manual
+  #     indications:
+  #       - {kind: rule, rule_ids: [PAY001]}
+  # diagnose:
+  #   items:
+  #     - id: pay.why
+  #       question: 金额为什么在这里改
+  #       artifact: 指到函数
+  # discharge:
+  #   items:
+  #     - id: pay.ship
+  #       question: 出院前还有没有未对上的金额
+  #       artifact: 一句结论

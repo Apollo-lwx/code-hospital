@@ -120,6 +120,7 @@ def cluster_findings(
     case_id: str,
     report_id: str,
     history: dict[str, list[dict]],
+    project_root: str = "",
 ) -> list[tuple[Diagnosis, list[Finding]]]:
     clusters: list[tuple[Diagnosis, list[Finding]]] = []
     for members in group_findings(findings):
@@ -129,6 +130,7 @@ def cluster_findings(
             head.tool, head.rule_id, severity,
             fixable=bool(getattr(head, "fixable", False)),
             verdict=opening_verdict(members),
+            project_root=project_root,
         )
         fixability = matched.method
         if matched.formula is not None:
@@ -234,14 +236,16 @@ async def diagnose(
                 for fp, refs in raw_history.items()
             }
             report_id = new_id("rpt")
-            clusters = cluster_findings(findings, case_id, report_id, history)
+            clusters = cluster_findings(findings, case_id, report_id, history, root)
             diagnoses = [d for d, _members in clusters]
             conditions = build_conditions(clusters, case.requested_specialties)
             stats = _stats(findings, diagnoses)
             await db.insert_diagnoses(diagnoses)
+            from ..catalog.outside import overlay as outside_overlay
 
+            questions = outside_overlay(root)["diagnose"]
             case.updated_at = now_ms()
-            md = render_diagnose_report(case, report_id, clusters, stats, use_llm)
+            md = render_diagnose_report(case, report_id, clusters, stats, use_llm, questions)
             report_path = hospital_root(root) / "reports" / case_id / f"diagnose-r{case.round}.md"
             report_path.parent.mkdir(parents=True, exist_ok=True)
             report_path.write_text(md, encoding="utf-8")
@@ -266,6 +270,7 @@ async def diagnose(
                 "diagnoses": [d.model_dump() for d in diagnoses],
                 "conditions": conditions,
                 "stats": stats,
+                "questions": questions,
                 "report_path": str(report_path),
                 "handoff": handoff(case_id, "diagnosed", case.auto_advance, next_tool="hosp_prescribe"),
             }

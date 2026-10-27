@@ -330,8 +330,11 @@ async def _close(db, root, case, buckets, current, public, gate, outcome, report
         encoding="utf-8",
     )
     summary_path = folder / "discharge-final.md"
+    from ..catalog.outside import overlay as outside_overlay
+
+    questions = outside_overlay(root)["discharge"]
     summary_path.write_text(
-        render_discharge_report(case, outcome, gate, public, str(follow_path)),
+        render_discharge_report(case, outcome, gate, public, str(follow_path), questions),
         encoding="utf-8",
     )
     reports = await db.list_reports(case.id)
@@ -378,6 +381,7 @@ async def _close(db, root, case, buckets, current, public, gate, outcome, report
             "ci_snippet_path": str(follow_path),
         },
         "report_chain": [r.id for r in reports] + [report_id],
+        "questions": questions,
         "handoff": handoff(case.id, "discharged", True, ""),
         "note": note,
     }

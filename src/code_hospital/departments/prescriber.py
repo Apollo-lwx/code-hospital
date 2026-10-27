@@ -250,6 +250,7 @@ def _primary_items(
 def build_items(
     diagnoses: list, findings_by_id: dict, prescription_id: str, include_low: bool,
     requested: list[str] | None = None,
+    project_root: str = "",
 ) -> list[dict]:
     chosen = [
         d for d in diagnoses
@@ -281,6 +282,7 @@ def build_items(
             head.tool, head.rule_id, diagnosis.severity,
             fixable=bool(getattr(head, "fixable", False)),
             verdict=opening_verdict(members),
+            project_root=project_root,
         )
         if matched.formula is None:
             continue
@@ -294,7 +296,9 @@ def build_items(
         ):
             drafted.append(item)
             hint += 1
-        companion = companion_for(matched.formula.id, method, matched.specialty_id)
+        companion = companion_for(
+            matched.formula.id, method, matched.specialty_id, project_root,
+        )
         if companion is None:
             continue
         drafted.append(_draft_item(
@@ -485,6 +489,7 @@ async def prescribe(
             diagnoses, by_id, prescription_id,
             include_low=low_confidence == "adopt",
             requested=case.requested_specialties,
+            project_root=root,
         )
         needs = {it["acceptance"].get("alias") for it in items if it["acceptance"].get("alias")}
         from ..safety.acceptance import load_commands, save_detected

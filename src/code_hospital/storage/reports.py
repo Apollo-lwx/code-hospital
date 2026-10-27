@@ -113,10 +113,10 @@ _FORMULA_PLAIN = {
 
 
 def _visit_label(case: Case) -> str:
-    from ..catalog.visits import VISIT_LABELS
+    from ..catalog.visits import label_for
 
     kind = getattr(case, "visit_kind", "") or "checkup"
-    label = VISIT_LABELS.get(kind, kind)
+    label = label_for(kind, getattr(case, "project_root", "") or "")
     return f"{label}（{kind}）"
 
 
@@ -517,6 +517,16 @@ def render_scan_report(
     return "\n".join(parts)
 
 
+def _outside_questions(questions: list[dict] | None) -> list[str]:
+    if not questions:
+        return []
+    lines = ["## 外援问题", "", "下面这些还没交卷，不能写成已经分析过。", ""]
+    for item in questions:
+        lines.append(f"- {item['id']}：{item['question']}。要交出：{item['artifact']}")
+    lines.append("")
+    return lines
+
+
 def _check_section(checks: list[dict]) -> list[str]:
     parts = [
         "## 检查事项",
@@ -559,6 +569,7 @@ def render_diagnose_report(
     clusters: list[tuple],
     stats: dict,
     use_llm: bool = False,
+    questions: list[dict] | None = None,
 ) -> str:
     """诊断书（契约 §5.4）。clusters 为 (Diagnosis, findings) 对，位置只出现在报告里。"""
     parts = [
@@ -577,6 +588,7 @@ def render_diagnose_report(
     else:
         parts += ["> 分组和处置建议来自规则表，不是模型判断。", ""]
     parts += _diagnose_cards(case, clusters)
+    parts += _outside_questions(questions)
     parts += ["## 问题分组", ""]
     if not clusters:
         parts.append("没有发现。")
@@ -823,7 +835,10 @@ _OUTCOME_LABEL = {
 }
 
 
-def render_discharge_report(case: Case, outcome: str, gate: dict, diff: dict, follow_path: str) -> str:
+def render_discharge_report(
+    case: Case, outcome: str, gate: dict, diff: dict, follow_path: str,
+    questions: list[dict] | None = None,
+) -> str:
     """出院小结（契约 §5.7）。"""
     rows = []
     for check in gate["checks"]:
@@ -856,6 +871,7 @@ def render_discharge_report(case: Case, outcome: str, gate: dict, diff: dict, fo
         "",
         f"- 疗程: {case.round} 轮",
         "",
+        *_outside_questions(questions),
         "## 随访计划",
         "",
         f"见 `{follow_path}`。",

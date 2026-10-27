@@ -26,13 +26,14 @@ def resolve_project_root(project_root: str = "") -> str:
     return str(os.path.abspath(root))
 
 
-def _check_catalog_request(specialties: list[str], instruments: list[str]) -> None:
-    from ..catalog.formulary import REQUESTABLE_INSTRUMENTS, SPECIALTY_IDS
+def _check_catalog_request(specialties: list[str], instruments: list[str], project_root: str = "") -> None:
+    from ..catalog.formulary import REQUESTABLE_INSTRUMENTS, books_for
 
-    unknown = [item for item in specialties if item not in SPECIALTY_IDS]
+    known = set(books_for(project_root)[1])
+    unknown = [item for item in specialties if item not in known]
     if unknown:
         raise bad_argument(
-            f"requested_specialties 只能是 {list(SPECIALTY_IDS)}",
+            f"requested_specialties 只能是 {sorted(known)}",
             target="requested_specialties",
         )
     unknown_tools = [item for item in instruments if item not in REQUESTABLE_INSTRUMENTS]
@@ -73,11 +74,11 @@ async def register(
         raise bad_argument("max_rounds 须在 1..10", target="max_rounds")
     specialties = list(requested_specialties or [])
     instruments = list(requested_instruments or [])
-    _check_catalog_request(specialties, instruments)
+    _check_catalog_request(specialties, instruments, root)
     from ..catalog.visits import normalize_visit_kind
 
     try:
-        kind = normalize_visit_kind(visit_kind)
+        kind = normalize_visit_kind(visit_kind, root)
     except ValueError as exc:
         raise bad_argument(f"visit_kind 只能是 {exc}", target="visit_kind") from exc
     await ensure_git_repo(root)

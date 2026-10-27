@@ -207,3 +207,50 @@ def test_architecture_visit_checks_naming(tmp_path):
     text = next(item["text"] for item in naming["executors"] if item["kind"] == "code")
     assert "名字过短" in text
     assert "没有说明" in text
+
+
+def test_user_pack_file_and_directory(tmp_path):
+    (tmp_path / "team.yaml").write_text(
+        "- id: team.note\n"
+        "  question: 看交接\n"
+        "  executors: [llm]\n"
+        "  artifact: 一句结论\n",
+        encoding="utf-8",
+    )
+    folder = tmp_path / "rules"
+    folder.mkdir()
+    (folder / "local.yaml").write_text(
+        "- id: team.tool\n"
+        "  question: 工具在不在\n"
+        "  executors: [external]\n"
+        "  external: [definitely-missing-tool]\n"
+        "  artifact: 到岗情况\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "code-hospital.yaml").write_text(
+        "catalog:\n"
+        "  checks:\n"
+        "    packs:\n"
+        "      - team.yaml\n"
+        "      - {file: team.yaml}\n"
+        "    pack_dirs: [rules]\n",
+        encoding="utf-8",
+    )
+    rows, notes = run_checks(str(tmp_path), ["a.py"])
+    ids = [row["id"] for row in rows]
+    assert "team.note" in ids
+    assert "team.tool" in ids
+    assert "principle.srp" not in ids
+    assert notes == []
+    tool = next(row for row in rows if row["id"] == "team.tool")
+    assert tool["executors"][0]["status"] == "absent"
+
+
+def test_pack_path_must_stay_in_repo(tmp_path):
+    (tmp_path / "code-hospital.yaml").write_text(
+        "catalog:\n  checks:\n    packs: [../outside.yaml]\n",
+        encoding="utf-8",
+    )
+    rows, notes = run_checks(str(tmp_path), ["a.py"])
+    assert "arch.map" in [row["id"] for row in rows]
+    assert any("仓库" in note for note in notes)
