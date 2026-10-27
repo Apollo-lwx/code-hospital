@@ -1,0 +1,42 @@
+# 设计原理包。架构号别或 catalog.checks.packs 点名后才排。判断交给宿主 LLM。
+- id: design.signals
+  question: 设计原理要用的结构信号有哪些
+  needs: [arch.map]
+  executors: [code]
+  code: design_signals
+  artifact: 方法很多的类、对具体类的继承、业务函数里直接构造具体类
+- id: principle.srp
+  question: 一个类是否同时承担了多种变化原因
+  needs: [arch.map, design.signals]
+  executors: [llm]
+  artifact: 适用、有问题或看不出来。有问题要指到类
+- id: principle.ocp
+  question: 加一种行为时是否必须改已有分支
+  needs: [arch.map, design.signals]
+  executors: [llm]
+  artifact: 适用、有问题或看不出来。有问题要指到分支所在的文件
+- id: principle.lsp
+  question: 子类是否还能放在父类出现的位置
+  needs: [arch.map, design.signals]
+  executors: [llm]
+  artifact: 适用、有问题或看不出来。有问题要指到继承关系
+- id: principle.isp
+  question: 调用方是否被迫依赖用不到的方法
+  needs: [arch.map, design.signals]
+  executors: [llm]
+  artifact: 适用、有问题或看不出来。有问题要指到类型
+- id: principle.dip
+  question: 高层是否直接构造或调用了具体实现
+  needs: [arch.map, design.signals]
+  executors: [llm]
+  artifact: 适用、有问题或看不出来。有问题要指到构造点
+- id: principle.demeter
+  question: 一个方法是否连着点进了别的对象内部
+  needs: [arch.map, design.signals]
+  executors: [llm]
+  artifact: 适用、有问题或看不出来。有问题要指到调用链
+- id: principle.composition
+  question: 继承是否只是为了复用实现
+  needs: [arch.map, design.signals]
+  executors: [llm]
+  artifact: 适用、有问题或看不出来。有问题要指到继承关系

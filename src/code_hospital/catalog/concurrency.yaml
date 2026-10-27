@@ -1,0 +1,17 @@
+# 并发。安全号别和架构号别都会排。
+- id: concurrency.signals
+  question: 线程、任务和锁出现在哪里
+  needs: []
+  executors: [code]
+  code: concurrency_signals
+  artifact: 没看见锁的线程或任务，以及共享对象上的写入
+- id: concurrency.shared
+  question: 共享的可变状态有没有保护
+  needs: [concurrency.signals]
+  executors: [llm]
+  artifact: 有问题要指到字段或变量。看不出来要写明
+- id: concurrency.release
+  question: 锁或任务会不会在失败路径上没有放开
+  needs: [concurrency.signals]
+  executors: [llm]
+  artifact: 有问题要指到获取锁的位置。看不出来要写明

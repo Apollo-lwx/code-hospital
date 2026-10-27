@@ -1,0 +1,17 @@
+# 鉴权越权与缓存。安全号别和架构号别都会排。判断交给宿主 LLM。
+- id: access.signals
+  question: 写操作和缓存读写出现在哪里
+  needs: []
+  executors: [code]
+  code: access_signals
+  artifact: 附近没看见鉴权调用的写操作，以及把缓存对象交出去的函数
+- id: access.authz
+  question: 调用方能不能碰到不属于自己的数据
+  needs: [arch.map, access.signals]
+  executors: [llm]
+  artifact: 有问题要指到入口。看不出来要写明缺的是身份还是数据归属
+- id: access.cache
+  question: 热点失效时会不会同时打到存储，调用方会不会改到缓存里的对象
+  needs: [arch.map, access.signals]
+  executors: [llm]
+  artifact: 击穿或引用外泄要指到函数。没有缓存就写看不出来

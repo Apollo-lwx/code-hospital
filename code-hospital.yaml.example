@@ -30,6 +30,7 @@ catalog:
   # 执行方是 code、external、llm。llm 由宿主交卷，医院不代写判断。
   # checks:
   #   disable: [arch.patterns]
+  #   packs: [principles]   # 还可写 patterns、effective-java、concurrency、serialization、naming、access
   #   items:
   #     - id: custom.note
   #       question: 这次还要看什么

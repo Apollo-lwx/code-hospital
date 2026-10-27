@@ -1,0 +1,17 @@
+# 命名和说明。只看对外入口，不评文风。架构号别会排。
+- id: naming.signals
+  question: 哪些对外名字过短或没有说明
+  needs: []
+  executors: [code]
+  code: naming_signals
+  artifact: 过短的名字，以及没有说明的顶层入口
+- id: naming.clear
+  question: 对外名字能不能看出它做什么
+  needs: [arch.map, naming.signals]
+  executors: [llm]
+  artifact: 有问题要指到名字。局部变量的单字母不算
+- id: naming.docs
+  question: 对外入口的说明有没有写出参数、失败和副作用
+  needs: [arch.map, naming.signals]
+  executors: [llm]
+  artifact: 缺了哪一类说明，要指到入口。不评文风。没有对外入口就写看不出来

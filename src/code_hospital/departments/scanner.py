@@ -588,7 +588,9 @@ async def scan(
         files, _skipped_files = await scope_file_list(root, case.scope_type, case.scope.model_dump())
         from ..catalog.checks import run_checks, summarize_checks
 
-        checks, check_notes = run_checks(root, files)
+        checks, check_notes = run_checks(
+            root, files, getattr(case, "visit_kind", "") or "checkup",
+        )
         limitations.extend(check_notes)
         limitations.append(summarize_checks(checks))
 

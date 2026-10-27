@@ -1,0 +1,37 @@
+# Java 小包。只收能指到文件的问法，有 Java 文件才排。资源关闭不另判，看 resource.leak。
+- id: ej.signals
+  question: Java 里对象契约和继承的写法是什么
+  needs: []
+  executors: [code]
+  code: java_signals
+  artifact: equals 与 hashCode 是否成对，以及类继承了谁
+- id: ej.equals-hash
+  question: equals 和 hashCode 是否成对
+  needs: [ej.signals]
+  executors: [llm]
+  artifact: 成对、只写了一边，或看不出来。有问题要指到文件
+- id: ej.inherit
+  question: 继承具体类是不是只为了复用实现
+  needs: [ej.signals, arch.map]
+  executors: [llm]
+  artifact: 适用、有问题或看不出来。有问题要指到继承关系
+- id: ej.mutable-return
+  question: 有没有把内部可变集合或数组直接交出去
+  needs: [arch.map]
+  executors: [llm]
+  artifact: 文件和字段，或看不出来
+- id: ej.validate
+  question: 对外入口有没有拒绝明显非法的参数
+  needs: [arch.map]
+  executors: [llm]
+  artifact: 缺校验的方法，或看不出来
+- id: ej.empty
+  question: 有没有用 null 代替空集合
+  needs: [arch.map]
+  executors: [llm]
+  artifact: 返回 null 的位置，或看不出来
+- id: ej.close
+  question: Java 资源关闭还缺什么
+  needs: [resource.leak]
+  executors: [llm]
+  artifact: 只补充 resource.leak 没写到的关闭问题。没有就写看不出来

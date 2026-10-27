@@ -46,48 +46,101 @@ def _normalize(row: dict) -> dict:
     }
 
 
-def _overlay(project_root: str) -> tuple[set[str], list[dict], str]:
+def _overlay(project_root: str) -> tuple[set[str], list[dict], list[str], str]:
     path = Path(project_root) / "code-hospital.yaml"
     if not path.is_file():
-        return set(), [], ""
+        return set(), [], [], ""
     try:
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except yaml.YAMLError:
-        return set(), [], "code-hospital.yaml 无法解析，这次只用内置检查事项"
+        return set(), [], [], "code-hospital.yaml 无法解析，这次只用内置检查事项"
     if not isinstance(data, dict):
-        return set(), [], "code-hospital.yaml 不是映射，这次只用内置检查事项"
+        return set(), [], [], "code-hospital.yaml 不是映射，这次只用内置检查事项"
     block = (data.get("catalog") or {}).get("checks") or {}
     if not isinstance(block, dict):
-        return set(), [], "catalog.checks 不是映射，这次只用内置检查事项"
+        return set(), [], [], "catalog.checks 不是映射，这次只用内置检查事项"
     off = {str(item) for item in (block.get("disable") or [])}
+    packs = [str(item) for item in (block.get("packs") or [])]
     extra = []
     try:
         for row in block.get("items") or []:
             extra.append(_normalize(row))
     except ValueError as exc:
-        return set(), [], f"catalog.checks 没有采用：{exc}"
-    return off, extra, ""
+        return set(), [], packs, f"catalog.checks 没有采用：{exc}"
+    return off, extra, packs, ""
 
 
-def load_checks(project_root: str) -> tuple[list[dict], str]:
+_PACK_FILES = {
+    "principles": "principles.yaml",
+    "patterns": "patterns.yaml",
+    "effective-java": "effective-java.yaml",
+    "concurrency": "concurrency.yaml",
+    "serialization": "serialization.yaml",
+    "naming": "naming.yaml",
+    "access": "access.yaml",
+}
+_VISIT_PACKS = {
+    "architecture": ("principles", "patterns", "concurrency", "serialization", "naming", "access"),
+    "security": ("concurrency", "serialization", "access"),
+}
+
+
+def _load_pack(name: str) -> list[dict]:
+    path = Path(__file__).with_name(_PACK_FILES[name])
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(data, list):
+        raise RuntimeError(f"检查包 {name} 必须是列表")
+    return [_normalize(row) for row in data]
+
+
+def _has_java(files: list[str] | None) -> bool:
+    return any(Path(item).suffix.lower() == ".java" for item in (files or []))
+
+
+def load_checks(
+    project_root: str,
+    visit_kind: str = "checkup",
+    files: list[str] | None = None,
+) -> tuple[list[dict], str]:
     builtin = _load_builtin()
-    off, extra, note = _overlay(project_root)
+    off, extra, configured, note = _overlay(project_root)
+    notes = [note] if note else []
+    enabled = list(configured)
+    for name in _VISIT_PACKS.get(visit_kind, ()):
+        if name not in enabled:
+            enabled.append(name)
+    if visit_kind == "architecture" and _has_java(files) and "effective-java" not in enabled:
+        enabled.append("effective-java")
+    pack_rows: list[dict] = []
+    for name in enabled:
+        if name not in _PACK_FILES:
+            notes.append(f"未知检查包 {name}，这次没排")
+            continue
+        if name == "effective-java" and not _has_java(files):
+            notes.append("effective-java 需要 Java 文件，这次没排")
+            continue
+        pack_rows.extend(_load_pack(name))
     by_id = {row["id"]: row for row in builtin if row["id"] not in off}
-    for row in extra:
+    for row in pack_rows + extra:
         if row["id"] in off:
             continue
         by_id[row["id"]] = row
     ordered = [by_id[row["id"]] for row in builtin if row["id"] in by_id]
     seen = {row["id"] for row in ordered}
-    for row in extra:
+    for row in pack_rows + extra:
         if row["id"] not in seen and row["id"] not in off:
             ordered.append(by_id[row["id"]])
-    return ordered, note
+            seen.add(row["id"])
+    return ordered, "；".join(notes)
 
 
-def run_checks(project_root: str, files: list[str]) -> tuple[list[dict], list[str]]:
+def run_checks(
+    project_root: str,
+    files: list[str],
+    visit_kind: str = "checkup",
+) -> tuple[list[dict], list[str]]:
     """按名册顺序执行。后一项能看见前一项已经交出的事实。"""
-    items, note = load_checks(project_root)
+    items, note = load_checks(project_root, visit_kind, files)
     notes = [note] if note else []
     facts: dict[str, str] = {}
     results: list[dict] = []
@@ -410,7 +463,257 @@ def _call_name(node: ast.Call) -> str:
     return ""
 
 
+_BASES_SKIP = {"object", "ABC", "Enum", "Exception", "BaseException", "Protocol"}
+_CTOR_SKIP = {
+    "Exception", "ValueError", "TypeError", "RuntimeError", "KeyError", "HTTPException",
+}
+
+
+def _design_signals(project_root: str, files: list[str]) -> str:
+    root = Path(project_root)
+    lines = ["设计信号（写法事实，原理判断留给宿主 LLM）："]
+    found = 0
+    for rel in _source_files(files):
+        text = _read(root / rel)
+        if text is None:
+            continue
+        try:
+            tree = ast.parse(text)
+        except SyntaxError:
+            continue
+        for node in tree.body:
+            if not isinstance(node, ast.ClassDef):
+                continue
+            methods = [item.name for item in node.body if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))]
+            if len(methods) >= 12:
+                found += 1
+                lines.append(f"- {rel} {node.name}：{len(methods)} 个方法")
+            for base in node.bases:
+                if isinstance(base, ast.Name) and base.id not in _BASES_SKIP:
+                    found += 1
+                    lines.append(f"- {rel} {node.name} 继承 {base.id}")
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if node.name == "__init__":
+                continue
+            for call in ast.walk(node):
+                if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Name):
+                    continue
+                name = call.func.id
+                if not name[:1].isupper() or name in _CTOR_SKIP:
+                    continue
+                found += 1
+                lines.append(f"- {rel} {node.name} 直接构造 {name}")
+                break
+        if found >= 20:
+            lines.append("- 其余信号这次没有列出")
+            return "\n".join(lines)
+    if found == 0:
+        lines.append("- 范围内没有看见大类、具体类继承或直接构造具体类")
+    return "\n".join(lines)
+
+
+_JAVA_EXTENDS = re.compile(r"\bclass\s+(\w+)\s+extends\s+(\w+)")
+_JAVA_SKIP = {"Exception", "RuntimeException", "Enum", "Record", "Throwable"}
+
+
+def _java_signals(project_root: str, files: list[str]) -> str:
+    root = Path(project_root)
+    lines = ["Java 写法（只记录能对上的文件，判断留给宿主 LLM）："]
+    found = 0
+    java_files = [
+        rel.replace("\\", "/")
+        for rel in files
+        if Path(rel).suffix.lower() == ".java" and not any(part in _SKIP for part in Path(rel).parts)
+    ]
+    for rel in java_files[:200]:
+        text = _read(root / rel)
+        if text is None:
+            continue
+        has_equals = "equals(" in text
+        has_hash = "hashCode(" in text
+        if has_equals != has_hash:
+            found += 1
+            side = "有 equals 没有 hashCode" if has_equals else "有 hashCode 没有 equals"
+            lines.append(f"- {rel}：{side}")
+        for match in _JAVA_EXTENDS.finditer(text):
+            parent = match.group(2)
+            if parent in _JAVA_SKIP:
+                continue
+            found += 1
+            lines.append(f"- {rel}：{match.group(1)} 继承 {parent}")
+        if found >= 20:
+            lines.append("- 其余信号这次没有列出")
+            return "\n".join(lines)
+    if found == 0:
+        lines.append("- 范围内没有看见不成对的 equals/hashCode，也没有继承具体类")
+    return "\n".join(lines)
+
+
 _CODE["arch_map"] = _arch_map
 _CODE["arch_problems"] = _arch_problems
 _CODE["complexity"] = _complexity
 _CODE["resources"] = _resources
+_CODE["design_signals"] = _design_signals
+_CODE["java_signals"] = _java_signals
+
+
+_WRITE_PREFIX = ("create_", "update_", "delete_", "remove_", "save_")
+_AUTH_MARK = ("require_", "authorize", "permission", "current_user", "login_required", "get_current")
+_CACHE_NAMES = ("cache", "redis", "lru")
+
+
+def _function_calls(fn: ast.AST) -> list[str]:
+    found: list[str] = []
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Call):
+            name = _call_name(node)
+            if name and name not in found:
+                found.append(name)
+    return found
+
+
+def _access_signals(project_root: str, files: list[str]) -> str:
+    root = Path(project_root)
+    lines = ["鉴权与缓存信号（只记写法，越权和击穿留给宿主 LLM）："]
+    found = 0
+    for rel in _source_files(files):
+        text = _read(root / rel)
+        if text is None:
+            continue
+        try:
+            tree = ast.parse(text)
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            calls = _function_calls(node)
+            joined = " ".join(calls)
+            if node.name.startswith(_WRITE_PREFIX) and not any(mark in joined for mark in _AUTH_MARK):
+                found += 1
+                lines.append(f"- {rel} {node.name}：写操作附近没看见鉴权调用")
+            cached: set[str] = set()
+            for sub in ast.walk(node):
+                if not isinstance(sub, ast.Assign) or not isinstance(sub.value, ast.Call):
+                    continue
+                call_name = _call_name(sub.value).lower()
+                if not any(token in call_name for token in _CACHE_NAMES) or not call_name.endswith(".get"):
+                    continue
+                for target in sub.targets:
+                    if isinstance(target, ast.Name):
+                        cached.add(target.id)
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Return) and isinstance(sub.value, ast.Name) and sub.value.id in cached:
+                    found += 1
+                    lines.append(f"- {rel} {node.name}：把缓存里取出的对象交出去")
+                    break
+            if found >= 20:
+                lines.append("- 其余信号这次没有列出")
+                return "\n".join(lines)
+    if found == 0:
+        lines.append("- 范围内没有看见缺少鉴权调用的写操作，也没有把缓存对象交出去")
+    return "\n".join(lines)
+
+
+def _concurrency_signals(project_root: str, files: list[str]) -> str:
+    root = Path(project_root)
+    lines = ["并发信号："]
+    found = 0
+    for rel in _source_files(files):
+        text = _read(root / rel)
+        if text is None:
+            continue
+        started = "Thread(" in text or "threading.Thread" in text or "asyncio.create_task" in text
+        locked = "Lock(" in text or "synchronized" in text
+        if started and not locked:
+            found += 1
+            lines.append(f"- {rel}：启动了线程或任务，文件里没看见 Lock")
+        if "self." in text and ("Thread(" in text or "create_task(" in text):
+            found += 1
+            lines.append(f"- {rel}：有线程或任务，同时也在写 self")
+        if found >= 20:
+            break
+    for rel in files:
+        if Path(rel).suffix.lower() != ".java":
+            continue
+        text = _read(root / rel)
+        if text and ("synchronized" in text or "volatile " in text):
+            found += 1
+            lines.append(f"- {rel.replace(chr(92), '/')}：使用了 synchronized 或 volatile")
+    if found == 0:
+        lines.append("- 范围内没有看见未加锁的线程，也没有 synchronized / volatile")
+    return "\n".join(lines)
+
+
+def _serialization_signals(project_root: str, files: list[str]) -> str:
+    root = Path(project_root)
+    lines = ["序列化入口（安全尺已覆盖的危险调用这里只点名，不另判漏洞）："]
+    needles = ("pickle.loads", "pickle.load", "ObjectInputStream", "readObject", "implements Serializable")
+    found = 0
+    candidates = _source_files(files) + [
+        rel.replace("\\", "/") for rel in files if Path(rel).suffix.lower() == ".java"
+    ]
+    for rel in candidates:
+        text = _read(root / rel)
+        if text is None:
+            continue
+        for needle in needles:
+            if needle in text:
+                found += 1
+                lines.append(f"- {rel}：出现 {needle}")
+                break
+        if found >= 20:
+            break
+    if found == 0:
+        lines.append("- 范围内没有看见 pickle、ObjectInputStream、readObject 或 Serializable")
+    return "\n".join(lines)
+
+
+def _naming_signals(project_root: str, files: list[str]) -> str:
+    root = Path(project_root)
+    lines = ["命名和说明信号（不评文风）："]
+    found = 0
+    for rel in _source_files(files):
+        text = _read(root / rel)
+        if text is None:
+            continue
+        try:
+            tree = ast.parse(text)
+        except SyntaxError:
+            continue
+        for node in tree.body:
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+            if node.name.startswith("_"):
+                continue
+            short = isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and len(node.name) <= 2
+            missing = ast.get_docstring(node) is None
+            if not short and not missing:
+                continue
+            found += 1
+            if short and missing:
+                lines.append(f"- {rel} {node.name}：名字过短，且没有说明")
+            elif short:
+                lines.append(f"- {rel} {node.name}：名字过短")
+            else:
+                lines.append(f"- {rel} {node.name}：对外入口没有说明")
+            if found >= 20:
+                lines.append("- 其余名字这次没有列出")
+                return "\n".join(lines)
+    if found == 0:
+        lines.append("- 范围内没有看见过短的对外名字，也没有缺少说明的顶层入口")
+    return "\n".join(lines)
+
+
+_CODE["arch_map"] = _arch_map
+_CODE["arch_problems"] = _arch_problems
+_CODE["complexity"] = _complexity
+_CODE["resources"] = _resources
+_CODE["design_signals"] = _design_signals
+_CODE["java_signals"] = _java_signals
+_CODE["access_signals"] = _access_signals
+_CODE["concurrency_signals"] = _concurrency_signals
+_CODE["serialization_signals"] = _serialization_signals
+_CODE["naming_signals"] = _naming_signals

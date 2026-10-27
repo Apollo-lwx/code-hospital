@@ -1,0 +1,12 @@
+# 序列化。安全尺已经点过的危险调用不另判漏洞，这里补类型边界。
+- id: serialization.signals
+  question: 反序列化入口在哪里
+  needs: []
+  executors: [code]
+  code: serialization_signals
+  artifact: pickle、ObjectInputStream、readObject 或 Serializable 所在文件
+- id: serialization.boundary
+  question: 反序列化是否只接受预期类型
+  needs: [serialization.signals]
+  executors: [llm]
+  artifact: 有问题要指到入口。安全尺已记下的调用不要再说成一条新漏洞。没有入口就写看不出来

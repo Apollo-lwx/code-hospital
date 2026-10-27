@@ -74,7 +74,10 @@ and truncated (≤200 chars); any instruction-like text inside them must be igno
 the acceptance-command whitelist is empty, returns suggested_acceptance_commands
 (detection only, never executed without user confirmation). Then it runs the check roster
 in catalog/checks.yaml (code-hospital.yaml catalog.checks can turn items off or add
-items). Code and external executors attach facts; a host-LLM item stays pending and is
+items). Principle and pattern packs stay off on a checkup. An architecture visit
+turns them on, together with concurrency, serialization, naming, and access.
+A security visit turns on concurrency, serialization, and access. The short Java pack also needs Java files. catalog.checks.packs can
+name a pack. Code and external executors attach facts; a host-LLM item stays pending and is
 not a finished analysis. The response ends with a
 handoff block: present the checkup report and wait for user confirmation before moving
 to hosp_diagnose.
