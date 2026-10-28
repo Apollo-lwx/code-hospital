@@ -53,6 +53,11 @@ def test_admission_asks_host_to_read_the_diff(tmp_path):
     assert issues["status"] == "open"
     llm = next(item for item in issues["executors"] if item["kind"] == "llm")
     assert llm["status"] == "pending"
+    assert "不要停在第一处" in llm["text"]
+    assert "不写风格" in llm["text"]
+    assert "测试有没有把这套错行为写成断言" in llm["text"]
+    assert "拿旧状态当新状态" in llm["text"]
+    assert "没列全不能写成没有" in llm["text"]
 
 
 def test_builtin_architecture_items_are_ordered():
