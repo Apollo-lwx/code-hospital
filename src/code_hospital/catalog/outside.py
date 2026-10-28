@@ -9,7 +9,7 @@ import yaml
 
 _ID = re.compile(r"^[a-z][a-z0-9._-]{0,48}$")
 _METHODS = {"llm_patch", "manual"}
-_ENGINES = {"semgrep", "external"}
+_ENGINES = {"semgrep", "external", "mcp"}
 _MODES = {"only", "plus"}
 _SCOPES = {"line_range", "symbol", "file", "reference_closure"}
 _RISKS = {"low", "medium", "high"}
@@ -216,19 +216,47 @@ def _instrument(row, notes: list[str], root: Path, specialty_ids: set[str]) -> d
         return None
     engine = str(row.get("engine") or "").strip()
     if engine not in _ENGINES:
-        notes.append(f"仪器 {ident} 的引擎只能是 semgrep 或 external，这次没采用")
+        notes.append(f"仪器 {ident} 的引擎只能是 semgrep、external 或 mcp，这次没采用")
         return None
     rules = ""
     binary = str(row.get("binary") or "").strip()
+    command = ""
+    tool = ""
+    args: list[str] = []
     if engine == "semgrep":
         rules, problem = _inside(root, str(row.get("rules") or ""))
         if problem or rules is None or not rules.is_file():
             notes.append(problem or f"仪器 {ident} 的规则文件不存在")
             return None
         binary = binary or "semgrep"
-    elif not binary or any(char in binary for char in "\\/\n"):
-        notes.append(f"仪器 {ident} 的 external 要写一个命令名，这次没采用")
-        return None
+    elif engine == "external":
+        if not binary or any(char in binary for char in "\\/\n"):
+            notes.append(f"仪器 {ident} 的 external 要写一个命令名，这次没采用")
+            return None
+        from .external_run import safe_args
+
+        args = safe_args(row.get("args"))
+        if args is None:
+            notes.append(f"仪器 {ident} 的参数含禁止字符，这次没采用")
+            return None
+    else:
+        command = str(row.get("command") or "").strip()
+        tool = str(row.get("tool") or "").strip()
+        if not command or any(char in command for char in "\\/\n"):
+            notes.append(f"仪器 {ident} 的 mcp 要写一个命令名，这次没采用")
+            return None
+        from .mcp_client import tool_name
+
+        if tool_name(tool) is None:
+            notes.append(f"仪器 {ident} 的 mcp 要写工具名，这次没采用")
+            return None
+        from .external_run import safe_args
+
+        args = safe_args(row.get("args"))
+        if args is None:
+            notes.append(f"仪器 {ident} 的参数含禁止字符，这次没采用")
+            return None
+        binary = command
     specialty = str(row.get("specialty_id") or "general")
     if specialty not in specialty_ids:
         notes.append(f"仪器 {ident} 的专科 {specialty} 不存在，改记到全科")
@@ -242,6 +270,10 @@ def _instrument(row, notes: list[str], root: Path, specialty_ids: set[str]) -> d
         "activation": "package" if triage else "visit",
         "engine": engine,
         "binary": binary,
+        "command": command,
+        "tool": tool,
+        "args": args if engine in {"external", "mcp"} else [],
+        "sandbox": bool(row.get("sandbox")) if engine == "external" else False,
         "builtin": False,
         "can_autofix": False,
         "specialty_id": specialty,

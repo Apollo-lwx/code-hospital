@@ -2,7 +2,7 @@
 
 [中文](README.md) | English
 
-**Code Hospital is an open-source, local-first MCP (Model Context Protocol) server for AI code review and verified auto-fixing.** It orchestrates deterministic static-analysis tools — Ruff, Semgrep, Gitleaks — inside a stage-gated "hospital" workflow (registration → lab tests → diagnosis → prescription → treatment → discharge), so every AI-driven change gets an auditable record, a human approval gate, and a verifiable diff. Zero API keys required; works with Cursor, Qoder, Codex, or any MCP-compatible host.
+**Code Hospital is an open-source, local-first MCP (Model Context Protocol) server for AI code review and verified auto-fixing.** It orchestrates deterministic static-analysis tools — Ruff, Semgrep, Gitleaks — inside a stage-gated "hospital" workflow (registration → lab tests → diagnosis → prescription → treatment → discharge), so every AI-driven change gets an auditable record, a human approval gate, and a verifiable diff. Zero API keys required — the hospital delegates model judgement to the host's own LLM; works with Cursor, Qoder, Codex, or any MCP-compatible host.
 
 Take your code to the hospital instead of letting AI practice "barefoot-doctor medicine" — a quick glance, immediate edits, no verification, drifting further off course. Code Hospital practices like a proper hospital built on **medical records, prescriptions, and nursing logs**: **every fix has a traceable prescription, controllable boundaries, and verifiable diffs** — local-first, with all data landing in the current repo's `.hospital/`.
 
@@ -31,7 +31,7 @@ Take your code to the hospital instead of letting AI practice "barefoot-doctor m
 - **Auditable prescriptions** — treatment happens dose by dose from an approved prescription; host-model patches pass four validations before landing; every change is reverse-appliable.
 - **PR-ready reports** — Markdown lab reports with severity tiers and coverage notes, ready to paste straight into pull request comments.
 - **Recurrence tracking** — fingerprinting links findings to historical cases: each finding is labeled "new" or "recurrence ×N", with its first-seen case and outcome.
-- **Local-first & private** — no API keys, no cloud calls on the main path; all records stay in the repo's own `.hospital/` (auto git-excluded).
+- **Local-first** — no API keys; scanners run locally and all records stay in the repo's own `.hospital/` (auto git-excluded). Model judgement is delegated to the host's own LLM, cloud or local.
 - **Repo-owned policy** — `code-hospital.yaml` in the treated repo decides what counts as a disease: structure thresholds, ignored rules/prefixes, severity floors.
 - **Outside help at every stage** — visits, doctors, instruments, drugs, check items, diagnosis questions, and discharge questions are added in that same file. The hospital schedules them; judgment stays with the host. Drugs that edit code automatically, and arbitrary commands, do not enter through this file.
 
@@ -195,8 +195,8 @@ An open-source, local-first MCP server that turns AI code review and auto-fixing
 **How is Code Hospital different from running ruff or semgrep directly?**
 Ruff and semgrep are the instruments; Code Hospital is the hospital. It orchestrates the instruments, normalizes findings into fingerprinted records, tracks recurrences across scans, and produces PR-ready reports. More importantly, every code change requires an approved prescription and is verified by a follow-up diff afterwards — raw linters do none of that.
 
-**Does Code Hospital require an API key or send code to the cloud?**
-No, and no. The main path is fully local with zero API keys. All data is written to the treated repo's `.hospital/` directory, which is automatically excluded from git.
+**Does Code Hospital require an API key?**
+No. The hospital holds no model credentials; judgement that needs a model (deep root-cause, `llm_patch`) is delegated to the host's own LLM. Point the host at a local model if you want everything on-prem — the hospital imposes no restriction either way.
 
 **Which languages and tools does Code Hospital support?**
 Python via ruff is the P0 workhorse; semgrep and gitleaks plug in as optional instruments. Any missing instrument degrades gracefully and is disclosed in the report's "Coverage & Limitations" — the flow never blocks on a missing tool.

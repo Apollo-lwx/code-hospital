@@ -46,6 +46,42 @@
   specialty_id: structure
   requires_contract: false
   limitation: 未测量圈复杂度
+- id: python-review
+  concern: Python 参数个数、分支数、裸 except、可变默认参数、eval/exec、硬编码密钥
+  extensions: [py]
+  triage: [outpatient, checkup]
+  activation: package
+  engine: builtin
+  binary: ""
+  builtin: true
+  can_autofix: false
+  specialty_id: python
+  requires_contract: false
+  limitation: 函数行数由 structure-ruler 计；python-review 不重复报
+- id: java-review
+  concern: Java 行长、空 catch、System.out.print、硬编码字面量、new Thread、Executors 工厂方法、SQL 拼接
+  extensions: [java]
+  triage: [outpatient, checkup]
+  activation: package
+  engine: builtin
+  binary: ""
+  builtin: true
+  can_autofix: false
+  specialty_id: java
+  requires_contract: false
+  limitation: 方法行数由 structure-ruler 计；只做正则，Spring 与 JBCT 不在这把尺上
+- id: ts-review
+  concern: TypeScript 行长、函数长度估算、any、console.log、TODO、行尾空白、硬编码字面量、innerHTML
+  extensions: [ts, tsx]
+  triage: [outpatient, checkup]
+  activation: package
+  engine: builtin
+  binary: ""
+  builtin: true
+  can_autofix: false
+  specialty_id: general
+  requires_contract: false
+  limitation: TS 解析未建，函数长度按 function 和 => 估算
 - id: eslint
   concern: JavaScript / TypeScript 的风格和简单正确性
   extensions: [js, jsx, ts, tsx]

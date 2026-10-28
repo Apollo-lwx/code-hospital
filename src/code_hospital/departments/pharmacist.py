@@ -41,7 +41,7 @@ from ..core.errors import (
     overlimit,
 )
 from ..core.ids import new_id
-from ..core.questions import ask
+from ..core.questions import ask, release
 from ..safety.acceptance import run_alias
 from ..storage.db import Database, hospital_root, now_ms
 
@@ -166,6 +166,10 @@ def _next_pending(items: list[dict], after_seq: int) -> str:
     return pending[0]["id"] if pending else ""
 
 
+from ..api.capabilities import hosted
+
+
+@hosted
 async def dispense(
     prescription_id: str,
     item_id: str = "",
@@ -216,14 +220,19 @@ async def dispense(
         if follow_autofix and (case.pending_gate or "").startswith("dose:"):
             await db.update_case(case.id, pending_gate="")
             case.pending_gate = ""
+        from ..api.capabilities import admit_stage
+
+        admit_stage(stage_confirmed, case.pending_gate or "")
         if case.pending_gate and not stage_confirmed:
-            return ask(
+            halted = await release(ask(
                 "stage_confirm",
                 f"上一味护理记录待确认（{case.pending_gate}）。确认后才抓下一味。",
                 [("confirm", "确认护理记录，抓下一味"), ("pause", "暂停施治")],
                 "挂起不执行（不改代码）",
                 f'hosp_dispense(prescription_id="{prescription_id}", stage_confirmed=true)',
-            )
+            ))
+            if halted is not None:
+                return halted
         if case.pending_gate and not case.pending_gate.startswith("dose:"):
             raise invalid_operation(
                 f"当前待确认的是 {case.pending_gate}，不能施治",
@@ -267,7 +276,10 @@ async def dispense(
                 return await _submit_patch(
                     db, root, case, rx, item, patch_token, snapshot_hash, patch, dry_run,
                 )
-            if item["method"] == "manual":
+            blocked = await _admission_block(db, case, item)
+            if blocked:
+                last = await _skip_admission(db, case, rx, item, blocked)
+            elif item["method"] == "manual":
                 last = await _skip_manual(db, case, rx, item)
             elif item["method"] == "llm_patch":
                 last = await _need_patch(db, case, item, await _focus_line(db, case.id, item))
@@ -486,6 +498,48 @@ async def _submit_patch(db, root, case, rx, item, token: str, snapshot_hash: str
     nursing = await _record_nursing(db, case.id, item["id"], nursing)
     _append_report(root, case, item, dose, nursing)
     return await _finish(db, case, rx, item, dose, nursing, applied=True)
+
+
+async def _admission_block(db, case, item: dict) -> str:
+    """施治链路默认不执行宿主交卷。没开严格开关时放行。"""
+    from ..safety.admission import rules_for
+
+    rules = rules_for(case.project_root, "dispense")
+    if not rules.clues_only and not rules.require_location:
+        return ""
+    diagnosis = next(
+        (row for row in await db.list_diagnoses(case.id) if row.id == item.get("diagnosis_id")),
+        None,
+    )
+    if diagnosis is None or diagnosis.concluded_by != "host_llm":
+        return ""
+    spans = item.get("scope_lines") or []
+    located = bool(item.get("target_file")) and any(
+        isinstance(span, (list, tuple)) and span and int(span[0] or 0) >= 1 for span in spans
+    )
+    if rules.require_location and not located:
+        return "落不到文件和行号，已丢弃"
+    if rules.clues_only:
+        return "待核实线索不进入处方"
+    return ""
+
+
+async def _skip_admission(db, case, rx, item: dict, reason: str) -> dict:
+    await db.update_prescription_item(item["id"], status="skipped")
+    item["status"] = "skipped"
+    await db.insert_nursing_log(
+        case.id, item["id"], "admission", {"reason": reason}, "skipped",
+    )
+    nursing = {
+        "env_precheck": "skipped",
+        "scope_check": "skipped",
+        "content_check": "skipped",
+        "acceptance": "skipped",
+        "verdict": "skipped",
+        "drift_files": [],
+        "logs": [reason],
+    }
+    return await _finish(db, case, rx, item, None, nursing, applied=False)
 
 
 async def _skip_manual(db, case, rx, item: dict) -> dict:
@@ -971,14 +1025,19 @@ async def _resolve_conflict(db, root, case, rx, item_id: str, resolution: str, s
         raise not_found(f"药味不存在：{item_id}", target="item_id")
     gate = case.pending_gate or ""
     if gate and gate != f"dose:{item['id']}":
+        from ..api.capabilities import admit_stage
+
+        admit_stage(stage_confirmed, gate)
         if not stage_confirmed:
-            return ask(
+            halted = await release(ask(
                 "stage_confirm",
                 f"上一味护理记录待确认（{gate}）。确认后才处理这一味。",
                 [("confirm", "确认护理记录，再续行"), ("pause", "暂停施治")],
                 "挂起不执行（不改代码）",
                 f'hosp_dispense(prescription_id="{rx["id"]}", stage_confirmed=true)',
-            )
+            ))
+            if halted is not None:
+                return halted
         if not gate.startswith("dose:"):
             raise invalid_operation(
                 f"当前待确认的是 {gate}，不能施治",

@@ -26,6 +26,10 @@ def posterior(success: int, failure: int) -> float:
     return (1 + success) / (2 + success + failure)
 
 
+# 约定次数。到了也只写进说明，不改药柜顺序。
+SAMPLE_FLOOR = 8
+
+
 def lesson_text(history: dict[tuple[str, str], tuple[int, int]]) -> str:
     """给外部记忆的疗效账。只有规则号和剂型，没有文件路径和发现原文。"""
     lines = []

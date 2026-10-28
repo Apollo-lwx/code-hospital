@@ -1,0 +1,19 @@
+# 合入门诊有 Python 文件时排上。这些是交给宿主读 diff 的问题，医院不执行。
+- id: py.checklist.behavior
+  question: 改过的函数成功时返回的值是否还是调用方要的
+  needs: []
+  executors: [llm]
+  group: checklist
+  artifact: "写入 check_answers 的这一项。有问题用「文件:行: 说明」。没有问题写「没有」，再写「已读：」列出本次范围内每个文件。"
+- id: py.checklist.errors
+  question: 失败时是否把异常接住后继续使用当时的结果
+  needs: []
+  executors: [llm]
+  group: checklist
+  artifact: "写入 check_answers 的这一项。有问题用「文件:行: 说明」。没有问题写「没有」，再写「已读：」列出本次范围内每个文件。"
+- id: py.checklist.state
+  question: 默认参数或模块级可变对象是否会被多次调用共享
+  needs: []
+  executors: [llm]
+  group: checklist
+  artifact: "写入 check_answers 的这一项。有问题用「文件:行: 说明」。没有问题写「没有」，再写「已读：」列出本次范围内每个文件。"

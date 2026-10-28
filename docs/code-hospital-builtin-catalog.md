@@ -329,7 +329,7 @@ risk_overrides:
 | id | engine | 关注点 | 形态 | triage | activation | limitation |
 |---|---|---|---|---|---|---|
 | ruff | ruff | Python 语法、未使用导入和变量、格式、import 顺序 | 外部二进制，`can_autofix=true` | outpatient、checkup；范围内有 `.py` | package | 不在 PATH：终态「ruff 未到岗」 |
-| semgrep | semgrep | 跨语言的漏洞和危险写法 | 外部二进制，随包小规则集 | outpatient、checkup | package | 不在 PATH：终态「semgrep 未到岗」 |
+| semgrep | semgrep | 跨语言的漏洞和危险写法 | 外部二进制。没有本地规则时用登记处的 default、语言包和 security-audit，metrics 保持关闭 | outpatient、checkup | package | 不在 PATH：终态「semgrep 未到岗」 |
 | gitleaks | gitleaks | 密钥、凭据、令牌 | 外部二进制，`can_autofix=false` | emergency、outpatient、checkup | package | 不在 PATH：终态「gitleaks 未到岗」 |
 
 建议补上的六台：
@@ -401,7 +401,7 @@ catalog:
 | 号别 | 含义 | 仪器 |
 |---|---|---|
 | checkup | 体检 | 现有分诊套餐 |
-| admission | 合入门诊 | 分诊套餐，再加安全尺、缺陷尺、测试缺口 |
+| admission | 合入门诊 | 分诊套餐，再加安全尺、缺陷尺、测试缺口、函数内污点。检查事项要求宿主通读本次 diff |
 | security | 安全 | 安全尺、gitleaks、semgrep、有 Java 时 java-pack |
 | performance | 性能 | 性能尺；semgrep 在岗时再加热点尺 |
 | defect | 缺陷 | 缺陷尺、有 Java 时 java-pack 和 spotbugs、有 Python 时 ruff |
@@ -414,9 +414,9 @@ catalog:
 | severe | 重症 | 只看本次 diff：函数内污点、改动影响；有 Java 且已有 class 时再跑 spotbugs |
 | general | 全科 | 分诊套餐加上深度尺、业务尺，有 Java 时再加 spotbugs。不跑污点和改动影响，报告写明重症未查 |
 
-安全尺、缺陷尺、性能尺、算法尺、供应链尺、测试缺口是院内仪器，不依赖外部二进制。它们只报告语法上能够确定的写法：命令执行、反序列化、SQL 拼接、硬编码密钥、吞掉的异常、相同分支、循环里的外部调用和排序。跨函数的业务不变量和实测耗时不在这几把尺里。循环里排序、三层循环、循环里访问外部资源是写法估计，严重度是一般问题，不和没用到的导入、相同分支放在明确缺陷这一档。只为探测可选模块而接住导入失败、后面还有退路的，不算异常被吃掉。
+安全尺、缺陷尺、性能尺、算法尺、供应链尺、测试缺口是院内仪器，不依赖外部二进制。它们只报告语法上能够确定的写法：命令执行、反序列化、SQL 拼接、硬编码密钥、吞掉的异常、相同分支、循环里的外部调用和排序。跨函数的业务不变量和实测耗时不在这几把尺里。循环里排序、三层循环、循环里访问外部资源是写法估计，严重度是一般问题，不和没用到的导入、相同分支放在明确缺陷这一档。只为探测可选模块而接住导入失败、后面还有退路的，不算异常被吃掉。合入门诊把没用到的导入和没有占位符的 f-string 降为风格建议。点名的失败（不是笼统的 Exception）、失败后还有返回、以及可有可无的副作用，不算异常被吃掉。用 `startsWith(path.resolve(目录))` 或 `startswith(os.path.abspath(目录))` 做前缀检查、后面没有再接路径分隔符的，兄弟目录会混进去，记为已确认。semgrep 报出的 pickle 加载未经低信任输入核实的，写成待验证并降为一般问题，不进入审查候选。未定义名字出在星号导入或 `TYPE_CHECKING` 分支里时，也降为风格建议。`is` 比较 None、True、False 和省略号不算缺陷。
 
-已知漏洞没有内置数据库。本机没有 pip-audit 或 osv-scanner 时，供应链号写明「已知漏洞未查」，不能把锁文件核对当成漏洞扫描已经通过。号别覆盖写在检验报告的限制项里：没拍成的仪器不能写成正常。全仓库的体检、合入门诊和全科不逐文件开测试缺口，避免把每个源文件都当成缺测试；测试号会逐文件查。
+已知漏洞没有内置数据库。本机没有 pip-audit 或 osv-scanner 时，供应链号写明「已知漏洞未查」，不能把锁文件核对当成漏洞扫描已经通过。号别覆盖写在检验报告的限制项里：没拍成的仪器不能写成正常。全仓库的体检、合入门诊和全科不逐文件开测试缺口，避免把每个源文件都当成缺测试；测试号会逐文件查。合入门诊另有检查事项：宿主要通读本次 diff，仪器命中只当证据。诊断时用 check_answers 把 diff.issues 交卷，按「文件:行: 说明」写入病历；对不上现有药的进入待复核，不进处方。没交卷，或写了没有却没把范围内文件列入已读，不能写成没有功能问题。
 
 业务号读 `catalog.business`。没有状态机、金额字段、权限约定，也没有主诉时，报告写「业务未查」。三种机械规则：
 

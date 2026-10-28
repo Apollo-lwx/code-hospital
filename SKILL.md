@@ -1,6 +1,6 @@
 ---
 name: code-hospital
-description: Orchestrating code-diagnosis MCP for AI coding hosts. Register code as a patient (hosp_register), run deterministic scanners for a fingerprinted checkup report (hosp_scan), and query cases/reports (hosp_case); diagnose, prescribe, dispense-with-nursing-checks, and discharge-with-gate roll out per roadmap. Medical terms are metaphors for CODE operations only. All data stays on your machine in the repo's .hospital/ folder; the main path makes no network calls and needs no API key. Use when the user wants code checked before a PR, a repo health check, drift-safe AI fixes, or mentions 代码医院, 挂号, 检验, 诊断, 处方, 出院, code hospital. Triggers: code review, code quality, scan, checkup, PR check, drift, fix plan.
+description: Orchestrating code-diagnosis MCP for AI coding hosts. Register code as a patient (hosp_register), run deterministic scanners for a fingerprinted checkup report (hosp_scan), and query cases/reports (hosp_case); diagnose, prescribe, dispense-with-nursing-checks, and discharge-with-gate roll out per roadmap. Medical terms are metaphors for CODE operations only. Case data stays in the repo's .hospital/ folder; the hospital holds no API key and delegates model judgement to the host's own LLM. Use when the user wants code checked before a PR, a repo health check, drift-safe AI fixes, or mentions 代码医院, 挂号, 检验, 诊断, 处方, 出院, code hospital. Triggers: code review, code quality, scan, checkup, PR check, drift, fix plan.
 license: MIT
 tags: [code-review, code-quality, static-analysis, mcp, local-first, auto-fix, agent-workflow]
 metadata:
@@ -15,10 +15,12 @@ before diagnosis, prescription before treatment, nursing checks during treatment
 recheck before discharge**. Every stage produces a traceable report; every code
 change requires an approved prescription and stays inside its declared scope.
 
-**Privacy / security:** the main path is **fully local and offline**. Deterministic
-scanners (ruff/semgrep/gitleaks) run as local subprocesses; no API key is needed and
-nothing leaves the machine. Case records, reports and patches live only in the repo's
-own `.hospital/` directory (auto-added to `.git/info/exclude`).
+**Privacy / security:** the hospital **holds no API key and no model credentials**.
+Judgement that needs a model (deep root-cause, `llm_patch`) is delegated to the host's
+own LLM, cloud or local — the hospital imposes no restriction either way. Deterministic
+scanners (ruff/semgrep/gitleaks) run as local subprocesses. Case records, reports and
+patches live only in the repo's own `.hospital/` directory (auto-added to
+`.git/info/exclude`).
 
 This skill tells you **when and how to drive the code-hospital MCP tools**; it does not
 reimplement them. Medical terms are metaphors for code operations (挂号=create a case,

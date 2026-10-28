@@ -8,9 +8,15 @@ scan_ignore:
 
 catalog:
   structure:
-    function_lines: 80   # 0 = 函数多长都不算病
+    function_lines: 80   # 0 = 函数多长都不算病。TypeScript 估算也用这个数
     file_lines: 500      # 0 = 文件多长都不算病
     cyclomatic: 15       # 0 = 不量圈复杂度
+    parameters: 5        # 0 = 参数再多也不算病。不含 self / cls
+    branches: 10         # 0 = 不数 if / 循环 / except / 布尔连接
+  java:
+    line_length: 120     # 0 = Java 单行再长也不算病
+  ts:
+    line_length: 200     # 0 = TypeScript 单行再长也不算病
   rules:
     # F401 只丢这一条。FURB 丢掉所有 FURB 开头的规则。
     # 不要只写一个字母 F，否则 F401 也会被丢掉。
@@ -32,6 +38,7 @@ catalog:
   # llm 由宿主交卷。external 只登记命令是否在 PATH 上，医院不代跑。
   # checks:
   #   disable: [arch.patterns]
+  #   # 换成自己的合入清单：disable 掉内置 py/java/ts.checklist.*，再在 items 里写 group: checklist。
   #   packs:
   #     - principles
   #     - hospital/team.yaml    # 仓库内的 yaml。也可以写成 {file: hospital/team.yaml}
@@ -42,6 +49,7 @@ catalog:
   #       question: 这次还要看什么
   #       needs: [arch.map]
   #       executors: [llm]
+  #       group: checklist
   #       artifact: 一段结论
   #     - id: custom.tool
   #       question: 外部工具有没有到岗

@@ -34,8 +34,6 @@ async def collect_findings(
     prior_coverage: dict | None = None,
 ) -> tuple[list[dict], list[str], list[Finding], dict]:
     """跑当前注册的设备并盖双键指纹。不入库，初诊和复诊共用。"""
-    from ..core.models import SEVERITY_ORDER
-
     files, skipped = await scope_file_list(root, case.scope_type, case.scope.model_dump())
     limitations: list[str] = []
     if skipped:
@@ -105,6 +103,57 @@ async def collect_findings(
                 finding.symbol = raw["symbol"]
             findings.append(finding)
         devices.append({"tool": "structure-ruler", "available": True, "version": "builtin", "outcome": "ok"})
+    if "python-review" in selected:
+        from ..catalog.python_review import scan_python_review
+
+        raws, extra = scan_python_review(root, files)
+        limitations.extend(extra)
+        for raw in raws:
+            finding = normalize(
+                RawFinding(
+                    rule_id=raw["rule_id"], message=raw["message"], file_path=raw["file_path"],
+                    line_start=raw["line_start"], line_end=raw["line_end"], severity=raw["severity"],
+                ),
+                "python-review", case.id, report_id, root,
+            )
+            if raw.get("symbol"):
+                finding.symbol = raw["symbol"]
+            findings.append(finding)
+        devices.append({"tool": "python-review", "available": True, "version": "builtin", "outcome": "ok"})
+    if "java-review" in selected:
+        from ..catalog.java_review import scan_java_review
+
+        raws, extra = scan_java_review(root, files)
+        limitations.extend(extra)
+        for raw in raws:
+            finding = normalize(
+                RawFinding(
+                    rule_id=raw["rule_id"], message=raw["message"], file_path=raw["file_path"],
+                    line_start=raw["line_start"], line_end=raw["line_end"], severity=raw["severity"],
+                ),
+                "java-review", case.id, report_id, root,
+            )
+            if raw.get("symbol"):
+                finding.symbol = raw["symbol"]
+            findings.append(finding)
+        devices.append({"tool": "java-review", "available": True, "version": "builtin", "outcome": "ok"})
+    if "ts-review" in selected:
+        from ..catalog.ts_review import scan_ts_review
+
+        raws, extra = scan_ts_review(root, files)
+        limitations.extend(extra)
+        for raw in raws:
+            finding = normalize(
+                RawFinding(
+                    rule_id=raw["rule_id"], message=raw["message"], file_path=raw["file_path"],
+                    line_start=raw["line_start"], line_end=raw["line_end"], severity=raw["severity"],
+                ),
+                "ts-review", case.id, report_id, root,
+            )
+            if raw.get("symbol"):
+                finding.symbol = raw["symbol"]
+            findings.append(finding)
+        devices.append({"tool": "ts-review", "available": True, "version": "builtin", "outcome": "ok"})
     _attach_depth(root, case, report_id, files, selected, devices, findings, limitations, timeout_ms)
     _attach_business(root, case, report_id, files, selected, devices, findings, limitations)
     _attach_severe(root, case, report_id, files, selected, devices, findings, limitations)
@@ -118,20 +167,29 @@ async def collect_findings(
     if "design" in getattr(case, "requested_specialties", []):
         limitations.append("设计科第一期无检验仪器")
     from ..catalog.policy import describe, keeps, load_policy
+    from ..catalog.noise import soften_findings
 
+    soften_findings(root, getattr(case, "visit_kind", "") or "checkup", findings)
     policy = load_policy(root)
     before = len(findings)
     findings = [item for item in findings if keeps(item.rule_id, item.severity, policy)]
     limitations.append(describe(policy, before - len(findings)))
     from ..catalog.adjudicate import adjudicate_findings
-    from ..catalog.coverage import build_ledger
+    from ..catalog.coverage import build_ledger, stamp_source_counts
     from ..catalog.visits import coverage_line
+    from ..core.models import counts_toward_efficacy, finding_rank
 
     adjudicate_findings(root, findings)
     full_scan = not tools or tools == ["auto"]
     ledger_lines, ledger = build_ledger(
         getattr(case, "visit_kind", "checkup") or "checkup",
         devices, root, files, prior_coverage, full_scan,
+        [
+            (item.file_path, item.symbol)
+            for item in findings
+            if item.symbol and item.severity in {"critical", "major"}
+            and counts_toward_efficacy(item.concluded_by)
+        ],
     )
     limitations.extend(ledger_lines)
     limitations.append(coverage_line(
@@ -140,8 +198,12 @@ async def collect_findings(
         devices,
         root,
     ))
-    findings.sort(key=lambda f: (SEVERITY_ORDER.get(f.severity, 9), f.file_path, f.line_start))
+    findings.sort(key=finding_rank)
     stamp_findings(findings)
+    ledger = stamp_source_counts(ledger, findings)
+    hired = [row["hired"] for row in devices if row.get("hired")]
+    if hired:
+        ledger["external"] = hired
     return devices, limitations, findings, ledger
 
 
@@ -214,6 +276,7 @@ def normalize(
     line_text, before, after = _read_window(project_root, file_path, raw.line_start)
     evidence = raw.evidence or line_text
     anchor = make_anchor(before, after)
+    from ..catalog.formulary import concluded_by_for
     from ..catalog.packs import tool_for_rule
 
     tool = tool_for_rule(raw.rule_id, tool)
@@ -230,6 +293,7 @@ def normalize(
         line_end=raw.line_end or raw.line_start,
         symbol=symbol,
         contract_id=str((raw.extra or {}).get("contract_id") or ""),
+        check_id=str((raw.extra or {}).get("check_id") or ""),
         fixable=bool((raw.extra or {}).get("fixable")),
         message=sanitize_text(raw.message),
         evidence=sanitize_evidence(evidence),
@@ -237,6 +301,7 @@ def normalize(
         context_anchor=anchor,
         status="new",
         origin="initial",
+        concluded_by=concluded_by_for(tool, raw.rule_id),
         first_seen_round=1,
         last_seen_round=1,
     )
@@ -365,6 +430,9 @@ def _attach_depth(root, case, report_id, files, selected, devices, findings, lim
         root, files, wanted,
         scope_type=getattr(case, "scope_type", "repo"),
         visit_kind=getattr(case, "visit_kind", "checkup") or "checkup",
+        python_review="python-review" in selected,
+        java_review="java-review" in selected,
+        ts_review="ts-review" in selected,
     )
     limitations.extend(extra)
     if "supply-ruler" in wanted:
@@ -397,8 +465,39 @@ def _pack_targets(instrument_id: str, files: list[str]) -> list[str]:
     return [path for path in files if Path(path).suffix.lower() in exts]
 
 
+def _fold_hired(root, case, report_id, instrument_id, hired, findings, limitations, devices, version):
+    """外聘进程和外聘 MCP 共用：范围内的发现标成 external，记录进设备。"""
+    limitations.extend(hired["limitations"])
+    for raw in hired["raws"]:
+        finding = normalize(
+            RawFinding(
+                rule_id=raw["rule_id"],
+                severity=raw["severity"],
+                file_path=raw["file_path"],
+                line_start=raw["line_start"],
+                line_end=raw["line_end"],
+                message=raw["message"],
+            ),
+            instrument_id,
+            case.id,
+            report_id,
+            root,
+        )
+        finding.concluded_by = "external"
+        findings.append(finding)
+    status = hired["record"]["status"]
+    devices.append({
+        "tool": instrument_id,
+        "available": status != "absent",
+        "version": version,
+        "outcome": "ok" if status in {"ran", "quiet"} else "terminal",
+        "hired": hired["record"],
+    })
+
+
 async def _attach_user_instruments(root, case, report_id, files, selected, devices, findings, limitations, timeout_ms):
-    """用户仪器：semgrep 规则文件会跑；external 只登记命令在不在。"""
+    """用户仪器：semgrep 规则文件会跑；external 按白名单进程跑；mcp 由医院当客户端去调。"""
+    from ..catalog.external_run import run_hired
     from ..catalog.formulary import books_for
     from ..catalog.packs import scan_rules, semgrep_available
 
@@ -410,15 +509,14 @@ async def _attach_user_instruments(root, case, report_id, files, selected, devic
         if inst is None:
             continue
         if inst["engine"] == "external":
-            present = shutil.which(inst["binary"]) is not None
-            devices.append({
-                "tool": instrument_id,
-                "available": present,
-                "version": inst["binary"],
-                "outcome": "ok" if present else "terminal",
-            })
-            if not present:
-                limitations.append(inst["limitation"])
+            hired = await run_hired(root, inst, files, timeout_ms)
+            _fold_hired(root, case, report_id, instrument_id, hired, findings, limitations, devices, inst["binary"])
+            continue
+        if inst["engine"] == "mcp":
+            from ..catalog.mcp_client import run_mcp
+
+            hired = await run_mcp(root, inst, files, timeout_ms)
+            _fold_hired(root, case, report_id, instrument_id, hired, findings, limitations, devices, inst["command"])
             continue
         targets = files
         exts = {f".{item}" for item in inst.get("extensions") or []}
@@ -580,6 +678,10 @@ async def _scan_jscpd(root, report_id, case, files, selected, devices, findings,
         limitations.append(f"jscpd: {exc}")
 
 
+from ..api.capabilities import hosted
+
+
+@hosted
 async def scan(
     case_id: str,
     tools: list[str] | None = None,
@@ -608,8 +710,11 @@ async def scan(
                             next_action="先 hosp_register 挂号")
 
         # 叫号检查：挂号单或补片检查单待确认时挂起，用户确认后重调本工具放行
+        from ..api.capabilities import admit_stage
+
+        admit_stage(stage_confirmed, case.pending_gate or "")
         if case.pending_gate and not stage_confirmed:
-            from ..core.questions import stage_gate_question
+            from ..core.questions import release, stage_gate_question
 
             reports = await db.list_reports(case_id)
             reg_report = next((r for r in reports if r.stage == "register"), None)
@@ -619,7 +724,11 @@ async def scan(
                 if reg_report and reg_report.md_path
                 else f"分诊 {case.triage_level}，范围 {case.scope_type}。"
             )
-            return stage_gate_question(case_id, case.pending_gate, "hosp_scan", prompt_meta)
+            halted = await release(stage_gate_question(case_id, case.pending_gate, "hosp_scan", prompt_meta))
+            if halted is not None:
+                from ..api.capabilities import finish
+
+                return finish(halted)
         if case.pending_gate:
             await db.update_case(case_id, pending_gate="")
             case.pending_gate = ""
@@ -649,13 +758,19 @@ async def scan(
         limitations.append(summarize_checks(checks))
 
         # 初诊调档：复发看 content_key（长相），身份指纹只区分同形的多处命中。
-        fingerprints = sorted({f.fingerprint for f in findings if f.fingerprint})
-        content_keys = sorted({f.content_key for f in findings if f.content_key})
+        from ..core.models import counts_toward_efficacy
+
+        durable = [f for f in findings if counts_toward_efficacy(f.concluded_by)]
+        fingerprints = sorted({f.fingerprint for f in durable if f.fingerprint})
+        content_keys = sorted({f.content_key for f in durable if f.content_key})
         raw_history = await db.find_fingerprint_history(
             root, fingerprints, exclude_case_id=case_id, content_keys=content_keys,
         )
         recurring = 0
         for f in findings:
+            if not counts_toward_efficacy(f.concluded_by):
+                f.history_refs = []
+                continue
             refs = lookup_history(raw_history, f.fingerprint, f.content_key)
             f.history_refs = [
                 {**r, "note": f"此前病例曾出现同形态发现（复发记录 {i + 1}/{len(refs)}）"}
@@ -670,7 +785,10 @@ async def scan(
 
         # 检验后分诊升级（设计 §3.2：只影响审批默认值，不动状态机；事件落 reports）
         triage_upgrade: dict = {}
-        critical_hits = sum(1 for f in findings if f.severity == "critical")
+        critical_hits = sum(
+            1 for f in findings
+            if f.severity == "critical" and counts_toward_efficacy(f.concluded_by)
+        )
         if critical_hits > 0 and case.triage_level != "emergency":
             triage_upgrade = {
                 "from": case.triage_level,
@@ -689,6 +807,22 @@ async def scan(
         from ..storage.rsi_memory import load_memory_brief
 
         memory_context = load_memory_brief(root)
+
+        from ..api.capabilities import finish, gate_limitation, remember_capabilities
+        from ..catalog.budget import hold_semantic, note_budget
+
+        note = gate_limitation()
+        if note:
+            limitations.append(note)
+        ledger = note_budget(root, findings, checks, limitations, ledger)
+        if (ledger.get("budget") or {}).get("degraded"):
+            hold_semantic(checks)
+            limitations[:] = [row for row in limitations if not str(row).startswith("检查事项 ")]
+            limitations.append(summarize_checks(checks))
+        ledger = remember_capabilities(ledger, case.coverage)
+        from ..catalog.loop import note_recurrence
+
+        ledger = note_recurrence(root, findings, limitations, ledger)
 
         # 检验报告（PR 可贴）
         case.updated_at = now_ms()
@@ -727,7 +861,7 @@ async def scan(
         from ..core.models import page_payload
         from ..core.questions import handoff
 
-        return {
+        return finish({
             "case_id": case_id,
             "report_id": report_id,
             "round": 1,
@@ -741,7 +875,7 @@ async def scan(
             "checks": checks,
             "report_path": str(report_path),
             "handoff": handoff(case_id, "scanned", case.auto_advance, next_tool="hosp_diagnose"),
-        }
+        })
 
 
 async def _supplement(db, root: str, case, timeout_ms: int) -> dict:
@@ -769,17 +903,38 @@ async def _supplement(db, root: str, case, timeout_ms: int) -> dict:
         limitations.append(text)
         notes.append({"id": instrument_id, "outcome": "terminal"})
 
-    fingerprints = sorted({f.fingerprint for f in findings if f.fingerprint})
-    content_keys = sorted({f.content_key for f in findings if f.content_key})
+    from ..catalog.coverage import stamp_source_counts
+    from ..core.models import counts_toward_efficacy
+
+    durable = [item for item in findings if counts_toward_efficacy(item.concluded_by)]
+    fingerprints = sorted({item.fingerprint for item in durable if item.fingerprint})
+    content_keys = sorted({item.content_key for item in durable if item.content_key})
     raw_history = await db.find_fingerprint_history(
         root, fingerprints, exclude_case_id=case.id, content_keys=content_keys,
     )
     for finding in findings:
+        if not counts_toward_efficacy(finding.concluded_by):
+            finding.history_refs = []
+            continue
         refs = lookup_history(raw_history, finding.fingerprint, finding.content_key)
         finding.history_refs = [
             {**ref, "note": "此前病例曾出现同形态发现（复发）"} for ref in refs
         ]
     await db.insert_findings(findings)
+    from ..api.capabilities import finish, gate_limitation, remember_capabilities
+    from ..catalog.budget import note_budget
+
+    note = gate_limitation()
+    if note:
+        limitations.append(note)
+    ledger = note_budget(root, findings, [], limitations, ledger)
+    ledger = remember_capabilities(
+        stamp_source_counts(ledger, await db.all_findings(case.id)),
+        case.coverage,
+    )
+    from ..catalog.loop import note_recurrence
+
+    ledger = note_recurrence(root, findings, limitations, ledger)
 
     lines = [
         f"# 补片检验 {case.id}",
@@ -811,7 +966,7 @@ async def _supplement(db, root: str, case, timeout_ms: int) -> dict:
         coverage_json=json.dumps(ledger, ensure_ascii=False),
     )
     page_items, total = await db.list_findings(case.id, page=1, size=50, order_by="severity desc")
-    return {
+    return finish({
         "case_id": case.id,
         "report_id": report_id,
         "supplement_report_id": supplement_id,
@@ -823,4 +978,4 @@ async def _supplement(db, root: str, case, timeout_ms: int) -> dict:
         "limitations": limitations,
         "report_path": str(report_path),
         "handoff": handoff(case.id, "scanned", case.auto_advance, next_tool="hosp_diagnose"),
-    }
+    })

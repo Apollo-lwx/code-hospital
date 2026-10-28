@@ -27,6 +27,10 @@ SEVERITY_PLAIN = {
 DEFAULT_FUNCTION_LINES = 80
 DEFAULT_FILE_LINES = 500
 DEFAULT_CYCLOMATIC = 15
+DEFAULT_PARAMETERS = 5
+DEFAULT_BRANCHES = 10
+DEFAULT_JAVA_LINE_LENGTH = 120
+DEFAULT_TS_LINE_LENGTH = 200
 
 
 @dataclass(frozen=True)
@@ -34,6 +38,10 @@ class DiseasePolicy:
     function_lines: int = DEFAULT_FUNCTION_LINES
     file_lines: int = DEFAULT_FILE_LINES
     cyclomatic: int = DEFAULT_CYCLOMATIC
+    parameters: int = DEFAULT_PARAMETERS
+    branches: int = DEFAULT_BRANCHES
+    java_line_length: int = DEFAULT_JAVA_LINE_LENGTH
+    ts_line_length: int = DEFAULT_TS_LINE_LENGTH
     ignore: tuple[str, ...] = ()
     min_severity: str = ""
     ruff_select: tuple[str, ...] = ()
@@ -54,9 +62,15 @@ def load_policy(project_root: str) -> DiseasePolicy:
     if not isinstance(catalog, dict):
         catalog = {}
     structure = catalog.get("structure") or {}
+    java = catalog.get("java") or {}
+    typescript = catalog.get("ts") or {}
     rules = catalog.get("rules") or {}
     if not isinstance(structure, dict):
         structure = {}
+    if not isinstance(java, dict):
+        java = {}
+    if not isinstance(typescript, dict):
+        typescript = {}
     if not isinstance(rules, dict):
         rules = {}
     notes: list[str] = []
@@ -72,6 +86,10 @@ def load_policy(project_root: str) -> DiseasePolicy:
         function_lines=_limit(structure.get("function_lines"), DEFAULT_FUNCTION_LINES),
         file_lines=_limit(structure.get("file_lines"), DEFAULT_FILE_LINES),
         cyclomatic=_limit(structure.get("cyclomatic"), DEFAULT_CYCLOMATIC),
+        parameters=_limit(structure.get("parameters"), DEFAULT_PARAMETERS),
+        branches=_limit(structure.get("branches"), DEFAULT_BRANCHES),
+        java_line_length=_limit(java.get("line_length"), DEFAULT_JAVA_LINE_LENGTH),
+        ts_line_length=_limit(typescript.get("line_length"), DEFAULT_TS_LINE_LENGTH),
         ignore=ignore,
         min_severity=floor,
         ruff_select=selected,
@@ -92,6 +110,10 @@ def describe(policy: DiseasePolicy, dropped: int) -> str:
         _ruler("函数", policy.function_lines),
         _ruler("文件", policy.file_lines),
         _ruler("圈复杂度", policy.cyclomatic),
+        _count_ruler("参数", policy.parameters, "个"),
+        _count_ruler("分支", policy.branches, "个"),
+        _java_line(policy.java_line_length),
+        _ts_line(policy.ts_line_length),
     ]
     ignored = (
         "这些规则不写入报告：" + "、".join(policy.ignore)
@@ -115,6 +137,24 @@ def describe(policy: DiseasePolicy, dropped: int) -> str:
         + "。".join([*rulers, ignored, floor, selected, dropped_text])
         + extra
     )
+
+
+def _ts_line(limit: int) -> str:
+    if limit <= 0:
+        return "TypeScript 单行再长也不记入报告"
+    return f"TypeScript 单行超过 {limit} 个字符算问题"
+
+
+def _java_line(limit: int) -> str:
+    if limit <= 0:
+        return "Java 单行再长也不记入报告"
+    return f"Java 单行超过 {limit} 个字符算问题"
+
+
+def _count_ruler(name: str, limit: int, unit: str) -> str:
+    if limit <= 0:
+        return f"{name}再多也不记入报告"
+    return f"{name}超过 {limit} {unit}算问题"
 
 
 def _ruler(name: str, limit: int) -> str:

@@ -8,6 +8,7 @@ distill_to_rsi 为真且本机有 rsi 命令时，把结局计数写入 document
 
 from __future__ import annotations
 
+import json
 from collections import Counter, defaultdict
 
 from ..core.algorithms import (
@@ -21,8 +22,8 @@ from ..core.algorithms import (
 )
 from ..core.errors import bad_argument, forbidden, invalid_operation, not_found
 from ..core.ids import new_id
-from ..core.models import Finding, ReportRecord
-from ..core.questions import STAGE_ARTIFACTS, ask, handoff, stage_gate_question
+from ..core.models import Finding, ReportRecord, counts_toward_efficacy
+from ..core.questions import STAGE_ARTIFACTS, ask, handoff, present, release, stage_gate_question
 from ..storage.db import Database, hospital_root, now_ms
 from ..storage.reports import render_discharge_report, render_follow_up
 
@@ -82,7 +83,11 @@ def _apply_overrides(buckets: dict[str, list[Finding]], overrides: list[dict]) -
 
 
 async def _compare(db, case, current: list[Finding]) -> tuple[dict[str, list[Finding]], list[str]]:
-    baseline = [f for f in await db.all_findings(case.id) if f.status != "resolved"]
+    baseline = [
+        f for f in await db.all_findings(case.id)
+        if f.status != "resolved" and counts_toward_efficacy(f.concluded_by)
+    ]
+    current = [f for f in current if counts_toward_efficacy(f.concluded_by)]
     prev_rows = [_row(f) for f in baseline]
     curr_rows = [_row(f) for f in current]
     prev_of = {id(row): finding for row, finding in zip(prev_rows, baseline)}
@@ -156,6 +161,10 @@ def _outcome(buckets: dict[str, list[Finding]], gate: dict, has_manual: bool) ->
     return "unchanged"
 
 
+from ..api.capabilities import hosted
+
+
+@hosted
 async def discharge(
     case_id: str,
     overrides: list[dict] | None = None,
@@ -197,10 +206,15 @@ async def discharge(
                 target="case_id",
                 next_action="先 hosp_dispense 发完药味",
             )
+        from ..api.capabilities import admit_stage
+
+        admit_stage(stage_confirmed, case.pending_gate or "")
         if case.pending_gate.startswith("dose:") and not stage_confirmed:
-            return stage_gate_question(
+            halted = await release(stage_gate_question(
                 case_id, case.pending_gate, "hosp_discharge", "确认最后一味护理记录后开始复诊。"
-            )
+            ))
+            if halted is not None:
+                return halted
         if case.pending_gate and not case.pending_gate.startswith("dose:"):
             artifact, nxt = STAGE_ARTIFACTS.get(case.pending_gate, (case.pending_gate, "hosp_discharge"))
             raise invalid_operation(
@@ -234,13 +248,16 @@ async def discharge(
             return await _readmit(db, root, case, buckets, current, public)
 
         if buckets["new_related"] and case.round >= case.max_rounds and rounds_decision == "":
-            return ask(
+            presented = await present(ask(
                 "max_rounds_reached",
                 f"疗程已到 {case.round}/{case.max_rounds}，仍有 {len(buckets['new_related'])} 条医源性新症。",
                 [("extend", "延长 1 轮再入院"), ("refer", "不再治疗，转院出院")],
                 "转院",
                 f'hosp_discharge(case_id="{case_id}", rounds_decision="refer")',
-            )
+            ))
+            if presented.stop is not None:
+                return presented.stop
+            rounds_decision = presented.choice
         if rounds_decision == "extend":
             case.max_rounds += 1
             await db.update_case(case_id, max_rounds=case.max_rounds)
@@ -253,11 +270,19 @@ async def discharge(
         aliases = [(it.get("acceptance") or {}).get("alias") or "" for it in rx["items"]]
         checked = await acceptance_check(root, aliases)
         acceptance = Check("acceptance", checked["verdict"], checked["detail"])
+        stored = [
+            f for f in await db.all_findings(case.id)
+            if f.status != "resolved" and counts_toward_efficacy(f.concluded_by)
+        ]
         gate = _gate(
-            buckets, [f for f in await db.all_findings(case.id) if f.status != "resolved"],
-            current, devices, level, pending=False, acceptance=acceptance,
+            buckets, stored,
+            [f for f in current if counts_toward_efficacy(f.concluded_by)],
+            devices, level, pending=False, acceptance=acceptance,
         )
         if gate["verdict"] == "fail" and waive:
+            from ..api.capabilities import require_receipt
+
+            require_receipt(waiver_user_confirmed, "waiver_user_confirmed")
             if not waiver_user_confirmed or not waive_reason.strip():
                 raise forbidden(
                     "豁免须用户本人确认并填写理由",
@@ -272,16 +297,32 @@ async def discharge(
                 "reason": waive_reason[:300],
             }
         elif gate["verdict"] == "fail" and gate_decision != "accept":
-            return ask(
+            waive_question = ask(
                 "gate_waive",
                 "出院门禁未通过。可以按未愈或转院归档，也可以请用户本人豁免。",
                 [("accept", "接受门禁结果并归档"), ("waive", "请用户确认后豁免")],
                 "接受门禁结果并归档",
                 f'hosp_discharge(case_id="{case_id}", gate_decision="accept")',
             )
+            presented = await present(waive_question)
+            if presented.stop is not None:
+                return presented.stop
+            if presented.choice == "waive" and presented.text.strip():
+                gate["verdict"] = "waived"
+                gate["waiver"] = {
+                    "approved_by": "user",
+                    "user_confirmed": True,
+                    "confirmation_channel": "elicitation",
+                    "reason": presented.text.strip()[:300],
+                }
+            elif presented.choice != "accept":
+                return waive_question
 
         outcome = _outcome(buckets, gate, has_manual)
-        return await _close(db, root, case, buckets, current, public, gate, outcome, report_id, rx, distill_to_rsi)
+        return await _close(
+            db, root, case, buckets, current, public, gate, outcome, report_id, rx,
+            distill_to_rsi, _ledger.get("chains"),
+        )
 
 
 async def _persist_diff(db, case, buckets: dict[str, list[Finding]], current: list[Finding]) -> None:
@@ -317,7 +358,7 @@ async def _readmit(db, root, case, buckets, current, public) -> dict:
     }
 
 
-async def _close(db, root, case, buckets, current, public, gate, outcome, report_id, rx, distill: bool) -> dict:
+async def _close(db, root, case, buckets, current, public, gate, outcome, report_id, rx, distill: bool, chains: dict | None) -> dict:
     await _persist_diff(db, case, buckets, current)
     status = "referred" if outcome == "referred" else "discharged"
     discharge_id = new_id("dis")
@@ -334,7 +375,9 @@ async def _close(db, root, case, buckets, current, public, gate, outcome, report
 
     questions = outside_overlay(root)["discharge"]
     summary_path.write_text(
-        render_discharge_report(case, outcome, gate, public, str(follow_path), questions),
+        render_discharge_report(
+            case, outcome, gate, public, str(follow_path), questions, chains,
+        ),
         encoding="utf-8",
     )
     reports = await db.list_reports(case.id)
@@ -344,7 +387,27 @@ async def _close(db, root, case, buckets, current, public, gate, outcome, report
         summary=f"{outcome} / 门禁 {gate['verdict']}",
         created_at=now_ms(),
     ))
-    await db.update_case(case.id, status=status, pending_gate="")
+    from ..catalog.loop import record_discharge, scope_account
+    from ..safety.repo_files import scope_file_list
+
+    files, _skipped_files = await scope_file_list(root, case.scope_type, case.scope.model_dump())
+    sample, eval_path = record_discharge(
+        root, case.id, outcome, buckets["resolved"],
+        scope=scope_account(case.coverage, files),
+    )
+    coverage = dict(case.coverage or {})
+    coverage["loop"] = {
+        "case_id": case.id,
+        "outcome": outcome,
+        "resolved": len(sample["resolved"]),
+    }
+    await db.update_case(
+        case.id,
+        status=status,
+        pending_gate="",
+        coverage_json=json.dumps(coverage, ensure_ascii=False),
+    )
+    case.coverage = coverage
     note = ""
     if distill:
         from ..integrations.rsi import distill_lesson
@@ -382,6 +445,7 @@ async def _close(db, root, case, buckets, current, public, gate, outcome, report
         },
         "report_chain": [r.id for r in reports] + [report_id],
         "questions": questions,
+        "eval_set": eval_path,
         "handoff": handoff(case.id, "discharged", True, ""),
         "note": note,
     }

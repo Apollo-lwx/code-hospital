@@ -1,0 +1,19 @@
+# 合入门诊有 TypeScript 文件时排上。这些是交给宿主读 diff 的问题，医院不执行。
+- id: ts.checklist.behavior
+  question: 改过的函数返回值和页面状态是否还符合调用方
+  needs: []
+  executors: [llm]
+  group: checklist
+  artifact: "写入 check_answers 的这一项。有问题用「文件:行: 说明」。没有问题写「没有」，再写「已读：」列出本次范围内每个文件。"
+- id: ts.checklist.types
+  question: any、断言或可选链是否盖住了这次改动里的类型
+  needs: []
+  executors: [llm]
+  group: checklist
+  artifact: "写入 check_answers 的这一项。有问题用「文件:行: 说明」。没有问题写「没有」，再写「已读：」列出本次范围内每个文件。"
+- id: ts.checklist.dom
+  question: 写进页面的字符串是否来自这次 diff 里未经校验的输入
+  needs: []
+  executors: [llm]
+  group: checklist
+  artifact: "写入 check_answers 的这一项。有问题用「文件:行: 说明」。没有问题写「没有」，再写「已读：」列出本次范围内每个文件。"

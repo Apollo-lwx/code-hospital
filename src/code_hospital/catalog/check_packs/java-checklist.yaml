@@ -1,0 +1,19 @@
+# 合入门诊有 Java 文件时排上。这些是交给宿主读 diff 的问题，医院不执行。
+- id: java.checklist.behavior
+  question: 改过的方法返回值和副作用是否还符合调用方
+  needs: []
+  executors: [llm]
+  group: checklist
+  artifact: "写入 check_answers 的这一项。有问题用「文件:行: 说明」。没有问题写「没有」，再写「已读：」列出本次范围内每个文件。"
+- id: java.checklist.errors
+  question: 空的或只记下日志的 catch 是否让失败看起来像成功
+  needs: []
+  executors: [llm]
+  group: checklist
+  artifact: "写入 check_answers 的这一项。有问题用「文件:行: 说明」。没有问题写「没有」，再写「已读：」列出本次范围内每个文件。"
+- id: java.checklist.shared
+  question: 被多个线程碰到的字段是否在没有同步的情况下被修改
+  needs: []
+  executors: [llm]
+  group: checklist
+  artifact: "写入 check_answers 的这一项。有问题用「文件:行: 说明」。没有问题写「没有」，再写「已读：」列出本次范围内每个文件。"

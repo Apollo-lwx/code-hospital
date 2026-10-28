@@ -156,8 +156,15 @@ async def test_high_risk_needs_user_then_reject(git_repo):
     draft = await prescriber.prescribe(case_id=case_id, project_root=git_repo)
     assert draft["approval_policy"]["user_required_items"]
 
+    with pytest.raises(HospitalError) as caught:
+        await prescriber.prescribe(
+            case_id=case_id, approve=True, approver="host_agent", project_root=git_repo,
+        )
+    assert caught.value.code == "Forbidden"
+    assert caught.value.target == "approver"
+
     asked = await prescriber.prescribe(
-        case_id=case_id, approve=True, approver="host_agent", project_root=git_repo,
+        case_id=case_id, approve=True, approver="user", project_root=git_repo,
     )
     assert asked["question"]["kind"] == "high_risk_approval"
 

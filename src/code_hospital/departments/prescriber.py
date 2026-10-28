@@ -24,9 +24,9 @@ from ..core.efficacy import tally
 from ..core.errors import bad_argument, forbidden, invalid_operation, not_found
 from ..core.ids import new_id
 from ..core.models import SEVERITY_ORDER, ReportRecord
-from ..core.questions import STAGE_ARTIFACTS, ask, stage_gate_question
+from ..core.questions import STAGE_ARTIFACTS, ask, present, release, stage_gate_question
 from ..storage.db import Database, hospital_root, now_ms
-from ..storage.reports import render_prescribe_report, render_reading_report
+from ..storage.reports import efficacy_note, render_prescribe_report, render_reading_report
 
 _METHOD_ORDER = {"autofix": 0, "llm_patch": 1, "manual": 2}
 _RISK_RANK = {"low": 0, "medium": 1, "high": 2}
@@ -125,7 +125,7 @@ async def _with_rsi(root: str, payload: dict) -> dict:
 def _draft_payload(case_id: str, rx: dict, report_path: str, reading_path: str = "") -> dict:
     items = rx["items"]
     risk = rx["risk_level"]
-    return {
+    payload = {
         "case_id": case_id,
         "prescription_id": rx["id"],
         "status": "draft",
@@ -137,6 +137,10 @@ def _draft_payload(case_id: str, rx: dict, report_path: str, reading_path: str =
         "reading_path": reading_path,
         "handoff": _handoff(case_id, approved=False),
     }
+    note = efficacy_note(rx.get("efficacy") or [])
+    if note:
+        payload["efficacy_note"] = note
+    return payload
 
 
 def _approval_payload(rx: dict, report_path: str) -> dict:
@@ -406,6 +410,10 @@ def _skip_acceptance(items: list[dict]) -> None:
             it["acceptance"] = {"alias": "", "expect": "验收命令白名单为空，本项验收记 skipped"}
 
 
+from ..api.capabilities import hosted
+
+
+@hosted
 async def prescribe(
     case_id: str,
     approve: bool = False,
@@ -450,12 +458,17 @@ async def prescribe(
                 target="case_id",
                 next_action="先 hosp_diagnose，并确认诊断书",
             )
+        from ..api.capabilities import admit_stage
+
+        admit_stage(stage_confirmed, case.pending_gate or "")
         if case.pending_gate and not stage_confirmed:
             reports = await db.list_reports(case_id)
             diag = next((r for r in reports if r.stage == "diagnose"), None)
             where = diag.md_path if diag and diag.md_path else "诊断书"
             _artifact, next_tool = STAGE_ARTIFACTS.get(case.pending_gate, ("诊断书", "hosp_prescribe"))
-            return stage_gate_question(case_id, case.pending_gate, next_tool, f"诊断书见 {where}。")
+            halted = await release(stage_gate_question(case_id, case.pending_gate, next_tool, f"诊断书见 {where}。"))
+            if halted is not None:
+                return halted
         if case.pending_gate and case.pending_gate != "diagnosed":
             raise invalid_operation(
                 f"当前待确认的是 {case.pending_gate}，不能跳到开方",
@@ -464,26 +477,36 @@ async def prescribe(
             )
 
         diagnoses = await db.list_diagnoses(case_id)
+        findings = await db.all_findings(case_id)
+        by_id = {finding.id: finding for finding in findings}
+        from ..safety.admission import rules_for, screen_diagnoses
+
+        lane = "auto_advance" if case.auto_advance else "dispense"
+        diagnoses, admission_drops = screen_diagnoses(diagnoses, by_id, rules_for(root, lane))
         low = [d for d in diagnoses if d.confidence < 0.5]
         if low and low_confidence == "":
-            return ask(
+            presented = await present(ask(
                 "low_confidence_diagnosis",
                 f"有 {len(low)} 条置信度低于 0.5 的诊断（待复核）。未确认前不入处方。",
                 [("adopt", "采用这些待复核诊断"), ("exclude", "排除，不入处方"), ("defer", "先不开放，我补充上下文")],
                 "排除（不入处方）",
                 f'hosp_prescribe(case_id="{case_id}", stage_confirmed=true, low_confidence="exclude")',
-            )
+            ))
+            if presented.stop is not None:
+                return presented.stop
+            low_confidence = presented.choice
         if low_confidence == "defer":
-            return ask(
+            presented = await present(ask(
                 "low_confidence_diagnosis",
                 "开方已暂停，等待补充上下文。补充后用 adopt 或 exclude 重新调用。",
                 [("adopt", "采用这些待复核诊断"), ("exclude", "排除，不入处方"), ("defer", "继续暂停")],
                 "排除（不入处方）",
                 f'hosp_prescribe(case_id="{case_id}", stage_confirmed=true, low_confidence="exclude")',
-            )
+            ))
+            if presented.stop is not None:
+                return presented.stop
+            low_confidence = presented.choice
 
-        findings = await db.all_findings(case_id)
-        by_id = {finding.id: finding for finding in findings}
         prescription_id = new_id("rx")
         items = build_items(
             diagnoses, by_id, prescription_id,
@@ -491,6 +514,10 @@ async def prescribe(
             requested=case.requested_specialties,
             project_root=root,
         )
+        if (case.coverage or {}).get("budget", {}).get("degraded"):
+            from ..catalog.budget import downgrade_model_items
+
+            downgrade_model_items(items)
         needs = {it["acceptance"].get("alias") for it in items if it["acceptance"].get("alias")}
         from ..safety.acceptance import load_commands, save_detected
 
@@ -500,14 +527,17 @@ async def prescribe(
             suggestions = [s for s in detect_acceptance_commands(root) if s["alias"] in missing][:4]
             sug = "；".join(f"{s['alias']}={s['command']}" for s in suggestions) or "无"
             kept = low_confidence or "exclude"
-            return ask(
+            presented = await present(ask(
                 "acceptance_whitelist",
                 f"处方含需命令验收的药味，白名单还缺 {sorted(missing)}。探测到：{sug}。",
                 [("confirm", "把探测到的命令写入 code-hospital.yaml"), ("skip", "跳过命令验收（报告记 skipped）"), ("pause", "暂停开方")],
                 "验收记 skipped",
                 f'hosp_prescribe(case_id="{case_id}", stage_confirmed=true, '
                 f'low_confidence="{kept}", acceptance_decision="confirm")',
-            )
+            ))
+            if presented.stop is not None:
+                return presented.stop
+            acceptance_decision = presented.choice
         if acceptance_decision == "confirm":
             save_detected(root, detect_acceptance_commands(root))
             known = set(load_commands(root))
@@ -546,6 +576,17 @@ async def prescribe(
         md = render_prescribe_report(case, prescription_id, rx, str(report_path))
         note = f"> 给人看的一页：`{reading_path.name}`。同一函数里的问题放在一起。\n\n"
         md = md.replace("\n---\n\n", "\n---\n\n" + note, 1)
+        if admission_drops:
+            listed = "\n".join(
+                f"- {row['file'] or '未定位'}:{row['line'] or '-'} {row['reason']}"
+                for row in admission_drops
+            )
+            md += f"\n## 未入方的线索\n\n{listed}\n"
+            import json
+
+            coverage = dict(case.coverage or {})
+            coverage["admission_drops"] = admission_drops
+            await db.update_case(case_id, coverage_json=json.dumps(coverage, ensure_ascii=False))
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text(md, encoding="utf-8")
         await db.insert_report(ReportRecord(
@@ -555,20 +596,36 @@ async def prescribe(
             created_at=created,
         ))
         await db.update_case(case_id, status="prescribed", pending_gate="")
-        return await _with_rsi(root, _draft_payload(case_id, rx, str(report_path), str(reading_path)))
+        drafted = await _with_rsi(root, _draft_payload(case_id, rx, str(report_path), str(reading_path)))
+        if admission_drops:
+            drafted["admission_drops"] = admission_drops
+        return drafted
 
 
 def _prescribe_report_path(root: str, case_id: str, round_: int) -> Path:
     return hospital_root(root) / "reports" / case_id / f"prescribe-r{round_}.md"
 
 
-async def _decide(db, case, rx, approve, approver, user_confirmed, decision, report_path: str, root: str) -> dict:
+async def _decide(
+    db, case, rx, approve, approver, user_confirmed, decision, report_path: str, root: str,
+    confirmation: str = "",
+) -> dict:
+    if not rx.get("efficacy"):
+        diagnoses = await db.list_diagnoses(case.id)
+        rx["efficacy"] = _efficacy_for(
+            rx["items"], diagnoses, tally(await db.list_efficacy_rows()),
+        )
     if rx["status"] == "approved":
         if approve or decision:
             return _approval_payload(rx, report_path)
         raise invalid_operation("处方已批准", target="prescription_id", next_action="等待 hosp_dispense（尚未开放）")
     if rx["status"] == "rejected":
         raise invalid_operation("这张处方已拒绝", target="prescription_id", next_action="本阶段暂不支持就地重开")
+    channel = confirmation or "convention"
+    if approve and approver == "user":
+        from ..api.capabilities import require_receipt
+
+        require_receipt(user_confirmed, "user_confirmed")
     if not approve:
         return await _with_rsi(root, _draft_payload(case.id, rx, report_path))
 
@@ -577,10 +634,10 @@ async def _decide(db, case, rx, approve, approver, user_confirmed, decision, rep
         await db.update_prescription(
             rx["id"], status="rejected", approved_by=approver,
             human_in_loop=approver == "user" and user_confirmed,
-            confirmation_channel="convention", approved_at=now_ms(),
+            confirmation_channel=channel, approved_at=now_ms(),
         )
         rx.update(status="rejected", approved_by=approver, human_in_loop=approver == "user" and user_confirmed,
-                  confirmation_channel="convention", approved_at=now_ms())
+                  confirmation_channel=channel, approved_at=now_ms())
         _rewrite(case, rx, report_path)
         await db.update_report_summary(await _report_id(db, case.id), f"处方已拒绝 {rx['id']}")
         return _approval_payload(rx, report_path)
@@ -598,8 +655,14 @@ async def _decide(db, case, rx, approve, approver, user_confirmed, decision, rep
 
     risk = _risk_level(items)
     policy = _policy(items, risk)
+    if policy["user_required_items"] and approver == "host_agent":
+        raise forbidden(
+            "高危项不能由宿主代理自批",
+            target="approver",
+            next_action='请用户本人确认。未声明 elicitation 时用 approver="user" 且 user_confirmed=true',
+        )
     if policy["user_required_items"] and not (approver == "user" and user_confirmed):
-        return ask(
+        question = ask(
             "high_risk_approval",
             (
                 f"处方 {rx['id']} 含 {len(policy['user_required_items'])} 味高危药。"
@@ -610,6 +673,22 @@ async def _decide(db, case, rx, approve, approver, user_confirmed, decision, rep
             "降级外购",
             f'hosp_prescribe(case_id="{case.id}", approve=true, approver="user", user_confirmed=true)',
         )
+        presented = await present(question)
+        if presented.stop is not None:
+            return presented.stop
+        if presented.choice == "approve":
+            return await _decide(
+                db, case, rx, True, "user", True, decision, report_path, root, confirmation="elicitation",
+            )
+        if presented.choice == "reject":
+            return await _decide(
+                db, case, rx, True, "user", True, "reject", report_path, root, confirmation="elicitation",
+            )
+        if presented.choice == "downgrade":
+            return await _decide(
+                db, case, rx, True, "user", True, "downgrade", report_path, root, confirmation="elicitation",
+            )
+        return question
     if risk == "medium" and approver == "auto":
         raise forbidden("中危处方不能 auto 审批", target="approver", next_action='改用 approver="host_agent" 或 "user"')
     if risk == "high" and not (approver == "user" and user_confirmed):
@@ -619,11 +698,11 @@ async def _decide(db, case, rx, approve, approver, user_confirmed, decision, rep
     human = approver == "user" and user_confirmed
     await db.update_prescription(
         rx["id"], status="approved", risk_level=risk, approved_by=approver,
-        human_in_loop=human, confirmation_channel="convention", approved_at=approved_at,
+        human_in_loop=human, confirmation_channel=channel, approved_at=approved_at,
     )
     rx.update(
         status="approved", risk_level=risk, approved_by=approver, human_in_loop=human,
-        confirmation_channel="convention", approved_at=approved_at, items=items,
+        confirmation_channel=channel, approved_at=approved_at, items=items,
     )
     _rewrite(case, rx, report_path)
     await db.update_report_summary(await _report_id(db, case.id), f"处方已批准 {rx['id']}，风险 {risk}")

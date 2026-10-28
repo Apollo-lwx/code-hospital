@@ -6,7 +6,13 @@ pending_question 是**出参变体而非错误**：工具返回它时不执行�
 
 from __future__ import annotations
 
+import asyncio
+from dataclasses import dataclass
+
 from .ids import new_id
+
+_HALT = {"pause", "defer"}
+_ELICIT_TIMEOUT = 20
 
 # 阶段门禁的产物名与下一阶段工具映射（设计 §4.11 门禁点）
 STAGE_ARTIFACTS = {
@@ -61,7 +67,7 @@ def ask(
         "question": {
             "id": new_id("q"),
             "kind": kind,
-            "prompt": prompt[:500],
+            "prompt": prompt[:1500],
             "options": [{"value": value, "label": label} for value, label in options],
             "channel": "convention",
             "blocking": True,
@@ -69,6 +75,99 @@ def ask(
         },
         "resume_hint": resume_hint[:300],
     }
+
+
+@dataclass
+class Presented:
+    """present 的结果。stop 有值时调用方原样返回，本阶段不执行。"""
+
+    choice: str = ""
+    text: str = ""
+    stop: dict | None = None
+
+
+def _answer_model(options: list[str]):
+    from typing import Literal
+
+    from pydantic import create_model
+
+    allowed = tuple(dict.fromkeys(options)) or ("confirm", "pause")
+    choice_type = Literal.__getitem__(allowed)
+    return create_model("GateAnswer", choice=(choice_type, ...), text=(str, ""))
+
+
+def _copied(payload: dict, *, channel: str, action: str = "") -> dict:
+    stopped = dict(payload)
+    question = dict(stopped.get("question") or {})
+    question["channel"] = channel
+    if action:
+        question["elicitation_action"] = action
+    stopped["question"] = question
+    return stopped
+
+
+def _degraded_stop(payload: dict) -> dict:
+    from ..api.capabilities import GATE_LINE, mark_degraded
+
+    mark_degraded()
+    stopped = _copied(payload, channel="convention")
+    stopped["degraded"] = True
+    stopped["degraded_reason"] = GATE_LINE
+    return stopped
+
+
+def _action_of(result) -> str:
+    if isinstance(result, dict):
+        return str(result.get("action") or "")
+    return str(getattr(result, "action", "") or "")
+
+
+def _field(result, name: str) -> str:
+    data = result.get("data") if isinstance(result, dict) else getattr(result, "data", None)
+    if data is None:
+        return ""
+    if isinstance(data, dict):
+        return str(data.get(name) or "")
+    return str(getattr(data, name, "") or "")
+
+
+async def present(payload: dict) -> Presented:
+    """宿主声明了 elicitation 时当场确认。失败、超时、未声明都退回原来的约定问题。"""
+    from ..api.capabilities import current_ctx, elicitation_open, mark_elicited, note_receipt
+
+    if not elicitation_open():
+        return Presented(stop=payload)
+    ctx = current_ctx()
+    options = [item["value"] for item in (payload.get("question") or {}).get("options") or []]
+    try:
+        schema = _answer_model(options)
+        result = await asyncio.wait_for(
+            ctx.elicit(payload["question"]["prompt"], schema),
+            timeout=_ELICIT_TIMEOUT,
+        )
+    except Exception:
+        return Presented(stop=_degraded_stop(payload))
+    action = _action_of(result)
+    if action in {"decline", "cancel"}:
+        mark_elicited()
+        return Presented(stop=_copied(payload, channel="elicitation", action=action))
+    if action != "accept":
+        return Presented(stop=_degraded_stop(payload))
+    choice = _field(result, "choice")
+    text = _field(result, "text")
+    if choice not in options:
+        return Presented(stop=_degraded_stop(payload))
+    mark_elicited()
+    if choice in _HALT:
+        return Presented(choice=choice, text=text, stop=_copied(payload, channel="elicitation", action="accept"))
+    note_receipt()
+    return Presented(choice=choice, text=text, stop=None)
+
+
+async def release(payload: dict) -> dict | None:
+    """阶段门禁。返回 None 表示确认通过，调用方继续。返回字典则原样交回，不执行。"""
+    presented = await present(payload)
+    return presented.stop
 
 
 def handoff(

@@ -2,12 +2,12 @@
 
 中文 | [English](README_EN.md)
 
-**代码医院（Code Hospital）是一个开源、本地优先的 MCP（Model Context Protocol）服务器，面向 AI 代码评审（code review）与可验证的自动修复（verified auto-fix）。** 它把 ruff、semgrep、gitleaks 等确定性静态分析工具编排进一条带阶段门禁（human-in-the-loop stage gates）的「医院流程」：挂号 → 检验 → 诊断 → 开方 → 施治 → 出院。每次 AI 改动都有可审计的病历、人工审批闸门和可验证的差分。主链路零 API Key，支持 Cursor、Qoder、Codex 等任意 MCP 宿主。
+**代码医院（Code Hospital）是一个开源、本地优先的 MCP（Model Context Protocol）服务器，面向 AI 代码评审（code review）与可验证的自动修复（verified auto-fix）。** 它把 ruff、semgrep、gitleaks 等确定性静态分析工具编排进一条带阶段门禁（human-in-the-loop stage gates）的「医院流程」：挂号 → 检验 → 诊断 → 开方 → 施治 → 出院。每次 AI 改动都有可审计的病历、人工审批闸门和可验证的差分。医院自身零 API Key（模型能力由宿主提供），支持 Cursor、Qoder、Codex 等任意 MCP 宿主。
 
 把代码送到医院：先体检、再诊断、开处方、按方修码、护士全程盯防、复查确认才出院——每一步都有报告。AI 修代码不再是「赤脚医生模式」（看两眼就动手、改完不验证、越改越偏），而是按**病历、处方、护理记录**行医的正规医院：**有处方可查、有边界可控、有差分可证**，数据只落当前仓库的 `.hospital/`。
 
 > 当前版本 v0.1：挂号 / 检验 / 诊断 / 开方 / 成药与煎药提交 / 出院门禁 / 病例查询已可用；补验与冲突续行仍按[路线图](#路线图)开放。
-> 用户向术语手册见 [`docs/code-hospital-glossary.md`](docs/code-hospital-glossary.md)；设计契约见 [`docs/code-hospital-design.md`](docs/code-hospital-design.md)；IO 契约见 [`docs/code-hospital-io-contracts.md`](docs/code-hospital-io-contracts.md)；算法与建模设计见 [`docs/code-hospital-algorithms.md`](docs/code-hospital-algorithms.md)。运行时实现在 `code_hospital.core.algorithms`（`docs/algorithms_reference.py` 只是自检入口）。
+> 用户向术语手册见 [`docs/code-hospital-glossary.md`](docs/code-hospital-glossary.md)；设计契约见 [`docs/code-hospital-design.md`](docs/code-hospital-design.md)；IO 契约见 [`docs/code-hospital-io-contracts.md`](docs/code-hospital-io-contracts.md)；算法与建模设计见 [`docs/code-hospital-algorithms.md`](docs/code-hospital-algorithms.md)；架构演进方案见 [`docs/code-hospital-agent-runtime-plan.md`](docs/code-hospital-agent-runtime-plan.md)。运行时实现在 `code_hospital.core.algorithms`（`docs/algorithms_reference.py` 只是自检入口）。
 
 ## 目录
 
@@ -31,7 +31,7 @@
 - **可审计的处方与施治**——按已批准处方逐味施治；宿主模型补丁过四道校验才落盘；每处改动可逆应用回滚。
 - **可直接贴 PR 的报告**——Markdown 检验报告带严重度分级与覆盖说明，直接贴进 Pull Request 评论。
 - **复发追踪**——指纹关联历史病例，每条发现标注「初发」或「复发×N」（含首次病例与当时结局）。
-- **本地优先、隐私可控**——主链路零 API Key、零云端调用；所有数据只落本仓库 `.hospital/`（自动加入 git exclude）。
+- **本地优先**——仪器在本地跑，病历只落本仓库 `.hospital/`（自动加入 git exclude）；需要模型判断的环节交给宿主自带的大模型，云端或本地都行。
 - **口径归仓库所有**——被诊疗仓库的 `code-hospital.yaml` 决定什么算病：结构阈值、忽略规则与前缀、严重度下限。
 - **每个阶段都能请外援**——号别、医生、仪器、药方、检查事项、诊断问题和出院问题都写在同一份配置里。医院负责调度；判断交给宿主。会自动改代码的药，以及任意命令，不从这份配置进入。
 
@@ -195,8 +195,8 @@ scan_ignore:
 **和直接跑 ruff / semgrep 有什么区别？**
 ruff、semgrep 是仪器，代码医院是医院。它负责调度仪器、把发现归一化成带指纹的档案、跨扫描追踪复发、产出可直接贴 PR 的报告；更重要的是，所有改代码的动作都必须有已批准的处方，改完还要复诊差分验证——裸 linter 不管这些。
 
-**需要 API Key 吗？代码会上云吗？**
-不需要，不上云。主链路完全本地、零 API Key。所有数据写在被诊疗仓库的 `.hospital/` 目录，并自动加入 git exclude。
+**需要 API Key 吗？**
+不需要。医院不持有任何模型凭据，需要模型判断的环节（深度归因、煎药补丁）交给宿主自带的大模型完成。要全本地化就给宿主配一个本地模型，医院不对此设限。
 
 **支持哪些语言和工具？**
 P0 主力是 Python（ruff）；semgrep、gitleaks 作为可选设备接入。缺设备自动降级并在报告「覆盖与限制」中注明，流程绝不因缺工具而中断。

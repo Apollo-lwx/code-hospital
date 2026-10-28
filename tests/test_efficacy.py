@@ -4,9 +4,9 @@ import pytest
 
 from code_hospital.core.efficacy import classify_outcome, lesson_text, posterior, tally
 from code_hospital.core.models import Case, Diagnosis, Scope
-from code_hospital.departments.prescriber import _efficacy_for
+from code_hospital.departments.prescriber import _draft_payload, _efficacy_for
 from code_hospital.storage.db import Database
-from code_hospital.storage.reports import render_prescribe_report
+from code_hospital.storage.reports import efficacy_note, render_prescribe_report
 
 
 def test_skipped_acceptance_success_is_not_a_cure():
@@ -77,9 +77,30 @@ def test_draft_mentions_history_without_reordering():
         "",
     )
     assert "仍按名册" in told
+    assert "Beta(1, 1) 后验" in told
     assert "成功 4 次，失败 1 次，估计成功率 71%" in told
+    assert "还没到 8 次" in told
     assert told.index("以往疗效") < told.index("## 处理清单")
     assert told.index("| 1 |") < told.index("| 2 |")
+    note = efficacy_note(notes)
+    payload = _draft_payload(
+        "case_x",
+        {
+            "id": "rx1",
+            "risk_level": "low",
+            "items": [
+                {"id": "i1", "method": "llm_patch", "risk": "medium", "status": "pending"},
+                {"id": "i2", "method": "autofix", "risk": "low", "status": "pending"},
+            ],
+            "efficacy": notes,
+        },
+        "prescribe.md",
+    )
+    assert payload["efficacy_note"] == note
+    assert [item["id"] for item in payload["items"]] == ["i1", "i2"]
+    reached = efficacy_note([{"rule_id": "F401", "method": "autofix", "success": 8, "failure": 0}])
+    assert "已到约定次数" in reached
+    assert "仍不调权" in reached
 
 
 @pytest.mark.asyncio

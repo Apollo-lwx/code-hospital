@@ -59,10 +59,12 @@ CREATE TABLE IF NOT EXISTS findings (
     first_seen_round INTEGER NOT NULL DEFAULT 1,
     last_seen_round INTEGER NOT NULL DEFAULT 1,
     contract_id TEXT NOT NULL DEFAULT '',
+    check_id TEXT NOT NULL DEFAULT '',
     fixable INTEGER NOT NULL DEFAULT 0,
     verdict TEXT NOT NULL DEFAULT '',
     unresolved TEXT NOT NULL DEFAULT '',
-    attack_class TEXT NOT NULL DEFAULT ''
+    attack_class TEXT NOT NULL DEFAULT '',
+    concluded_by TEXT NOT NULL DEFAULT 'instrument'
 );
 CREATE INDEX IF NOT EXISTS idx_findings_case_fp ON findings(case_id, fingerprint);
 CREATE INDEX IF NOT EXISTS idx_findings_fp ON findings(fingerprint);
@@ -89,7 +91,8 @@ CREATE TABLE IF NOT EXISTS diagnoses (
     fixability TEXT NOT NULL,
     history_refs_json TEXT NOT NULL DEFAULT '[]',
     referrals_json TEXT NOT NULL DEFAULT '[]',
-    member_ids_json TEXT NOT NULL DEFAULT '[]'
+    member_ids_json TEXT NOT NULL DEFAULT '[]',
+    concluded_by TEXT NOT NULL DEFAULT 'code'
 );
 CREATE INDEX IF NOT EXISTS idx_diagnoses_case ON diagnoses(case_id, fingerprint);
 CREATE TABLE IF NOT EXISTS prescriptions (
@@ -222,6 +225,10 @@ class Database:
             await self.conn.execute(
                 "ALTER TABLE findings ADD COLUMN contract_id TEXT NOT NULL DEFAULT ''"
             )
+        if "check_id" not in finding_cols:
+            await self.conn.execute(
+                "ALTER TABLE findings ADD COLUMN check_id TEXT NOT NULL DEFAULT ''"
+            )
         if "fixable" not in finding_cols:
             await self.conn.execute(
                 "ALTER TABLE findings ADD COLUMN fixable INTEGER NOT NULL DEFAULT 0"
@@ -233,6 +240,14 @@ class Database:
         ):
             if name not in finding_cols:
                 await self.conn.execute(f"ALTER TABLE findings ADD COLUMN {name} {ddl}")
+        if "concluded_by" not in finding_cols:
+            await self.conn.execute(
+                "ALTER TABLE findings ADD COLUMN concluded_by TEXT NOT NULL DEFAULT 'instrument'"
+            )
+        await self.conn.execute(
+            "UPDATE findings SET concluded_by='host_llm'"
+            " WHERE tool='host' OR rule_id='diff.issue'"
+        )
         await self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_findings_content ON findings(content_key)"
         )
@@ -245,9 +260,14 @@ class Database:
         for name, ddl in (
             ("specialty_id", "TEXT NOT NULL DEFAULT ''"),
             ("formulary_matched", "INTEGER NOT NULL DEFAULT 1"),
+            ("concluded_by", "TEXT NOT NULL DEFAULT 'code'"),
         ):
             if diagnosis_cols and name not in diagnosis_cols:
                 await self.conn.execute(f"ALTER TABLE diagnoses ADD COLUMN {name} {ddl}")
+        await self.conn.execute(
+            "UPDATE diagnoses SET concluded_by='host_llm' WHERE fingerprint IN ("
+            "SELECT fingerprint FROM findings WHERE concluded_by='host_llm')"
+        )
         for name, ddl in (
             ("requested_specialties_json", "TEXT NOT NULL DEFAULT '[]'"),
             ("requested_instruments_json", "TEXT NOT NULL DEFAULT '[]'"),
@@ -424,15 +444,15 @@ class Database:
             "INSERT INTO findings (id, case_id, report_id, tool, rule_id, severity,"
             " file_path, line_start, line_end, symbol, message, evidence, fingerprint,"
             " content_key, context_anchor, status, origin, first_seen_round, last_seen_round,"
-            " contract_id, fixable, verdict, unresolved, attack_class)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " contract_id, check_id, fixable, verdict, unresolved, attack_class, concluded_by)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             [
                 (
                     f.id, f.case_id, f.report_id, f.tool, f.rule_id, f.severity,
                     f.file_path, f.line_start, f.line_end, f.symbol, f.message,
                     f.evidence, f.fingerprint, f.content_key, f.context_anchor, f.status, f.origin,
-                    f.first_seen_round, f.last_seen_round, f.contract_id, int(f.fixable),
-                    f.verdict, f.unresolved, f.attack_class,
+                    f.first_seen_round, f.last_seen_round, f.contract_id, f.check_id, int(f.fixable),
+                    f.verdict, f.unresolved, f.attack_class, f.concluded_by,
                 )
                 for f in findings
             ],
@@ -452,7 +472,7 @@ class Database:
         per_fingerprint: int = 3,
         content_keys: list[str] | None = None,
     ) -> dict[str, list[dict]]:
-        """历史复发查询。identity 与 content_key 都建索引项，调档优先看长相。"""
+        """历史复发查询。identity 与 content_key 都建索引项，调档优先看长相。宿主交卷不进入这里。"""
         history: dict[str, list[dict]] = {}
         wanted = [("fingerprint", fingerprints), ("content_key", content_keys or [])]
 
@@ -480,6 +500,7 @@ class Database:
                     "       c.status AS status, c.round AS rounds, c.created_at AS created_at"
                     " FROM findings f JOIN cases c ON c.id = f.case_id"
                     f" WHERE c.project_root=? AND f.{column} IN ({marks}) AND f.case_id != ?"
+                    " AND f.concluded_by != 'host_llm'"
                     " ORDER BY c.created_at DESC",
                     (project_root, *chunk, exclude_case_id),
                 )
@@ -496,7 +517,8 @@ class Database:
         order_by: str = "severity desc",
     ) -> tuple[list[Finding], int]:
         order = {
-            "severity desc": "CASE severity WHEN 'critical' THEN 0 WHEN 'major' THEN 1"
+            "severity desc": "CASE WHEN concluded_by='host_llm' THEN 1 ELSE 0 END ASC, "
+                             "CASE severity WHEN 'critical' THEN 0 WHEN 'major' THEN 1"
                              " WHEN 'minor' THEN 2 WHEN 'nit' THEN 3 ELSE 4 END ASC",
             "file_path": "file_path ASC",
         }.get(order_by, "rowid ASC")
@@ -580,8 +602,8 @@ class Database:
         await self.conn.executemany(
             "INSERT INTO diagnoses (id, case_id, report_id, fingerprint, category,"
             " root_cause, severity, confidence, fixability, history_refs_json, referrals_json,"
-            " member_ids_json, specialty_id, formulary_matched)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " member_ids_json, specialty_id, formulary_matched, concluded_by)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             [
                 (
                     d.id, d.case_id, d.report_id, d.fingerprint, d.category,
@@ -589,7 +611,7 @@ class Database:
                     json.dumps(d.history_refs, ensure_ascii=False),
                     json.dumps(d.referrals, ensure_ascii=False),
                     json.dumps(d.member_ids, ensure_ascii=False),
-                    d.specialty_id, int(d.formulary_matched),
+                    d.specialty_id, int(d.formulary_matched), d.concluded_by,
                 )
                 for d in items
             ],
@@ -613,6 +635,7 @@ class Database:
                 member_ids=json.loads(r["member_ids_json"] or "[]") if "member_ids_json" in keys else [],
                 specialty_id=r["specialty_id"] if "specialty_id" in keys else "",
                 formulary_matched=bool(r["formulary_matched"]) if "formulary_matched" in keys else True,
+                concluded_by=r["concluded_by"] if "concluded_by" in keys else "code",
             ))
         return out
 

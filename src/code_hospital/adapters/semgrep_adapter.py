@@ -1,7 +1,8 @@
 """semgrep 适配器：`semgrep scan --json`。
 
-规则源优先级：仓库本地 `.semgrep.yml` / `.semgrep/` > 注册表 `auto`（需网络）。
-进程外调用二进制（Semgrep CLI 为 LGPL-2.1，不链入代码）。
+规则源优先级：仓库本地 `.semgrep.yml` / `.semgrep/` > 登记处的 default、语言包和 security-audit。
+进程外调用二进制（Semgrep CLI 为 LGPL-2.1，不链入代码）。metrics 保持关闭；
+登记处的 auto 在关闭 metrics 时会直接拒绝，所以不用 auto。
 """
 
 from __future__ import annotations
@@ -10,6 +11,23 @@ import json
 import os
 
 from .base import AdapterError, RawFinding, ScannerAdapter, _run
+
+_REGISTRY = (
+    "p/default", "p/python", "p/javascript", "p/typescript",
+    "p/java", "p/golang", "p/security-audit",
+)
+
+
+def semgrep_argv(binary: str, config: str, files: list[str]) -> list[str]:
+    """没有本地规则时用登记处的语言包。auto 在关闭 metrics 时会被拒绝。"""
+    configs = list(_REGISTRY) if config == "auto" else [config]
+    argv = [binary, "scan", "--json", "--quiet", "--metrics=off"]
+    for item in configs:
+        argv.extend(["--config", item])
+    argv.append("--")
+    argv.extend(files)
+    return argv
+
 
 _SEVERITY_MAP = {"ERROR": "major", "WARNING": "minor", "INFO": "info"}
 
@@ -51,8 +69,7 @@ class SemgrepAdapter(ScannerAdapter):
                 config = local
                 break
         out, err = await _run(
-            [self.binary, "scan", "--json", "--quiet", "--metrics=off",
-             "--config", config, "--", *files],
+            semgrep_argv(self.binary, config, files),
             cwd=repo_root,
             timeout=timeout_ms / 1000,
         )

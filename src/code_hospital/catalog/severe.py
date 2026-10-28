@@ -1,7 +1,7 @@
 """重症号。只看这次改动。
 
 污点在单个函数里跟着赋值走，出口是 SQL、命令、文件路径、对外请求。
-调用影响只列出改过的函数被谁调用，并留下三句待复核，不自动改代码。
+静态调用从入口、改到的函数和必须先处理的发现往外走。动态调用、对不上的名字、解析失败保持未闭合。
 跨函数的数据流没有追。没有 diff 时结果是「重症未查」。
 """
 
@@ -32,6 +32,17 @@ _HTTP = {
 _PROPAGATE = {"str", "format", "join", "get"}
 _CAP_FUNCTIONS = 30
 _CAP_CALLERS = 8
+_CAP_CHAIN = 40
+_CAP_CHAIN_LINES = 12
+_BUILTINS = frozenset({
+    "print", "len", "str", "int", "list", "dict", "set", "tuple", "isinstance",
+    "range", "super", "type", "open", "enumerate", "zip", "map", "filter",
+    "sorted", "reversed", "any", "all", "min", "max", "sum", "next", "iter",
+    "format", "id", "hash", "repr", "bool", "float", "bytes", "bytearray",
+    "object", "property", "classmethod", "staticmethod", "getattr", "setattr",
+    "hasattr", "callable", "abs", "round", "pow", "divmod", "input", "vars",
+    "dir", "globals", "locals", "exec", "eval", "compile",
+})
 
 
 def resolve_change_set(project_root: str, files: list[str], scope_type: str) -> tuple[list[str], list[str], bool]:
@@ -317,6 +328,10 @@ class _CallerIndex:
     def __init__(self) -> None:
         self.defs: dict[str, list[str]] = {}
         self.uses: list[tuple[str, str, str, str]] = []
+        self.calls: list[tuple[str, str, str, str]] = []
+        self.dynamic: dict[tuple[str, str], list[str]] = {}
+        self.broken: set[str] = set()
+        self.parsed: set[str] = set()
 
     def add_def(self, rel: str, name: str) -> None:
         bucket = self.defs.setdefault(name, [])
@@ -327,22 +342,88 @@ class _CallerIndex:
         if leaf:
             self.uses.append((rel, fn, leaf, qualifier))
 
-    def callers(self, rel: str, name: str) -> list[str]:
+    def add_call(self, rel: str, fn: str, leaf: str, qualifier: str) -> None:
+        if leaf and leaf not in _BUILTINS:
+            self.calls.append((rel, fn, leaf, qualifier))
+
+    def add_dynamic(self, rel: str, fn: str, reason: str) -> None:
+        self.dynamic.setdefault((rel, fn), [])
+        if reason not in self.dynamic[(rel, fn)]:
+            self.dynamic[(rel, fn)].append(reason)
+
+    def caller_nodes(self, rel: str, name: str) -> list[tuple[str, str]]:
         owners = self.defs.get(name, [])
         unique = owners == [rel]
-        labels: list[str] = []
+        found: list[tuple[str, str]] = []
         for caller_rel, caller_fn, leaf, qualifier in self.uses:
             if leaf != name or (caller_rel == rel and caller_fn == name):
                 continue
             if caller_rel != rel and not unique and not _qualifier_matches(qualifier, rel):
                 continue
-            where = caller_fn or "模块顶层"
-            label = f"{caller_rel} 的 {where}"
-            if label not in labels:
-                labels.append(label)
-            if len(labels) >= _CAP_CALLERS:
+            node = (caller_rel, caller_fn)
+            if node not in found:
+                found.append(node)
+            if len(found) >= _CAP_CALLERS:
                 break
+        return found
+
+    def callers(self, rel: str, name: str) -> list[str]:
+        labels: list[str] = []
+        for caller_rel, caller_fn in self.caller_nodes(rel, name):
+            where = caller_fn or "模块顶层"
+            labels.append(f"{caller_rel} 的 {where}")
         return labels
+
+    def call_callers(self, rel: str, name: str) -> list[tuple[str, str]]:
+        owners = self.defs.get(name, [])
+        unique = owners == [rel]
+        found: list[tuple[str, str]] = []
+        for caller_rel, caller_fn, leaf, qualifier in self.calls:
+            if leaf != name or (caller_rel == rel and caller_fn == name):
+                continue
+            if caller_rel != rel and not unique and not _qualifier_matches(qualifier, rel):
+                continue
+            node = (caller_rel, caller_fn)
+            if node not in found:
+                found.append(node)
+            if len(found) >= _CAP_CALLERS:
+                break
+        return found
+
+    def resolve_def(self, caller_rel: str, leaf: str, qualifier: str) -> tuple[str, str] | str:
+        owners = self.defs.get(leaf, [])
+        if caller_rel in owners:
+            return caller_rel, leaf
+        if len(owners) == 1:
+            return owners[0], leaf
+        matched = [item for item in owners if _qualifier_matches(qualifier, item)]
+        if len(matched) == 1:
+            return matched[0], leaf
+        if not owners:
+            return "missing"
+        return "ambiguous"
+
+    def callee_nodes(self, rel: str, name: str) -> list[tuple[str, str]]:
+        found: list[tuple[str, str]] = []
+        for call_rel, call_fn, leaf, qualifier in self.calls:
+            if call_rel != rel or call_fn != name:
+                continue
+            resolved = self.resolve_def(call_rel, leaf, qualifier)
+            if isinstance(resolved, tuple) and resolved not in found:
+                found.append(resolved)
+        return found
+
+    def callee_gaps(self, rel: str, name: str) -> list[str]:
+        reasons: list[str] = []
+        for call_rel, call_fn, leaf, qualifier in self.calls:
+            if call_rel != rel or call_fn != name:
+                continue
+            resolved = self.resolve_def(call_rel, leaf, qualifier)
+            if resolved == "missing":
+                reasons.append(f"调用 {leaf} 对不上定义")
+            elif resolved == "ambiguous":
+                reasons.append(f"调用 {leaf} 同名不止一处")
+        return reasons
 
 
 def _caller_index(root: Path) -> _CallerIndex:
@@ -351,7 +432,9 @@ def _caller_index(root: Path) -> _CallerIndex:
         try:
             tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
         except SyntaxError:
+            index.broken.add(rel)
             continue
+        index.parsed.add(rel)
         _collect_uses(tree, rel, index)
     return index
 
@@ -427,10 +510,15 @@ def _collect_uses(tree: ast.AST, rel: str, index: _CallerIndex) -> None:
 
         def visit_Call(self, node: ast.Call) -> None:
             full = _full_name(node.func)
+            reason = _dynamic_reason(node)
+            if reason:
+                index.add_dynamic(rel, self._here(), reason)
             if full:
                 leaf = full.rsplit(".", 1)[-1]
                 qualifier = full[: -len(leaf) - 1] if "." in full else ""
                 index.add_use(rel, self._here(), leaf, qualifier)
+                if not reason:
+                    index.add_call(rel, self._here(), leaf, qualifier)
             for arg in [*node.args, *(kw.value for kw in node.keywords)]:
                 self.visit(arg)
             if isinstance(node.func, ast.Attribute):
@@ -536,6 +624,174 @@ def _is_test_path(path: str) -> bool:
     posix = path.replace("\\", "/")
     name = Path(posix).name
     return "/tests/" in f"/{posix}/" or name.startswith("test_") or name.endswith("_test.py")
+
+
+def close_chains(
+    project_root: str,
+    files: list[str],
+    seed_symbols: list[tuple[str, str]] | None = None,
+) -> dict:
+    """从入口、范围内改到的函数和点名的符号走出静态调用闭包。"""
+    root = Path(project_root)
+    opened: list[str] = []
+    py_files: list[str] = []
+    for rel in files:
+        key = rel.replace("\\", "/")
+        suffix = Path(key).suffix.lower()
+        if suffix == ".py" and (root / key).is_file():
+            py_files.append(key)
+        elif suffix and suffix != ".py":
+            opened.append(f"{key}：这条链未建")
+    if not py_files:
+        return {"closed": [], "open": _trim_chain(opened)}
+    index = _caller_index(root)
+    for rel in py_files:
+        if rel not in index.parsed and rel not in index.broken:
+            _parse_into(root, rel, index)
+    seeds = _chain_seeds(root, py_files, index, seed_symbols or [])
+    return _walk_chains(index, seeds, opened)
+
+
+def chain_note(chains: dict) -> str:
+    opened = list(chains.get("open") or [])
+    closed = list(chains.get("closed") or [])
+    if opened:
+        return f"未闭合：{'；'.join(opened[:6])}。未闭合链还在，漏洞结论先停在这里。"
+    if closed:
+        return f"已闭合：{'；'.join(closed[:6])}。"
+    return "这次范围没有走出静态调用链。"
+
+
+def chain_report_lines(chains: dict) -> list[str]:
+    opened = list(chains.get("open") or [])
+    closed = list(chains.get("closed") or [])
+    lines = ["## 调用链", ""]
+    if closed:
+        lines.append("已闭合：")
+        lines.extend(f"- {item}" for item in closed)
+        lines.append("")
+    if opened:
+        lines.append("未闭合：")
+        lines.extend(f"- {item}" for item in opened)
+        lines.append("")
+        lines.append("未闭合链还在，漏洞结论先停在这里。")
+        lines.append("")
+    if not closed and not opened:
+        lines.append("这次范围没有走出静态调用链。")
+        lines.append("")
+    return lines
+
+
+def _chain_seeds(root: Path, py_files: list[str], index: _CallerIndex, extra: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    seeds: list[tuple[str, str]] = []
+    spans = _line_spans(str(root), py_files)
+    for rel in py_files:
+        if rel in index.broken:
+            seeds.append((rel, ""))
+            continue
+        path = root / rel
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+        except SyntaxError:
+            index.broken.add(rel)
+            seeds.append((rel, ""))
+            continue
+        line_set = None if spans is None else spans.get(rel)
+        for name, _line in _touched_functions(tree, line_set):
+            seeds.append((rel, name))
+            if len(seeds) >= _CAP_FUNCTIONS:
+                return _unique_seeds(seeds)
+    for rel, name in extra:
+        if rel and name:
+            seeds.append((rel.replace("\\", "/"), name))
+    return _unique_seeds(seeds)[:_CAP_FUNCTIONS]
+
+
+def _walk_chains(index: _CallerIndex, seeds: list[tuple[str, str]], opened: list[str]) -> dict:
+    closed: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    queue = list(seeds)
+    while queue and len(seen) < _CAP_CHAIN:
+        rel, name = queue.pop(0)
+        if (rel, name) in seen:
+            continue
+        seen.add((rel, name))
+        if not str(rel).endswith(".py"):
+            opened.append(f"{rel}：这条链未建")
+            continue
+        if rel in index.broken or not name:
+            if rel in index.broken:
+                opened.append(f"{rel}：语法解析失败")
+            continue
+        for reason in index.dynamic.get((rel, name), []):
+            opened.append(f"{rel} 的 {name}：{reason}")
+        for def_rel, def_name in index.callee_nodes(rel, name):
+            closed.append(f"{rel} 的 {name} → {def_rel} 的 {def_name}")
+            queue.append((def_rel, def_name))
+        opened.extend(f"{rel} 的 {name}：{reason}" for reason in index.callee_gaps(rel, name))
+        for caller_rel, caller_fn in index.call_callers(rel, name):
+            where = caller_fn or "模块顶层"
+            closed.append(f"{caller_rel} 的 {where} → {rel} 的 {name}")
+            if caller_fn:
+                queue.append((caller_rel, caller_fn))
+    return {"closed": _trim_chain(_unique_text(closed)), "open": _trim_chain(_unique_text(opened))}
+
+
+def _parse_into(root: Path, rel: str, index: _CallerIndex) -> None:
+    path = root / rel
+    if not path.is_file():
+        return
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+    except SyntaxError:
+        index.broken.add(rel)
+        return
+    index.parsed.add(rel)
+    _collect_uses(tree, rel, index)
+
+
+def _unique_seeds(seeds: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    found: list[tuple[str, str]] = []
+    for item in seeds:
+        if item not in found:
+            found.append(item)
+    return found
+
+
+def _unique_text(items: list[str]) -> list[str]:
+    found: list[str] = []
+    for item in items:
+        if item not in found:
+            found.append(item)
+    return found
+
+
+def _trim_chain(items: list[str]) -> list[str]:
+    if len(items) <= _CAP_CHAIN_LINES:
+        return items
+    extra = len(items) - _CAP_CHAIN_LINES
+    return [*items[:_CAP_CHAIN_LINES], f"还有 {extra} 条没有列入"]
+
+
+def _dynamic_reason(node: ast.Call) -> str:
+    func = node.func
+    if isinstance(func, ast.Name) and func.id == "getattr":
+        return "动态调用 getattr"
+    if isinstance(func, ast.Name) and func.id == "setattr":
+        return "动态调用 setattr"
+    if isinstance(func, (ast.Call, ast.Subscript)):
+        return "动态调用"
+    if isinstance(func, ast.Attribute) and not _static_base(func.value):
+        return "动态调用"
+    return ""
+
+
+def _static_base(node: ast.AST) -> bool:
+    if isinstance(node, ast.Name):
+        return True
+    if isinstance(node, ast.Attribute):
+        return _static_base(node.value)
+    return False
 
 
 def _full_name(node: ast.AST) -> str:

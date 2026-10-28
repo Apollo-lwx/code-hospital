@@ -27,6 +27,15 @@ def source_hash(project_root: str, files: list[str]) -> str:
     return digest.hexdigest()[:16]
 
 
+def stamp_source_counts(ledger: dict | None, findings: list) -> dict:
+    """覆盖账记下这一批结论分别是谁下的。"""
+    from ..core.models import concluded_by_counts
+
+    out = dict(ledger or {})
+    out["concluded_by_counts"] = concluded_by_counts(findings)
+    return out
+
+
 def build_ledger(
     visit_kind: str,
     devices: list[dict],
@@ -34,15 +43,22 @@ def build_ledger(
     files: list[str],
     prior: dict | None = None,
     full_scan: bool = True,
+    seed_symbols: list[tuple[str, str]] | None = None,
 ) -> tuple[list[str], dict]:
     """返回写进限制项的句子，以及要落在病例上的覆盖账。"""
     current_hash = source_hash(project_root, files)
     if not full_scan:
         kept = prior or {"source_hash": current_hash, "units": []}
         return ["补片不改写整份覆盖账。"], kept
-    units = _units(visit_kind, devices)
+    from .severe import chain_note, close_chains
+
+    chains = (
+        close_chains(project_root, files, seed_symbols)
+        if project_root and files else {"closed": [], "open": []}
+    )
+    units = _units(visit_kind, devices, chains)
     if not units:
-        return [], {"source_hash": current_hash, "units": []}
+        return [], {"source_hash": current_hash, "units": [], "chains": chains}
     same_source = bool(prior and prior.get("source_hash") == current_hash and prior.get("units"))
     lines = ["覆盖账（查过不等于没有问题）："]
     if same_source:
@@ -51,10 +67,11 @@ def build_ledger(
         lines.append("源码变了，覆盖账按这次重查。")
     for unit in units:
         lines.append(f"{unit['title']}：{_STATUS[unit['status']]}。{unit['note']}")
-    return lines, {"source_hash": current_hash, "units": units}
+    lines.append("调用链。" + chain_note(chains))
+    return lines, {"source_hash": current_hash, "units": units, "chains": chains}
 
 
-def _units(visit_kind: str, devices: list[dict]) -> list[dict]:
+def _units(visit_kind: str, devices: list[dict], chains: dict | None = None) -> list[dict]:
     present = {row.get("tool", "") for row in devices}
     units: list[dict] = []
     if visit_kind == "security" or "security-ruler" in present:
@@ -62,7 +79,14 @@ def _units(visit_kind: str, devices: list[dict]) -> list[dict]:
     elif _state(devices, "gitleaks") == "ok":
         units.append(_secrets("absent", "ok"))
     if visit_kind == "severe" or "taint-ruler" in present or "impact-review" in present:
-        units.extend(_severe_units(devices, present))
+        units.extend(_severe_units(devices, present, chains or {"closed": [], "open": []}))
+    if "ts-review" in present:
+        units.append({
+            "id": "ts-syntax",
+            "title": "TypeScript 文本",
+            "status": "partial",
+            "note": "TS 解析未建，函数长度按 function 和 => 估算。",
+        })
     return units
 
 
@@ -100,7 +124,9 @@ def _security_units(devices: list[dict]) -> list[dict]:
     return units
 
 
-def _severe_units(devices: list[dict], present: set[str]) -> list[dict]:
+def _severe_units(devices: list[dict], present: set[str], chains: dict) -> list[dict]:
+    from .severe import chain_note
+
     taint = _state(devices, "taint-ruler")
     impact = _state(devices, "impact-review")
     units = [
@@ -111,9 +137,9 @@ def _severe_units(devices: list[dict], present: set[str]) -> list[dict]:
         ),
         {
             "id": "taint-cross",
-            "title": "跨函数污点",
-            "status": "uncovered",
-            "note": "跨函数没有追，不能写成没有漏洞。",
+            "title": "跨函数调用",
+            "status": "partial" if chains.get("open") else ("checked" if chains.get("closed") else "uncovered"),
+            "note": chain_note(chains),
         },
         _ran(
             "impact", "改动影响", impact,

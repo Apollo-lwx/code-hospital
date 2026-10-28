@@ -16,6 +16,7 @@ from ..safety.repo_files import (
     ensure_git_repo,
     scope_file_list,
 )
+from ..runtime.lock import case_lock
 from ..storage.db import Database, now_ms
 from ..storage.reports import render_register_report
 
@@ -44,6 +45,10 @@ def _check_catalog_request(specialties: list[str], instruments: list[str], proje
         )
 
 
+from ..api.capabilities import hosted
+
+
+@hosted
 async def register(
     title: str,
     scope_type: str,
@@ -90,16 +95,8 @@ async def register(
     )
 
     async with Database(root) as db:
-        # 1) 同仓互斥（设计 §4.7）
-        active = await db.get_active_case(root)
-        if active is not None:
-            if not force:
-                raise conflict(
-                    f"本仓库已有活跃病例 {active.id}（{active.title}，状态 {active.status}）",
-                    target="case_id",
-                    next_action="先完成该病例并出院，或以 force=true 将其转诊后重新挂号",
-                )
-            await db.update_case(active.id, status="referred")
+        # 1) 同仓互斥（设计 §4.7）。默认是进程内锁，换实现不改这一行。
+        await case_lock.claim(db, root, force=force)
 
         # 2) 轻量预检分诊（设计 §3.2：staged/diff/paths 快扫；repo 全量留给 scan 升级）
         files, _skipped = await scope_file_list(root, scope_type, scope_obj.model_dump())

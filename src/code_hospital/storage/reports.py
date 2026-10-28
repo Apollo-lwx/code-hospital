@@ -12,7 +12,15 @@ from pathlib import Path
 
 from .. import __version__
 from ..catalog.policy import SEVERITY_PLAIN
-from ..core.models import SEVERITY_ORDER, Case, Finding, Severity
+from ..core.models import (
+    SEVERITY_ORDER,
+    Case,
+    Finding,
+    Severity,
+    counts_toward_efficacy,
+    finding_rank,
+    source_summary,
+)
 
 _SEV_LABEL = {
     Severity.CRITICAL.value: SEVERITY_PLAIN["critical"],
@@ -54,6 +62,27 @@ _RULE_PLAIN = {
     "structure.function_lines": "函数超过行数",
     "structure.file_lines": "文件超过行数",
     "structure.cyclomatic": "圈复杂度过高",
+    "python.too-many-params": "参数过多",
+    "python.branch-count": "分支过多",
+    "python.bare-except": "裸 except",
+    "python.mutable-default": "可变默认参数",
+    "python.exec": "执行任意代码",
+    "python.hardcoded-secret": "密钥写在源码里",
+    "java.line-length": "Java 行太长",
+    "java.empty-catch": "空的 catch",
+    "java.system-out": "用了 System.out.print",
+    "java.hardcoded-secret": "密钥写在源码里",
+    "java.raw-thread": "直接 new Thread",
+    "java.executors": "直接调用 Executors",
+    "java.sql-concat": "SQL 被拼接",
+    "ts.line-length": "TypeScript 行太长",
+    "ts.function-lines": "函数过长（估算）",
+    "ts.any": "用了 any",
+    "ts.console-log": "留下了 console.log",
+    "ts.todo": "留下了待办标记",
+    "ts.trailing-whitespace": "行尾有空白",
+    "ts.hardcoded-secret": "密钥写在源码里",
+    "ts.dom-write": "把字符串写进页面",
     "security.exec": "执行任意代码",
     "security.shell": "通过 shell 执行命令",
     "security.deserialize": "不可信反序列化",
@@ -425,6 +454,64 @@ def render_register_report(case: Case, report_id: str, precheck_hits: int, dupli
     return "\n".join(parts)
 
 
+def _source_cell(finding: Finding) -> str:
+    return {
+        "instrument": "仪器",
+        "host_llm": "待核实",
+        "external": "外聘",
+        "code": "代码",
+    }.get(finding.concluded_by, "仪器")
+
+
+def _pending_leads(case: Case, findings: list[Finding]) -> list[str]:
+    leads = [item for item in findings if not counts_toward_efficacy(item.concluded_by)]
+    if not leads:
+        return []
+    lines = ["## 待核实线索", "", "这些是宿主交卷。", ""]
+    for finding in leads:
+        msg = finding.message.replace("|", "\\|").replace("\n", " ")[:80]
+        lines.append(
+            f"- {_file_link(case.project_root, finding.file_path, finding.line_start)} · {finding.rule_id} · {msg}"
+        )
+    lines.append("")
+    return lines
+
+
+def _group_blocks(case: Case, clusters: list[tuple]) -> list[str]:
+    parts: list[str] = []
+    for i, (diagnosis, members) in enumerate(clusters, 1):
+        places = "、".join(
+            _file_link(case.project_root, f.file_path, f.line_start) for f in members[:5]
+        )
+        if len(members) > 5:
+            places += f" 等 {len(members)} 处"
+        review = "⚠ 待复核" if diagnosis.confidence < 0.5 else f"{diagnosis.confidence:.2f}"
+        parts += [
+            f"### 第 {i} 组 · {diagnosis.category}（{_SEV_LABEL.get(diagnosis.severity, diagnosis.severity)}，置信度 {review}）",
+            "",
+            f"- 说明: {diagnosis.root_cause}",
+            f"- 涉及: {places}",
+        ]
+        if diagnosis.concluded_by == "host_llm":
+            parts.append("- 来源: 待核实线索")
+        if diagnosis.history_refs:
+            hist = "；".join(
+                f"`{h['case_id']}` {h.get('outcome') or '在治'} {h.get('rounds', 1)} 轮"
+                for h in diagnosis.history_refs
+            )
+            parts.append(f"- 病史: {hist}")
+        else:
+            parts.append("- 病史: 初发")
+        parts.append(
+            f"- 建议怎么处理: {_METHOD_PLAIN.get(diagnosis.fixability, diagnosis.fixability)}"
+        )
+        if diagnosis.referrals:
+            for ref in diagnosis.referrals:
+                parts.append(f"- 会诊转诊: {ref.get('target_repo', '')} · {ref.get('hypothesis', '')}")
+        parts.append("")
+    return parts
+
+
 def render_scan_report(
     case: Case,
     report_id: str,
@@ -434,8 +521,10 @@ def render_scan_report(
     memory_context: dict | None = None,
     checks: list[dict] | None = None,
 ) -> str:
+    ranked = sorted(findings, key=finding_rank)
+    durable = [item for item in ranked if counts_toward_efficacy(item.concluded_by)]
     counts = {sev: 0 for sev in _SEV_LABEL}
-    for f in findings:
+    for f in durable:
         counts[f.severity] = counts.get(f.severity, 0) + 1
     device_str = ", ".join(
         f"{d['tool']}@{d['version']}" if d["available"] else f"{d['tool']}(不可用)"
@@ -454,30 +543,38 @@ def render_scan_report(
         "## 概要\n",
         "| 范围 | 发现总数 | 必须先处理 | 明确缺陷 | 一般问题 | 风格与提示 |",
         "|---|---|---|---|---|---|",
-        f"| {scope_desc} | {len(findings)} | {counts['critical']} | {counts['major']}"
+        f"| {scope_desc} | {len(ranked)} | {counts['critical']} | {counts['major']}"
         f" | {counts['minor']} | {counts['nit'] + counts['info']} |",
         "",
-        "> 这五档是检查工具自己的分法，不是漏洞通告里的超危、高危。"
+        source_summary(ranked),
+        "",
+        "> 这五档是检查工具自己的分法，不是漏洞通告里的超危、高危。上面五档统计仪器、外聘和医院代码。模型交卷记在待核实线索。"
         "必须先处理指密钥或同类安全项；明确缺陷指已经能指出的代码问题，例如没用到的导入；"
         "一般问题偏格式；风格建议是可改可不改的写法，函数超过行数和文件超过行数也算在这里；参考信息并进「风格与提示」。",
         "",
     ]
-    parts += _scan_cards(case, findings)
+    if durable:
+        parts += _scan_cards(case, durable)
+    elif ranked:
+        parts += ["## 按规则看", "", "这一轮没有仪器发现。", ""]
+    else:
+        parts += _scan_cards(case, ranked)
+    parts += _pending_leads(case, ranked)
     parts += [
         "## 发现明细（按严重度排序）\n",
-        "| # | 严重度 | 规则 | 位置 | 摘要 | 病史 |",
-        "|---|---|---|---|---|---|",
+        "| # | 来源 | 严重度 | 规则 | 位置 | 摘要 | 病史 |",
+        "|---|---|---|---|---|---|---|",
     ]
-    for i, f in enumerate(findings, 1):
+    for i, f in enumerate(ranked, 1):
         msg = f.message.replace("|", "\\|").replace("\n", " ")[:80]
         history = f"复发×{len(f.history_refs)}" if f.history_refs else "初发"
         parts.append(
-            f"| {i} | {_SEV_LABEL.get(f.severity, f.severity)} | {f.rule_id} | {_file_link(case.project_root, f.file_path, f.line_start)} | {msg} | {history} |"
+            f"| {i} | {_source_cell(f)} | {_SEV_LABEL.get(f.severity, f.severity)} | {f.rule_id} | {_file_link(case.project_root, f.file_path, f.line_start)} | {msg} | {history} |"
         )
-    if findings:
+    if ranked:
         parts.append("\n> 明细逐条列出全部位置。卡片上每种规则只举了前 3 处。")
 
-    evidenced = [f for f in _scan_previews(findings) if f.evidence]
+    evidenced = [f for f in _scan_previews(durable) if f.evidence]
     if evidenced:
         parts += ["", "## 证据", ""]
         for i, f in enumerate(evidenced, 1):
@@ -543,6 +640,7 @@ def _check_section(checks: list[dict]) -> list[str]:
         "partial": "只到岗一部分",
         "open": "待交卷",
         "blocked": "被前置挡住",
+        "budget": "因预算未做",
     }
     for item in checks:
         parts.append(f"### {item['id']} · {item['question']}")
@@ -570,8 +668,19 @@ def render_diagnose_report(
     stats: dict,
     use_llm: bool = False,
     questions: list[dict] | None = None,
+    filing_note: str = "",
+    budget_note: str = "",
 ) -> str:
     """诊断书（契约 §5.4）。clusters 为 (Diagnosis, findings) 对，位置只出现在报告里。"""
+    members = [finding for _diagnosis, group in clusters for finding in group]
+    durable: list[tuple] = []
+    leads: list[tuple] = []
+    for pair in clusters:
+        group = pair[1]
+        if group and all(item.concluded_by == "host_llm" for item in group):
+            leads.append(pair)
+        else:
+            durable.append(pair)
     parts = [
         _header("诊断书", case, report_id),
         "## 概要\n",
@@ -582,44 +691,34 @@ def render_diagnose_report(
             f" | {stats['llm_patch']} | {stats['manual']} |"
         ),
         "",
+        source_summary(members),
+        "",
     ]
     if use_llm:
         parts += ["> 宿主声明将自行增强解读。本诊断书仍是模板归因，未调用模型。", ""]
     else:
         parts += ["> 分组和处置建议来自规则表，不是模型判断。", ""]
-    parts += _diagnose_cards(case, clusters)
+    if budget_note:
+        parts += [f"> {budget_note}", ""]
+    if durable:
+        parts += _diagnose_cards(case, durable)
+    elif leads:
+        parts += ["## 按规则看", "", "这一轮没有仪器发现。", ""]
+    else:
+        parts += _diagnose_cards(case, clusters)
+    if filing_note:
+        parts += ["## 合入交卷", "", filing_note, ""]
     parts += _outside_questions(questions)
     parts += ["## 问题分组", ""]
-    if not clusters:
+    if durable:
+        parts += _group_blocks(case, durable)
+    elif not leads:
         parts.append("没有发现。")
-    for i, (diagnosis, members) in enumerate(clusters, 1):
-        places = "、".join(
-            _file_link(case.project_root, f.file_path, f.line_start) for f in members[:5]
-        )
-        if len(members) > 5:
-            places += f" 等 {len(members)} 处"
-        review = "⚠ 待复核" if diagnosis.confidence < 0.5 else f"{diagnosis.confidence:.2f}"
-        parts += [
-            f"### 第 {i} 组 · {diagnosis.category}（{_SEV_LABEL.get(diagnosis.severity, diagnosis.severity)}，置信度 {review}）",
-            "",
-            f"- 说明: {diagnosis.root_cause}",
-            f"- 涉及: {places}",
-        ]
-        if diagnosis.history_refs:
-            hist = "；".join(
-                f"`{h['case_id']}` {h.get('outcome') or '在治'} {h.get('rounds', 1)} 轮"
-                for h in diagnosis.history_refs
-            )
-            parts.append(f"- 病史: {hist}")
-        else:
-            parts.append("- 病史: 初发")
-        parts.append(
-            f"- 建议怎么处理: {_METHOD_PLAIN.get(diagnosis.fixability, diagnosis.fixability)}"
-        )
-        if diagnosis.referrals:
-            for ref in diagnosis.referrals:
-                parts.append(f"- 会诊转诊: {ref.get('target_repo', '')} · {ref.get('hypothesis', '')}")
-        parts.append("")
+    else:
+        parts.append("这一轮没有仪器发现。")
+    if leads:
+        parts += ["## 待核实线索", "", "这些是宿主交卷。", ""]
+        parts += _group_blocks(case, leads)
     parts.append(_footer(case))
     return "\n".join(parts)
 
@@ -760,22 +859,40 @@ def _lesion_lines(pairs: list[tuple], items_by_diag: dict[str, list[dict]]) -> l
 def _efficacy_lines(rows: list[dict]) -> list[str]:
     if not rows:
         return []
-    from ..core.efficacy import posterior
+    from ..core.efficacy import SAMPLE_FLOOR, posterior
 
-    lines = ["## 以往疗效", "", "只作参考。这次的处理顺序仍按名册。", ""]
+    lines = [
+        "## 以往疗效",
+        "",
+        "这是 Beta(1, 1) 后验均值，只写在说明里。这次的处理顺序仍按名册。",
+        "",
+    ]
     for row in rows:
         success = int(row.get("success") or 0)
         failure = int(row.get("failure") or 0)
-        if success + failure <= 0:
+        total = success + failure
+        if total <= 0:
             continue
         percent = round(100 * posterior(success, failure))
+        if total < SAMPLE_FLOOR:
+            floor = f"样本 {total} 次，还没到 {SAMPLE_FLOOR} 次。"
+        else:
+            floor = f"样本 {total} 次，已到约定次数。这张草稿仍不调权。"
         lines.append(
             f"- {_card_title(row.get('rule_id') or '')}"
             f" · {_METHOD_PLAIN.get(row.get('method') or '', row.get('method') or '')}"
-            f"：成功 {success} 次，失败 {failure} 次，估计成功率 {percent}%"
+            f"：成功 {success} 次，失败 {failure} 次，估计成功率 {percent}%。{floor}"
         )
     lines.append("")
     return lines
+
+
+def efficacy_note(rows: list[dict]) -> str:
+    """草稿说明。没有可计入的样本时为空，调用方不展示。"""
+    lines = _efficacy_lines(rows)
+    if not lines:
+        return ""
+    return "\n".join(lines).strip()
 
 
 def render_prescribe_report(case: Case, prescription_id: str, rx: dict, report_path: str) -> str:
@@ -838,6 +955,7 @@ _OUTCOME_LABEL = {
 def render_discharge_report(
     case: Case, outcome: str, gate: dict, diff: dict, follow_path: str,
     questions: list[dict] | None = None,
+    chains: dict | None = None,
 ) -> str:
     """出院小结（契约 §5.7）。"""
     rows = []
@@ -852,6 +970,8 @@ def render_discharge_report(
         f"# 出院小结 {case.id}",
         "",
         f"## 疗效判定：{_OUTCOME_LABEL.get(outcome, outcome)}",
+        "",
+        "疗效判定只统计仪器发现是否消除。功能结论不在这一节。",
         "",
         "## 门禁会签",
         "",
@@ -872,12 +992,36 @@ def render_discharge_report(
         f"- 疗程: {case.round} 轮",
         "",
         *_outside_questions(questions),
+        *_chain_block(chains),
+        *_functional_lines(case, chains),
         "## 随访计划",
         "",
         f"见 `{follow_path}`。",
         "",
         _footer(case),
     ])
+
+
+def _chain_block(chains: dict | None) -> list[str]:
+    if not chains:
+        return []
+    from ..catalog.severe import chain_report_lines
+
+    return chain_report_lines(chains)
+
+
+def _functional_lines(case: Case, chains: dict | None) -> list[str]:
+    """全仓出院和未闭合链都不写成没有功能问题。疗效仍只看仪器。"""
+    opened = list((chains or {}).get("open") or [])
+    scope = getattr(case, "scope_type", "") or ""
+    full_repo = scope == "repo"
+    if not opened and not full_repo:
+        return []
+    if opened:
+        sentence = "未闭合链还在。功能结论停在未闭合清单，这次不出清。"
+    else:
+        sentence = "这次是全仓出院。功能结论只写到已读完的调用链，这一节不给出清。"
+    return ["## 功能结论", "", sentence, ""]
 
 
 def render_follow_up(case_id: str, watch_files: list[str], fingerprints: list[str]) -> str:

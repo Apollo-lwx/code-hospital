@@ -1,8 +1,58 @@
 """检查事项名册：代码交事实，宿主 LLM 保持待交卷。"""
 
-from code_hospital.catalog.checks import load_checks, run_checks
+from code_hospital.catalog.checks import file_host_diff, filing_accepted, load_checks, run_checks
 from code_hospital.core.models import Case, Scope
 from code_hospital.storage.reports import render_scan_report
+
+
+def test_diff_issues_answer_becomes_chart_rows_or_stays_open():
+    from code_hospital.catalog.checks import file_host_diff
+
+    def pending() -> dict:
+        return {
+            "id": "diff.issues",
+            "status": "open",
+            "executors": [{"kind": "llm", "status": "pending", "text": "task"}],
+        }
+
+    filed, note = file_host_diff(
+        [pending()], {"diff.issues": "src/a.py:2: 返回值被丢掉"}, ["src/a.py"],
+    )
+    assert filed == [{
+        "file_path": "src/a.py", "line_start": 2, "line_end": 2,
+        "message": "返回值被丢掉", "check_id": "diff.issues",
+    }]
+    assert "写入病历 1 条" in note
+
+    clean, note = file_host_diff([pending()], {"diff.issues": "没有\n已读：src/a.py"}, ["src/a.py"])
+    assert clean == []
+    assert note == "宿主已通读本次 diff，并写明没有功能问题。"
+
+    unread, note = file_host_diff(
+        [pending()], {"diff.issues": "没有\n已读：src/a.py"}, ["src/a.py", "src/b.py"],
+    )
+    assert unread == []
+    assert "src/b.py" in note
+
+    missing, note = file_host_diff([pending()], None, ["src/a.py"])
+    assert missing == []
+    assert "尚未交卷" in note
+
+
+def test_admission_asks_host_to_read_the_diff(tmp_path):
+    (tmp_path / "a.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    rows, notes = run_checks(str(tmp_path), ["a.py"], visit_kind="admission")
+    assert notes == []
+    ids = [row["id"] for row in rows]
+    assert ids.index("diff.map") < ids.index("diff.issues")
+    diff = next(row for row in rows if row["id"] == "diff.map")
+    code = next(item["text"] for item in diff["executors"] if item["kind"] == "code")
+    assert "a.py" in code
+    assert "不能把这次合入写成没有功能问题" in code
+    issues = next(row for row in rows if row["id"] == "diff.issues")
+    assert issues["status"] == "open"
+    llm = next(item for item in issues["executors"] if item["kind"] == "llm")
+    assert llm["status"] == "pending"
 
 
 def test_builtin_architecture_items_are_ordered():
@@ -254,3 +304,66 @@ def test_pack_path_must_stay_in_repo(tmp_path):
     rows, notes = run_checks(str(tmp_path), ["a.py"])
     assert "arch.map" in [row["id"] for row in rows]
     assert any("仓库" in note for note in notes)
+
+
+def test_admission_schedules_language_checklists(tmp_path):
+    python_rows, python_notes = load_checks(str(tmp_path), "admission", ["src/a.py"])
+    python_ids = [row["id"] for row in python_rows]
+    assert "py.checklist.behavior" in python_ids
+    assert "java.checklist.behavior" not in python_ids
+    assert "ts.checklist.behavior" not in python_ids
+    assert python_notes == ""
+    java_ids = [row["id"] for row in load_checks(str(tmp_path), "admission", ["Box.java"])[0]]
+    assert "java.checklist.shared" in java_ids
+    assert "py.checklist.behavior" not in java_ids
+    ts_ids = [row["id"] for row in load_checks(str(tmp_path), "admission", ["app.tsx"])[0]]
+    assert "ts.checklist.dom" in ts_ids
+    checkup_ids = [row["id"] for row in load_checks(str(tmp_path), "checkup", ["src/a.py"])[0]]
+    assert "py.checklist.behavior" not in checkup_ids
+
+
+def test_open_checklist_keeps_filing_unclosed(tmp_path):
+    checks, _notes = run_checks(str(tmp_path), ["src/a.py"], visit_kind="admission")
+    _specs, note = file_host_diff(checks, {"diff.issues": "src/a.py:2: 返回值被丢掉"}, ["src/a.py"])
+    assert not filing_accepted(note)
+    assert "py.checklist.behavior" in note
+    assert "未闭合" in note
+    assert "按这份清单" in note
+
+
+def test_repository_checklist_replaces_builtin(tmp_path):
+    (tmp_path / "code-hospital.yaml").write_text(
+        "catalog:\n  checks:\n    disable:\n"
+        "      - py.checklist.behavior\n"
+        "      - py.checklist.errors\n"
+        "      - py.checklist.state\n"
+        "    items:\n"
+        "      - id: team.pay\n"
+        "        question: 金额有没有被改两次\n"
+        "        executors: [llm]\n"
+        "        group: checklist\n"
+        "        artifact: 按文件行交卷\n",
+        encoding="utf-8",
+    )
+    checks, _notes = run_checks(str(tmp_path), ["src/a.py"], visit_kind="admission")
+    ids = [row["id"] for row in checks]
+    assert "team.pay" in ids
+    assert "py.checklist.behavior" not in ids
+    _specs, open_note = file_host_diff(
+        checks, {"diff.issues": "src/a.py:2: 返回值被丢掉"}, ["src/a.py"],
+    )
+    assert "team.pay" in open_note
+    assert not filing_accepted(open_note)
+    checks, _notes = run_checks(str(tmp_path), ["src/a.py"], visit_kind="admission")
+    specs, note = file_host_diff(
+        checks,
+        {
+            "diff.issues": "src/a.py:2: 返回值被丢掉",
+            "team.pay": "src/a.py:4: 金额被改了两次",
+        },
+        ["src/a.py"],
+    )
+    assert filing_accepted(note)
+    assert {item["line_start"] for item in specs} == {2, 4}
+    assert len(specs) == 2
+

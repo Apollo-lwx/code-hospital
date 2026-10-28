@@ -40,7 +40,8 @@ needs_validation and are not medicated. Security and severe visits also record a
 coverage ledger: an unchecked attack class is not a clean result. Optional
 requested_instruments in phase 1 accepts only type-ruler. Optional visit_kind selects
 what to look for: checkup (default, style and size), admission (diff plus security,
-defects and missing tests), security, performance, defect, algorithm, types,
+defects, missing tests, and intra-function taint; the host must still read the
+changed files, instrument hits are evidence only), security, performance, defect, algorithm, types,
 architecture, test, supply, business, severe, or general. business checks only rules
 written in code-hospital.yaml catalog.business or the chief complaint: allowed
 state transitions, money fields that must not be floating point, and write
@@ -76,7 +77,7 @@ the acceptance-command whitelist is empty, returns suggested_acceptance_commands
 in catalog/check_packs (code-hospital.yaml catalog.checks can turn items off or add
 items). Principle and pattern packs stay off on a checkup. An architecture visit
 turns them on, together with concurrency, serialization, naming, and access.
-A security visit turns on concurrency, serialization, and access. The short Java pack also needs Java files. catalog.checks.packs can
+A security visit turns on concurrency, serialization, and access. An admission visit turns on the diff-review pack: the host reads each changed file and names functional, security, and cross-file issues the instruments missed. A pending host answer is not a finished review. The short Java pack also needs Java files. catalog.checks.packs can
 name a builtin pack or a yaml path inside the repository, and catalog.checks.pack_dirs loads every yaml in those directories. User items use llm or external; code executors stay builtin. The same file can add catalog.visits, catalog.specialties, catalog.instruments and catalog.formulas. A user instrument is a semgrep rules file inside the repository, or an external command that is only checked for presence. A user drug is llm_patch or manual. Code and external executors attach facts; a host-LLM item stays pending and is
 not a finished analysis. The response ends with a
 handoff block: present the checkup report and wait for user confirmation before moving
@@ -93,7 +94,7 @@ diagnosing. This tool never calls a model — use_llm=true only records that the
 will enrich the reading itself. Diagnoses with confidence < 0.5 are marked 待复核 and
 are excluded from prescriptions until the user confirms via pending_question
 (low_confidence_diagnosis). Findings verdict needs_validation or rejected never
-enter a prescription, even when the rule would otherwise match a drug. catalog.diagnose.items in code-hospital.yaml are returned as questions and stay pending for the host. The response ends with a handoff block: present the
+enter a prescription, even when the rule would otherwise match a drug. catalog.diagnose.items in code-hospital.yaml are returned as questions and stay pending for the host. On an admission visit, pass check_answers={"diff.issues": "..."} to file the host's diff reading: one issue per line as path:line: message, or a line 没有 plus a line 已读： listing every scoped file. The same value may be an object {"issues":[{"file","line","message"}]} or {"clear":true,"read":[every scoped file]}. The same format is required for each scheduled checklist id (py.checklist.*, java.checklist.*, ts.checklist.*, or a repository item with group checklist). Unanswered checklist items keep the case scanned. Filed issues are stored as findings and keep the checklist id they came from. The filing ledger points from each checklist item back to those findings. Issues that match no drug stay 待复核 and do not enter a prescription. A missing or incomplete answer returns pending_question(diff_filing) and leaves the case scanned; it does not write a diagnosis. Issues already stored stay in the chart. A later call adds new issues and does not insert the same file, line, and message again. Diagnosis still waits until every scheduled item is filed or clear. The response ends with a handoff block: present the
 diagnosis book and wait before hosp_prescribe (not available yet).
 """
 
@@ -108,8 +109,9 @@ Diagnoses with confidence < 0.5 stay out unless low_confidence=adopt. Items that
 command acceptance check return pending_question(acceptance_whitelist).
 acceptance_decision=confirm writes the detected aliases into code-hospital.yaml;
 acceptance_decision=skip records the check as skipped. High-risk items require
-approver=user with real human confirmation (elicitation channel preferred; the
-user_confirmed parameter is ignored when elicitation is available). No code change happens
+approver=user with real human confirmation (elicitation channel preferred; passing
+user_confirmed=true without this call's accept receipt is Forbidden when elicitation
+is declared). host_agent cannot approve high-risk items. No code change happens
 without status=approved. After approval, continue with hosp_dispense one item at a time.
 When the repo has .rsi/identity.json and the rsi command is on PATH, the draft includes
 rsi_prohibitions and, when present, rsi_efficacy recalled before prescribing. A missing rsi

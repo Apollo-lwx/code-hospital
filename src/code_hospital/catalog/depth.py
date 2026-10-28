@@ -41,6 +41,15 @@ _TEXT_RULES: tuple[tuple[set[str], re.Pattern[str], str, str, str, str], ...] = 
     ({".java"}, re.compile(r"new\s+ObjectInputStream\s*\("), "security-ruler", "security.deserialize", "反序列化不可信字节", "critical"),
     ({".java"}, re.compile(r"catch\s*\([^)]*\)\s*\{\s*\}"), "defect-ruler", "defect.empty-catch", "空的 catch 吃掉了异常", "major"),
     ({".go"}, re.compile(r"""exec\.Command\(\s*["'](sh|bash|cmd)["']"""), "security-ruler", "security.shell", "通过 shell 执行命令", "critical"),
+    (
+        {".js", ".jsx", ".ts", ".tsx"},
+        re.compile(
+            r"""\.startsWith\(\s*(?:path|node:path)\.(?:resolve|join|normalize)\(\s*[A-Za-z0-9_$.]+\s*\)\s*\)"""
+        ),
+        "security-ruler", "security.path-prefix",
+        "路径前缀检查没有带上分隔符，兄弟目录会通过",
+        "major",
+    ),
 )
 
 
@@ -50,6 +59,9 @@ def scan_depth(
     instruments: list[str],
     scope_type: str = "repo",
     visit_kind: str = "checkup",
+    python_review: bool = False,
+    java_review: bool = False,
+    ts_review: bool = False,
 ) -> tuple[dict[str, list[dict]], list[str]]:
     """按仪器 id 分组返回 raw dict。限制项单独列出。"""
     wanted = set(instruments)
@@ -72,12 +84,12 @@ def scan_depth(
         except SyntaxError:
             limits.append(f"跳过无法解析的 {rel}")
             continue
-        walker = _Walker(rel.replace("\\", "/"), wanted)
+        walker = _Walker(rel.replace("\\", "/"), wanted, python_review)
         walker.visit(tree)
         for raw in walker.findings:
             grouped.setdefault(raw["tool"], []).append(raw)
     if "security-ruler" in wanted or "defect-ruler" in wanted:
-        _scan_text(root, files, wanted, grouped)
+        _scan_text(root, files, wanted, grouped, java_review, ts_review)
     if "supply-ruler" in wanted:
         grouped["supply-ruler"].extend(_scan_supply(root, files))
     if "test-gap" in wanted:
@@ -172,10 +184,18 @@ def _collect_vulns(node: object, found: list[dict]) -> None:
             _collect_vulns(item, found)
 
 
+def _bad_identity_literal(node: ast.AST) -> bool:
+    """None、True、False 和省略号用 is 是身份比较。数字和字符串才算比错了。"""
+    if not isinstance(node, ast.Constant):
+        return False
+    return not any(node.value is item for item in (None, True, False, Ellipsis))
+
+
 class _Walker(ast.NodeVisitor):
-    def __init__(self, file_path: str, wanted: set[str]) -> None:
+    def __init__(self, file_path: str, wanted: set[str], python_review: bool = False) -> None:
         self.file_path = file_path
         self.wanted = wanted
+        self.python_review = python_review
         self.fn = ""
         self.loop = 0
         self.findings: list[dict] = []
@@ -238,10 +258,17 @@ class _Walker(ast.NodeVisitor):
         self.generic_visit(node)
         self._import_probe = prev
 
+    def visit(self, node: ast.AST) -> None:
+        for child in ast.iter_child_nodes(node):
+            child._parent = node  # type: ignore[attr-defined]
+        super().visit(node)
+
     def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
-        if _swallowed(node) and not self._import_probe:
+        owner = getattr(node, "_parent", None)
+        fallback = isinstance(owner, ast.Try) and _failure_fallback(owner, node)
+        if _swallowed(node) and not self._import_probe and not fallback:
             self._emit("defect-ruler", "defect.swallowed", "异常被接住后没有再抛出或记录", node, "major")
-        elif node.type is None:
+        elif node.type is None and not self.python_review:
             self._emit("defect-ruler", "defect.bare-except", "裸 except 会把退出和键盘中断也接住", node, "major")
         self._exits(node.body)
         self.generic_visit(node)
@@ -263,7 +290,7 @@ class _Walker(ast.NodeVisitor):
         for op, comp in zip(node.ops, node.comparators):
             if len(node.ops) == 1 and isinstance(op, ast.Eq) and ast.dump(node.left) == ast.dump(comp):
                 self._emit("defect-ruler", "defect.self-compare", "左右是同一个表达式，比较结果恒为真", node, "major")
-            if isinstance(op, (ast.Is, ast.IsNot)) and isinstance(comp, ast.Constant) and comp.value is not None:
+            if isinstance(op, (ast.Is, ast.IsNot)) and _bad_identity_literal(comp):
                 self._emit("defect-ruler", "defect.is-literal", "用 is 比较字面量，比的是身份而不是值", node, "major")
             if self.loop and isinstance(op, ast.In) and isinstance(comp, ast.Name) and _COLLECTION.search(comp.id):
                 self._emit(
@@ -303,6 +330,8 @@ class _Walker(ast.NodeVisitor):
         self.generic_visit(node)
 
     def _defaults(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        if self.python_review:
+            return
         defaults = list(node.args.defaults) + [item for item in node.args.kw_defaults if item is not None]
         for default in defaults:
             if isinstance(default, (ast.List, ast.Dict, ast.Set)):
@@ -330,7 +359,7 @@ class _Walker(ast.NodeVisitor):
                 exited = True
 
     def _secret(self, targets: list[ast.expr], value: ast.expr, node: ast.AST) -> None:
-        if "security-ruler" not in self.wanted or self._test_file:
+        if "security-ruler" not in self.wanted or self._test_file or self.python_review:
             return
         if not isinstance(value, ast.Constant) or not isinstance(value.value, str):
             return
@@ -348,7 +377,7 @@ class _Walker(ast.NodeVisitor):
     def _security_call(self, node: ast.Call, name: str) -> None:
         if "security-ruler" not in self.wanted:
             return
-        if name in {"eval", "exec"}:
+        if name in {"eval", "exec"} and not self.python_review:
             self._emit("security-ruler", "security.exec", f"调用 {name}，参数若来自外部就能执行任意代码", node, "critical")
         if name in {"os.system", "os.popen"} or _shell_true(node):
             self._emit("security-ruler", "security.shell", "通过 shell 执行命令，拼接进来的参数会被当成命令", node, "critical")
@@ -366,6 +395,12 @@ class _Walker(ast.NodeVisitor):
             self._emit("security-ruler", "security.trust-html", "把字符串标成安全 HTML，来自用户时会变成 XSS", node, "major")
         if self._weak_random(name):
             self._emit("security-ruler", "security.weak-random", "用 random 生成密钥或令牌，结果可以预测", node, "major")
+        if (name == "startswith" or name.endswith(".startswith")) and _bare_path_prefix(node):
+            self._emit(
+                "security-ruler", "security.path-prefix",
+                "路径前缀检查没有带上分隔符，兄弟目录会通过",
+                node, "major",
+            )
         if name.endswith(".execute") or name.endswith(".executemany") or name in {"execute", "executemany"}:
             arg = node.args[0] if node.args else None
             if arg is not None and _sql_dynamic(arg):
@@ -425,7 +460,10 @@ def _text_tools(files: list[str], wanted: set[str]) -> set[str]:
     return covered
 
 
-def _scan_text(root: Path, files: list[str], wanted: set[str], grouped: dict[str, list[dict]]) -> None:
+def _scan_text(
+    root: Path, files: list[str], wanted: set[str], grouped: dict[str, list[dict]],
+    java_review: bool = False, ts_review: bool = False,
+) -> None:
     for rel in files:
         suffix = Path(rel).suffix.lower()
         if suffix == ".py":
@@ -435,6 +473,10 @@ def _scan_text(root: Path, files: list[str], wanted: set[str], grouped: dict[str
             continue
         for exts, pattern, tool, rule_id, message, severity in _TEXT_RULES:
             if tool not in wanted or suffix not in exts:
+                continue
+            if java_review and rule_id == "defect.empty-catch":
+                continue
+            if ts_review and rule_id == "security.dom-write" and suffix in {".ts", ".tsx"}:
                 continue
             for index, line in enumerate(text.splitlines(), 1):
                 stripped = line.strip()
@@ -595,6 +637,27 @@ def _is_test_path(path: str) -> bool:
     )
 
 
+_PATH_CALLS = {
+    "os.path.abspath", "os.path.realpath", "os.path.normpath", "os.path.join",
+}
+
+
+def _bare_path_prefix(node: ast.Call) -> bool:
+    """startswith 的参数就是一次路径调用，后面没有再接分隔符。"""
+    if not node.args or not isinstance(node.args[0], ast.Call):
+        return False
+    inner = node.args[0]
+    if _call_name(inner) in _PATH_CALLS:
+        return True
+    func = inner.func
+    return (
+        isinstance(func, ast.Attribute)
+        and func.attr == "resolve"
+        and isinstance(func.value, ast.Call)
+        and _call_name(func.value) in {"Path", "pathlib.Path"}
+    )
+
+
 def _call_name(node: ast.Call) -> str:
     func = node.func
     if isinstance(func, ast.Name):
@@ -674,6 +737,178 @@ def _import_probe(node: ast.Try) -> bool:
             continue
         return False
     return saw_import and all(_swallowed(handler) for handler in node.handlers)
+
+
+_BROAD_EXCEPT = {"Exception", "BaseException"}
+
+
+def _failure_fallback(node: ast.Try, handler: ast.ExceptHandler) -> bool:
+    """点名的失败、成功后已返回、或条件里可有可无的调用，不算把异常吃掉。"""
+    if any(other is not handler and not _swallowed(other) for other in node.handlers):
+        return True
+    if _named_failure(handler):
+        return True
+    if _leaves(node.body) and _has_next(node):
+        return True
+    if _returns_somewhere(node.body) and _continued(node) and not _bound_used_after(node):
+        return True
+    return _optional_call(node)
+
+
+def _returns_somewhere(stmts: list[ast.stmt]) -> bool:
+    return any(_stmt_returns(stmt) for stmt in stmts)
+
+
+def _stmt_returns(stmt: ast.stmt) -> bool:
+    if isinstance(stmt, (ast.Return, ast.Raise)):
+        return True
+    if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return False
+    return any(isinstance(child, ast.stmt) and _stmt_returns(child) for child in ast.iter_child_nodes(stmt))
+
+
+def _continued(node: ast.AST) -> bool:
+    current = node
+    while True:
+        parent = getattr(current, "_parent", None)
+        if parent is None:
+            return False
+        placed = False
+        for name in ("body", "orelse", "finalbody"):
+            block = getattr(parent, name, None)
+            if isinstance(block, list) and current in block:
+                if block.index(current) < len(block) - 1:
+                    return True
+                placed = True
+                break
+        if not placed or isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Module, ast.ClassDef)):
+            return False
+        current = parent
+
+
+def _bound_used_after(node: ast.Try) -> bool:
+    return bool(_assigned_names(node.body) & _used_after(node))
+
+
+def _assigned_names(stmts: list[ast.stmt]) -> set[str]:
+    found: set[str] = set()
+    for stmt in stmts:
+        found.update(_assigned_in(stmt))
+    return found
+
+
+def _assigned_in(node: ast.AST) -> set[str]:
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return set()
+    found: set[str] = set()
+    if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        for target in targets:
+            found.update(_store_names(target))
+    elif isinstance(node, (ast.For, ast.AsyncFor)):
+        found.update(_store_names(node.target))
+    elif isinstance(node, (ast.With, ast.AsyncWith)):
+        for item in node.items:
+            if item.optional_vars is not None:
+                found.update(_store_names(item.optional_vars))
+    elif isinstance(node, ast.NamedExpr):
+        found.update(_store_names(node.target))
+    for child in ast.iter_child_nodes(node):
+        found.update(_assigned_in(child))
+    return found
+
+
+def _store_names(node: ast.AST) -> set[str]:
+    if isinstance(node, ast.Name):
+        return {node.id}
+    if isinstance(node, (ast.Tuple, ast.List)):
+        found: set[str] = set()
+        for item in node.elts:
+            found.update(_store_names(item))
+        return found
+    if isinstance(node, ast.Starred):
+        return _store_names(node.value)
+    return set()
+
+
+def _used_after(node: ast.AST) -> set[str]:
+    used: set[str] = set()
+    current = node
+    while True:
+        parent = getattr(current, "_parent", None)
+        if parent is None:
+            return used
+        placed = False
+        for name in ("body", "orelse", "finalbody"):
+            block = getattr(parent, name, None)
+            if isinstance(block, list) and current in block:
+                used.update(_loaded_names(block[block.index(current) + 1:]))
+                placed = True
+                break
+        if not placed or isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Module, ast.ClassDef)):
+            return used
+        current = parent
+
+
+def _loaded_names(stmts: list[ast.stmt]) -> set[str]:
+    found: set[str] = set()
+    for stmt in stmts:
+        for node in ast.walk(stmt):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+                found.add(node.id)
+    return found
+
+
+def _optional_call(node: ast.Try) -> bool:
+    """条件分支里只有一次调用、失败后什么都不做，是可有可无的副作用。"""
+    if not node.body or not all(
+        isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call) for stmt in node.body
+    ):
+        return False
+    parent = getattr(node, "_parent", None)
+    return isinstance(parent, ast.If) and not _has_next(node)
+
+
+def _named_failure(handler: ast.ExceptHandler) -> bool:
+    names = _except_names(handler.type)
+    return bool(names) and names.isdisjoint(_BROAD_EXCEPT)
+
+
+def _except_names(node: ast.AST | None) -> set[str]:
+    if isinstance(node, ast.Name):
+        return {node.id}
+    if isinstance(node, ast.Attribute):
+        return {node.attr}
+    if isinstance(node, ast.Tuple):
+        found: set[str] = set()
+        for item in node.elts:
+            found.update(_except_names(item))
+        return found
+    return set()
+
+
+def _leaves(body: list[ast.stmt]) -> bool:
+    if not body:
+        return False
+    last = body[-1]
+    if isinstance(last, (ast.Return, ast.Raise, ast.Break, ast.Continue)):
+        return True
+    if isinstance(last, ast.If):
+        return bool(last.orelse) and _leaves(last.body) and _leaves(last.orelse)
+    return False
+
+
+def _has_next(node: ast.Try) -> bool:
+    parent = getattr(node, "_parent", None)
+    if parent is None:
+        return False
+    for name in ("body", "orelse", "finalbody"):
+        block = getattr(parent, name, None)
+        if isinstance(block, list) and node in block:
+            return block.index(node) < len(block) - 1
+    return False
 
 
 def _swallowed(node: ast.ExceptHandler) -> bool:

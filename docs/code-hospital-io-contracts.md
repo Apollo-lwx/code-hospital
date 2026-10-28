@@ -77,7 +77,7 @@ graph LR
 {
   "$id": "#def-finding",
   "type": "object",
-  "required": ["id", "case_id", "report_id", "tool", "rule_id", "severity", "file_path", "line_start", "line_end", "symbol", "message", "evidence", "fingerprint", "context_anchor", "status", "origin", "first_seen_round", "last_seen_round"],
+  "required": ["id", "case_id", "report_id", "tool", "rule_id", "severity", "file_path", "line_start", "line_end", "symbol", "message", "evidence", "fingerprint", "context_anchor", "status", "origin", "concluded_by", "first_seen_round", "last_seen_round"],
   "properties": {
     "id": {"type": "string", "pattern": "^fnd_"},
     "case_id": {"type": "string", "pattern": "^case_"},
@@ -98,7 +98,8 @@ graph LR
     "unresolved": {"type": "string", "maxLength": 200, "description": "待验证时缺的那一个事实。其他裁决为空"},
     "attack_class": {"type": "string", "description": "覆盖账上的攻击类，如 injection、secret-in-source。没有则为空"},
     "status": {"enum": ["new", "unchanged", "resolved", "possibly_resolved", "suppressed"]},
-    "origin": {"enum": ["initial", "new_related", "new_unrelated"]},
+    "origin": {"enum": ["initial", "new_related", "new_unrelated"], "description": "初发、医源性新症或无关新症。结论来源见 concluded_by"},
+    "concluded_by": {"enum": ["instrument", "host_llm", "external", "code"], "description": "谁下的结论。instrument=确定性仪器，external=外聘仪器产物，code=医院内置事实采集，host_llm=宿主交卷。疗效与指纹差分统计 instrument、external、code。host_llm 在报告里标成待核实线索，排在严重度清单后面"},
     "first_seen_round": {"type": "integer", "minimum": 1},
     "last_seen_round": {"type": "integer", "minimum": 1},
     "history_refs": {
@@ -135,7 +136,7 @@ graph LR
 {
   "$id": "#def-diagnosis",
   "type": "object",
-  "required": ["id", "case_id", "report_id", "fingerprint", "category", "root_cause", "severity", "confidence", "fixability", "history_refs", "referrals"],
+  "required": ["id", "case_id", "report_id", "fingerprint", "category", "root_cause", "severity", "confidence", "fixability", "history_refs", "referrals", "concluded_by"],
   "properties": {
     "id": {"type": "string", "pattern": "^dia_"},
     "case_id": {"type": "string", "pattern": "^case_"},
@@ -149,6 +150,7 @@ graph LR
     "fixability": {"enum": ["autofix", "llm_patch", "manual"]},
     "specialty_id": {"type": "string", "description": "本簇接诊专科。critical 与 gitleaks 为 general"},
     "formulary_matched": {"type": "boolean", "description": "false 时 root_cause 以「待复核：」开头，默认不入处方"},
+    "concluded_by": {"enum": ["instrument", "host_llm", "external", "code"], "description": "模板归因写 code。整簇都是宿主交卷时写 host_llm"},
     "history_refs": {
       "type": "array", "maxItems": 3,
       "items": {
@@ -300,6 +302,8 @@ graph LR
 }
 ```
 
+复诊差分与疗效计数只纳入 `concluded_by` 为 `instrument`、`external`、`code` 的发现。宿主交卷（`host_llm`）留在病历里，标成待核实线索。覆盖账 `coverage_json.concluded_by_counts` 记下四类条数。检验报告和诊断书写明「仪器 N 条 / 模型 M 条」。
+
 ### 2.7 Gate（出院门禁 · 安全网关/编排器会签）
 
 ```json
@@ -401,13 +405,17 @@ graph LR
       },
       "additionalProperties": false
     },
-    "resume_hint": {"type": "string", "maxLength": 300, "description": "回答后应调用的工具与参数模板"}
+    "resume_hint": {"type": "string", "maxLength": 300, "description": "回答后应调用的工具与参数模板"},
+    "degraded": {"type": "boolean", "description": "true 表示这次调用看见的宿主没有声明 elicitation。声明了则该字段不出现"},
+    "degraded_reason": {"type": "string", "description": "未声明 elicitation 时为「门禁降级为约定级」"}
   },
   "additionalProperties": false
 }
 ```
 
 `kind="stage_confirm"` 为常规门禁（设计 §4.11 叫号机制）：阶段产物待确认时由下一阶段工具的入口返回，options 固定为 `[{value:"confirm",label:"确认产物无误，进入下一阶段"},{value:"pause",label:"暂停就诊（病例保留，稍后仍可确认续行）"}]`，`default_action` 恒为「挂起不执行」。
+
+宿主没有声明 elicitation 时，推进类工具的出参带 `degraded: true` 与 `degraded_reason`（「门禁降级为约定级」），`channel` 仍是 `convention`。检验报告的覆盖与限制写上同一句，覆盖账 `host_capabilities` 记下 `elicitation`、`protocol_version` 和 `channel`。宿主声明了 elicitation 时，出参不带这两个字段，覆盖账也不写这一句。这次调用里 elicit 成功后，覆盖账 `channel` 写成 `elicitation`；`decline`、`cancel`、`pause`、`defer` 不执行本阶段。elicit 失败或超时回退 `convention`，并标 `degraded`。
 
 ### 2.10 StageHandoff（阶段交接 · 推进类工具通用出参字段）
 
@@ -743,7 +751,7 @@ graph LR
     "case_id": {"type": "string", "pattern": "^case_"},
     "approve": {"type": "boolean", "default": false},
     "approver": {"enum": ["auto", "host_agent", "user"], "default": "host_agent"},
-    "user_confirmed": {"type": "boolean", "default": false, "description": "约定级确认；宿主支持 elicitation 时此入参被忽略"},
+    "user_confirmed": {"type": "boolean", "default": false, "description": "约定级确认。宿主声明了 elicitation 时，没有本次 accept 回执就传 true 会返回 Forbidden"},
     "stage_confirmed": {"type": "boolean", "default": false, "description": "用户确认诊断书后置 true，才允许起草处方"},
     "low_confidence": {"enum": ["", "adopt", "exclude", "defer"], "default": "", "description": "待复核诊断：空=先问；adopt 入方；exclude 排除；defer 暂停"},
     "acceptance_decision": {"enum": ["", "skip", "pause", "confirm"], "default": "", "description": "confirm 把探测到的别名写入 code-hospital.yaml；skip 把命令验收记 skipped；pause 暂停开方"},
@@ -941,7 +949,7 @@ graph LR
       "default": []
     },
     "waive": {"type": "boolean", "default": false},
-    "waiver_user_confirmed": {"type": "boolean", "default": false, "description": "约定级确认；elicitation 通道下被忽略"},
+    "waiver_user_confirmed": {"type": "boolean", "default": false, "description": "约定级确认。宿主声明了 elicitation 时，没有本次 accept 回执就传 true 会返回 Forbidden"},
     "waive_reason": {"type": "string", "maxLength": 300, "default": ""},
     "distill_to_rsi": {"type": "boolean", "default": false}
   },
@@ -1445,8 +1453,9 @@ Diagnoses with confidence < 0.5 stay out unless low_confidence=adopt. Items that
 command acceptance check return pending_question(acceptance_whitelist).
 acceptance_decision=confirm writes the detected aliases into code-hospital.yaml;
 acceptance_decision=skip records the check as skipped. High-risk items require
-approver=user with real human confirmation (elicitation channel preferred; the
-user_confirmed parameter is ignored when elicitation is available). No code change happens
+approver=user with real human confirmation (elicitation channel preferred; passing
+user_confirmed=true without this call's accept receipt is Forbidden when elicitation
+is declared). host_agent cannot approve high-risk items. No code change happens
 without status=approved. After approval, continue with hosp_dispense one item at a time.
 ```
 

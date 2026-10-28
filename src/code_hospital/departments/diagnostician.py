@@ -22,8 +22,8 @@ from ..catalog.formulary import (
 from ..core.algorithms import lookup_history
 from ..core.errors import invalid_operation, not_found
 from ..core.ids import new_id
-from ..core.models import SEVERITY_ORDER, Diagnosis, Finding, ReportRecord
-from ..core.questions import STAGE_ARTIFACTS, handoff, stage_gate_question
+from ..core.models import SEVERITY_ORDER, Diagnosis, Finding, ReportRecord, counts_toward_efficacy
+from ..core.questions import STAGE_ARTIFACTS, ask, handoff, present, release, stage_gate_question
 from ..storage.db import Database, hospital_root, now_ms
 from ..storage.reports import render_diagnose_report
 
@@ -67,6 +67,19 @@ def group_findings(findings: list[Finding]) -> list[list[Finding]]:
     for finding in findings:
         buckets[(finding.rule_id, scope_key(finding))].append(finding)
     return list(buckets.values())
+
+
+def _semantic_groups(findings: list[Finding]) -> list[list[Finding]]:
+    """语义结论单独成簇。不和仪器发现合成一条 code 诊断。"""
+    groups = []
+    for members in group_findings(findings):
+        host = [item for item in members if item.concluded_by == "host_llm"]
+        other = [item for item in members if item.concluded_by != "host_llm"]
+        if other:
+            groups.append(other)
+        if host:
+            groups.append(host)
+    return groups
 
 
 def _root_cause(
@@ -123,9 +136,10 @@ def cluster_findings(
     project_root: str = "",
 ) -> list[tuple[Diagnosis, list[Finding]]]:
     clusters: list[tuple[Diagnosis, list[Finding]]] = []
-    for members in group_findings(findings):
-        head = min(members, key=lambda f: (SEVERITY_ORDER.get(f.severity, 9), f.line_start))
-        severity = _worst(members)
+    for members in _semantic_groups(findings):
+        body = [item for item in members if counts_toward_efficacy(item.concluded_by)] or members
+        head = min(body, key=lambda f: (SEVERITY_ORDER.get(f.severity, 9), f.line_start))
+        severity = _worst(body)
         matched = match_finding(
             head.tool, head.rule_id, severity,
             fixable=bool(getattr(head, "fixable", False)),
@@ -154,9 +168,18 @@ def cluster_findings(
             member_ids=[f.id for f in members],
             specialty_id=matched.specialty_id,
             formulary_matched=matched.matched,
+            concluded_by=(
+                "host_llm"
+                if members and all(item.concluded_by == "host_llm" for item in members)
+                else "code"
+            ),
         )
         clusters.append((diagnosis, members))
-    clusters.sort(key=lambda pair: (SEVERITY_ORDER.get(pair[0].severity, 9), pair[0].category))
+    clusters.sort(key=lambda pair: (
+        0 if any(counts_toward_efficacy(item.concluded_by) for item in pair[1]) else 1,
+        SEVERITY_ORDER.get(pair[0].severity, 9),
+        pair[0].category,
+    ))
     return clusters
 
 
@@ -171,11 +194,105 @@ def _stats(findings: list[Finding], diagnoses: list[Diagnosis]) -> dict:
     }
 
 
+async def _file_host_diff(db, root: str, case, answers: dict | None) -> str:
+    """合入门诊把本轮交卷写成发现。上一轮已在病历里的相同问题不再插一次。"""
+    from ..adapters.base import RawFinding
+    from ..catalog.checks import file_host_diff, run_checks
+    from ..core.algorithms import stamp_findings
+    from ..safety.repo_files import scope_file_list
+    from .scanner import normalize
+
+    files, _skipped = await scope_file_list(root, case.scope_type, case.scope.model_dump())
+    checks, _notes = run_checks(root, files, getattr(case, "visit_kind", "") or "checkup")
+    previous = (case.coverage or {}).get("filing")
+    specs, note = file_host_diff(checks, answers, files, previous=previous)
+    from ..catalog.filing import filing_ledger
+
+    ledger = filing_ledger(checks, answers, files, previous=previous)
+    coverage = dict(case.coverage or {})
+    if ledger:
+        coverage["filing"] = ledger
+    if specs:
+        existing = await db.all_findings(case.id)
+        seen = {
+            (item.file_path.replace("\\", "/"), item.line_start, item.line_end, item.message)
+            for item in existing
+            if item.rule_id == "diff.issue"
+        }
+        fresh = []
+        batch = set(seen)
+        for spec in specs:
+            key = (spec["file_path"], spec["line_start"], spec["line_end"], spec["message"])
+            if key in batch:
+                continue
+            batch.add(key)
+            fresh.append(spec)
+        specs = fresh
+    stored_before = await db.all_findings(case.id)
+    if not specs:
+        note = _remember_links(coverage, ledger, stored_before, note)
+        if ledger:
+            await db.update_case(case.id, coverage_json=json.dumps(coverage, ensure_ascii=False))
+            case.coverage = coverage
+        return note
+    reports = await db.list_reports(case.id)
+    scan_report = next((row for row in reports if row.stage == "scan"), None)
+    report_id = scan_report.id if scan_report else new_id("rpt")
+    findings = [
+        normalize(
+            RawFinding(
+                rule_id="diff.issue",
+                message=spec["message"],
+                file_path=spec["file_path"],
+                line_start=spec["line_start"],
+                line_end=spec["line_end"],
+                severity="major",
+                extra={"check_id": spec.get("check_id") or ""},
+            ),
+            "host",
+            case.id,
+            report_id,
+            root,
+        )
+        for spec in specs
+    ]
+    stamp_findings(findings)
+    await db.insert_findings(findings)
+    from ..catalog.coverage import stamp_source_counts
+
+    stored = await db.all_findings(case.id)
+    note = _remember_links(coverage, ledger, stored, note)
+    coverage = stamp_source_counts(coverage, stored)
+    await db.update_case(case.id, coverage_json=json.dumps(coverage, ensure_ascii=False))
+    case.coverage = coverage
+    return note
+
+
+def _remember_links(coverage: dict, ledger: dict | None, stored, note: str) -> str:
+    if not ledger:
+        return note
+    from ..catalog.filing import link_text, relate_checks
+
+    links = relate_checks(stored, ledger)
+    updated = dict(ledger)
+    updated["links"] = links
+    coverage["filing"] = updated
+    extra = link_text(links)
+    if extra and extra not in note:
+        return note + extra
+    return note
+
+
+from ..api.capabilities import hosted
+
+
+@hosted
 async def diagnose(
     case_id: str,
     use_llm: bool = False,
     stage_confirmed: bool = False,
     project_root: str = "",
+    check_answers: dict | None = None,
 ) -> dict:
     """hosp_diagnose 主逻辑。模板归因，不调模型。"""
     from .reception import resolve_project_root
@@ -191,14 +308,19 @@ async def diagnose(
                 target="case_id",
                 next_action="先 hosp_scan 完成检验，并确认检验报告",
             )
+        from ..api.capabilities import admit_stage
+
+        admit_stage(stage_confirmed, case.pending_gate or "")
         if case.pending_gate and not stage_confirmed:
             reports = await db.list_reports(case_id)
             scan_report = next((r for r in reports if r.stage == "scan"), None)
             where = scan_report.md_path if scan_report and scan_report.md_path else "检验报告"
             artifact, next_tool = STAGE_ARTIFACTS.get(case.pending_gate, (case.pending_gate, "hosp_diagnose"))
-            return stage_gate_question(
+            halted = await release(stage_gate_question(
                 case_id, case.pending_gate, next_tool, f"{artifact}见 {where}。"
-            )
+            ))
+            if halted is not None:
+                return halted
         if case.pending_gate and case.pending_gate != "scanned":
             raise invalid_operation(
                 f"当前待确认的是 {case.pending_gate}，不能跳到诊断",
@@ -225,9 +347,48 @@ async def diagnose(
             follow_up = False
 
         if not follow_up:
+            from ..catalog.budget import BUDGET_LINE
+
+            degraded = bool((case.coverage or {}).get("budget", {}).get("degraded"))
+            if degraded:
+                filing_note = BUDGET_LINE
+            else:
+                filing_note = await _file_host_diff(db, root, case, check_answers)
+            from ..catalog.checks import filing_accepted
+
+            if case.visit_kind == "admission" and not degraded and not filing_accepted(filing_note):
+                filing_question = ask(
+                    "diff_filing",
+                    f"合入门诊还不能诊断（病例 {case_id}）。{filing_note}",
+                    [("file", "交上 diff.issues 后再诊断"), ("pause", "先停在已检验")],
+                    "停在已检验，不写诊断书，不开方",
+                    (
+                        f'hosp_diagnose(case_id="{case_id}", stage_confirmed=true, '
+                        'check_answers={"diff.issues": "文件:行: 说明"})'
+                    ),
+                )
+                presented = await present(filing_question)
+                if presented.stop is not None:
+                    return presented.stop
+                filed = False
+                if presented.choice == "file" and presented.text.strip():
+                    answers = dict(check_answers or {})
+                    answers["diff.issues"] = presented.text.strip()
+                    filing_note = await _file_host_diff(db, root, case, answers)
+                    filed = filing_accepted(filing_note)
+                if not filed:
+                    return filing_question
+            from ..safety.admission import guard_clearance, rules_for, settle_semantic
+
+            admission_lane = "auto_advance" if case.auto_advance else "report"
+            admission_rules = rules_for(root, admission_lane)
+            filing_note = guard_clearance(filing_note, admission_rules)
+            if (case.coverage or {}).get("budget", {}).get("degraded"):
+                use_llm = False
             findings = [f for f in await db.all_findings(case_id) if f.status != "resolved"]
-            fingerprints = sorted({f.fingerprint for f in findings if f.fingerprint})
-            content_keys = sorted({f.content_key for f in findings if f.content_key})
+            durable = [f for f in findings if counts_toward_efficacy(f.concluded_by)]
+            fingerprints = sorted({f.fingerprint for f in durable if f.fingerprint})
+            content_keys = sorted({f.content_key for f in durable if f.content_key})
             raw_history = await db.find_fingerprint_history(
                 root, fingerprints, exclude_case_id=case_id, content_keys=content_keys,
             )
@@ -236,7 +397,23 @@ async def diagnose(
                 for fp, refs in raw_history.items()
             }
             report_id = new_id("rpt")
-            clusters = cluster_findings(findings, case_id, report_id, history, root)
+            clusters, admission_drops = settle_semantic(
+                cluster_findings(findings, case_id, report_id, history, root),
+                admission_rules,
+            )
+            semantic = sum(1 for diagnosis, _members in clusters if diagnosis.concluded_by == "host_llm")
+            if semantic or admission_drops:
+                coverage = dict(case.coverage or {})
+                coverage["admission"] = {
+                    "lane": admission_lane,
+                    "semantic": semantic,
+                    "dropped": admission_drops,
+                    "note": "语义结论标成 host_llm。落不到文件和行号的不进诊断。其余按这条链路留在待核实线索里。",
+                }
+                await db.update_case(
+                    case_id, coverage_json=json.dumps(coverage, ensure_ascii=False),
+                )
+                case.coverage = coverage
             diagnoses = [d for d, _members in clusters]
             conditions = build_conditions(clusters, case.requested_specialties)
             stats = _stats(findings, diagnoses)
@@ -245,7 +422,10 @@ async def diagnose(
 
             questions = outside_overlay(root)["diagnose"]
             case.updated_at = now_ms()
-            md = render_diagnose_report(case, report_id, clusters, stats, use_llm, questions)
+            md = render_diagnose_report(
+                case, report_id, clusters, stats, use_llm, questions, filing_note,
+                budget_note=(case.coverage or {}).get("budget", {}).get("note") or "",
+            )
             report_path = hospital_root(root) / "reports" / case_id / f"diagnose-r{case.round}.md"
             report_path.parent.mkdir(parents=True, exist_ok=True)
             report_path.write_text(md, encoding="utf-8")
@@ -271,12 +451,13 @@ async def diagnose(
                 "conditions": conditions,
                 "stats": stats,
                 "questions": questions,
+                "filing_note": filing_note,
                 "report_path": str(report_path),
                 "handoff": handoff(case_id, "diagnosed", case.auto_advance, next_tool="hosp_prescribe"),
             }
     from .scanner import scan as run_scan
     await run_scan(case_id, stage_confirmed=True, project_root=root)
-    return await diagnose(case_id, use_llm, True, root)
+    return await diagnose(case_id, use_llm, True, root, check_answers)
 
 
 def _orders_payload(case) -> dict:

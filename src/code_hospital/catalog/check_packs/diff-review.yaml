@@ -1,0 +1,12 @@
+# 合入门诊：宿主通读本次 diff。仪器命中是证据，不是全部审查。
+- id: diff.map
+  question: 这次改动各自在做什么
+  needs: []
+  executors: [code, llm]
+  code: diff_map
+  artifact: "每个改动文件改变了哪一段行为。要打开文件本身，不要只复述仪器规则。"
+- id: diff.issues
+  question: 规则没有覆盖的功能、安全和跨文件问题
+  needs: [diff.map]
+  executors: [llm]
+  artifact: "交卷给 hosp_diagnose 的 check_answers.diff.issues。每一行写「文件:行: 说明」。没有问题就写一行「没有」，再写一行「已读：」并列出本次范围内每个文件。没列全不能写成没有。"

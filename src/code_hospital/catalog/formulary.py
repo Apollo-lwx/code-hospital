@@ -25,6 +25,9 @@ _ROUTES: tuple[tuple[str, str, str], ...] = (
     ("semgrep", "*", "general"),
     ("gitleaks", "*", "security"),
     ("structure-ruler", "structure.", "structure"),
+    ("python-review", "python.", "python"),
+    ("java-review", "java.", "java"),
+    ("ts-review", "ts.", "general"),
     ("eslint", "*", "general"),
     ("jscpd", "*", "structure"),
     ("java-pack", "java.", "java"),
@@ -153,6 +156,14 @@ def specialties() -> dict[str, dict]:
 
 def instruments() -> dict[str, dict]:
     return load()[2]
+
+
+def concluded_by_for(tool: str, rule_id: str = "") -> str:
+    """按仪器登记的引擎给发现标来源。宿主交卷单独标成 host_llm。"""
+    from ..core.models import classify_source
+
+    engine = str((instruments().get(tool) or {}).get("engine") or "")
+    return classify_source(tool, rule_id, engine)
 
 
 def opening_verdict(members) -> str:

@@ -123,6 +123,111 @@ async def test_template_diagnosis_clusters_and_fixability(git_repo):
         assert len({f.fingerprint for f in f841}) == 2
 
 
+async def test_admission_without_filing_stays_scanned(git_repo):
+    _use(RuffAdapter)
+    reg = await reception.register(
+        title="合入未交卷", scope_type="staged", scope={},
+        auto_advance=True, visit_kind="admission", project_root=git_repo,
+    )
+    await scanner.scan(case_id=reg["case_id"], project_root=git_repo)
+    blocked = await diagnostician.diagnose(case_id=reg["case_id"], project_root=git_repo)
+    assert blocked["status"] == "pending_question"
+    assert blocked["question"]["kind"] == "diff_filing"
+    assert "diff.issues" in blocked["resume_hint"]
+    assert "py.checklist.behavior" in blocked["question"]["prompt"]
+    assert "未闭合" in blocked["question"]["prompt"]
+    async with Database(git_repo) as db:
+        case = await db.get_case(reg["case_id"])
+        assert case.status == "scanned"
+        assert not any(row.stage == "diagnose" for row in await db.list_reports(reg["case_id"]))
+
+
+async def test_admission_writes_host_diff_into_the_chart(git_repo):
+    _use(RuffAdapter)
+    reg = await reception.register(
+        title="合入交卷", scope_type="staged", scope={},
+        auto_advance=True, visit_kind="admission", project_root=git_repo,
+    )
+    await scanner.scan(case_id=reg["case_id"], project_root=git_repo)
+    res = await diagnostician.diagnose(
+        case_id=reg["case_id"],
+        project_root=git_repo,
+        check_answers={
+            "diff.issues": "src/a.py:2: 返回值被丢掉",
+            "py.checklist.behavior": "没有\n已读：src/a.py",
+            "py.checklist.errors": "src/a.py:3: 异常被接住后继续返回",
+            "py.checklist.state": "没有\n已读：src/a.py",
+        },
+    )
+    by_cat = {d["category"]: d for d in res["diagnoses"]}
+    assert by_cat["diff-issue"]["confidence"] < 0.5
+    assert "待复核" in by_cat["diff-issue"]["root_cause"]
+    assert "写入病历" in res["filing_note"]
+    report = Path(res["report_path"]).read_text(encoding="utf-8")
+    assert "## 合入交卷" in report
+    assert "清单与发现" in report
+    assert "py.checklist.errors → " in report
+    async with Database(git_repo) as db:
+        stored = await db.all_findings(reg["case_id"])
+        host = [f for f in stored if f.rule_id == "diff.issue"]
+        assert len(host) == 2
+        assert {item.line_start for item in host} == {2, 3}
+        assert {item.tool for item in host} == {"host"}
+        by_line = {item.line_start: item.check_id for item in host}
+        assert by_line[2] == "diff.issues"
+        assert by_line[3] == "py.checklist.errors"
+        case = await db.get_case(reg["case_id"])
+        links = case.coverage["filing"]["links"]
+        assert links["by_finding"][next(item.id for item in host if item.line_start == 2)] == ["diff.issues"]
+        assert any(row["line"] == 3 for row in links["by_check"]["py.checklist.errors"])
+        by_id = {row["id"]: row for row in case.coverage["filing"]["items"]}
+        assert by_id["diff.issues"]["status"] == "filed"
+        assert by_id["py.checklist.behavior"]["status"] == "clear"
+        assert by_id["py.checklist.errors"]["status"] == "filed"
+
+
+async def test_later_round_keeps_the_first_host_issue(git_repo):
+    _use(RuffAdapter)
+    reg = await reception.register(
+        title="分轮交卷", scope_type="staged", scope={},
+        auto_advance=True, visit_kind="admission", project_root=git_repo,
+    )
+    await scanner.scan(case_id=reg["case_id"], project_root=git_repo)
+    first = await diagnostician.diagnose(
+        case_id=reg["case_id"],
+        project_root=git_repo,
+        check_answers={"diff.issues": "src/a.py:2: 返回值被丢掉"},
+    )
+    assert first["status"] == "pending_question"
+    async with Database(git_repo) as db:
+        case = await db.get_case(reg["case_id"])
+        assert case.status == "scanned"
+        stored = [item for item in await db.all_findings(reg["case_id"]) if item.rule_id == "diff.issue"]
+        assert [(item.line_start, item.message) for item in stored] == [(2, "返回值被丢掉")]
+        by_id = {row["id"]: row for row in case.coverage["filing"]["items"]}
+        assert by_id["diff.issues"]["status"] == "filed"
+    second = await diagnostician.diagnose(
+        case_id=reg["case_id"],
+        project_root=git_repo,
+        check_answers={
+            "diff.issues": "src/a.py:2: 返回值被丢掉\nsrc/a.py:3: 异常被接住后继续返回",
+            "py.checklist.behavior": "没有\n已读：src/a.py",
+            "py.checklist.errors": "没有\n已读：src/a.py",
+            "py.checklist.state": "没有\n已读：src/a.py",
+        },
+    )
+    assert "病历里共 2 条" in second["filing_note"]
+    assert "本轮新写入 1 条" in second["filing_note"]
+    async with Database(git_repo) as db:
+        case = await db.get_case(reg["case_id"])
+        assert case.status == "diagnosed"
+        stored = [item for item in await db.all_findings(reg["case_id"]) if item.rule_id == "diff.issue"]
+        assert sorted((item.line_start, item.message) for item in stored) == [
+            (2, "返回值被丢掉"),
+            (3, "异常被接住后继续返回"),
+        ]
+
+
 async def test_gitleaks_is_manual_secret(git_repo):
     _use(SecretAdapter)
     reg = await reception.register(

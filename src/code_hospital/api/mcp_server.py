@@ -10,6 +10,8 @@ from __future__ import annotations
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.types import ToolAnnotations
 
+from .capabilities import bind_host, finish, reset_host
+
 from ..core.algorithms import lookup_history
 from ..core.errors import HospitalError, internal_error
 from ..departments import (
@@ -62,9 +64,11 @@ async def hosp_register(
     requested_instruments: list[str] | None = None,
     visit_kind: str = "checkup",
     project_root: str = "",
+    ctx: Context | None = None,
 ) -> dict:
+    token = bind_host(ctx)
     try:
-        return await reception.register(
+        return finish(await reception.register(
             title=title,
             scope_type=scope_type,
             scope=scope or {},
@@ -76,11 +80,13 @@ async def hosp_register(
             requested_instruments=requested_instruments,
             visit_kind=visit_kind,
             project_root=project_root,
-        )
+        ))
     except HospitalError as e:
-        return _guard(e)
+        return finish(_guard(e))
     except Exception as e:  # noqa: BLE001
-        return internal_error(f"{type(e).__name__}: {e}").payload()
+        return finish(internal_error(f"{type(e).__name__}: {e}").payload())
+    finally:
+        reset_host(token)
 
 
 @mcp.tool(
@@ -97,9 +103,11 @@ async def hosp_scan(
     size: int = 50,
     order_by: str = "severity desc",
     project_root: str = "",
+    ctx: Context | None = None,
 ) -> dict:
+    token = bind_host(ctx)
     try:
-        return await scanner.scan(
+        return finish(await scanner.scan(
             case_id=case_id,
             tools=tools,
             timeout_ms=timeout_ms,
@@ -108,11 +116,13 @@ async def hosp_scan(
             size=size,
             order_by=order_by,
             project_root=project_root,
-        )
+        ))
     except HospitalError as e:
-        return _guard(e)
+        return finish(_guard(e))
     except Exception as e:  # noqa: BLE001
-        return internal_error(f"{type(e).__name__}: {e}").payload()
+        return finish(internal_error(f"{type(e).__name__}: {e}").payload())
+    finally:
+        reset_host(token)
 
 
 @mcp.tool(
@@ -124,19 +134,25 @@ async def hosp_diagnose(
     case_id: str,
     use_llm: bool = False,
     stage_confirmed: bool = False,
+    check_answers: dict | None = None,
     project_root: str = "",
+    ctx: Context | None = None,
 ) -> dict:
+    token = bind_host(ctx)
     try:
-        return await diagnostician.diagnose(
+        return finish(await diagnostician.diagnose(
             case_id=case_id,
             use_llm=use_llm,
             stage_confirmed=stage_confirmed,
             project_root=project_root,
-        )
+            check_answers=check_answers,
+        ))
     except HospitalError as e:
-        return _guard(e)
+        return finish(_guard(e))
     except Exception as e:  # noqa: BLE001
-        return internal_error(f"{type(e).__name__}: {e}").payload()
+        return finish(internal_error(f"{type(e).__name__}: {e}").payload())
+    finally:
+        reset_host(token)
 
 
 @mcp.tool(
@@ -154,9 +170,11 @@ async def hosp_prescribe(
     acceptance_decision: str = "",
     decision: str = "",
     project_root: str = "",
+    ctx: Context | None = None,
 ) -> dict:
+    token = bind_host(ctx)
     try:
-        return await prescriber.prescribe(
+        return finish(await prescriber.prescribe(
             case_id=case_id,
             approve=approve,
             approver=approver,
@@ -166,11 +184,13 @@ async def hosp_prescribe(
             acceptance_decision=acceptance_decision,
             decision=decision,
             project_root=project_root,
-        )
+        ))
     except HospitalError as e:
-        return _guard(e)
+        return finish(_guard(e))
     except Exception as e:  # noqa: BLE001
-        return internal_error(f"{type(e).__name__}: {e}").payload()
+        return finish(internal_error(f"{type(e).__name__}: {e}").payload())
+    finally:
+        reset_host(token)
 
 
 @mcp.tool(
@@ -190,9 +210,11 @@ async def hosp_dispense(
     stage_confirmed: bool = False,
     follow_autofix: bool = False,
     project_root: str = "",
+    ctx: Context | None = None,
 ) -> dict:
+    token = bind_host(ctx)
     try:
-        return await pharmacist.dispense(
+        return finish(await pharmacist.dispense(
             prescription_id=prescription_id,
             item_id=item_id,
             mode=mode,
@@ -204,11 +226,13 @@ async def hosp_dispense(
             stage_confirmed=stage_confirmed,
             follow_autofix=follow_autofix,
             project_root=project_root,
-        )
+        ))
     except HospitalError as e:
-        return _guard(e)
+        return finish(_guard(e))
     except Exception as e:  # noqa: BLE001
-        return internal_error(f"{type(e).__name__}: {e}").payload()
+        return finish(internal_error(f"{type(e).__name__}: {e}").payload())
+    finally:
+        reset_host(token)
 
 
 @mcp.tool(
@@ -228,9 +252,11 @@ async def hosp_discharge(
     gate_decision: str = "",
     level: str = "standard",
     project_root: str = "",
+    ctx: Context | None = None,
 ) -> dict:
+    token = bind_host(ctx)
     try:
-        return await discharge.discharge(
+        return finish(await discharge.discharge(
             case_id=case_id,
             overrides=overrides,
             waive=waive,
@@ -242,11 +268,13 @@ async def hosp_discharge(
             gate_decision=gate_decision,
             level=level,
             project_root=project_root,
-        )
+        ))
     except HospitalError as e:
-        return _guard(e)
+        return finish(_guard(e))
     except Exception as e:  # noqa: BLE001
-        return internal_error(f"{type(e).__name__}: {e}").payload()
+        return finish(internal_error(f"{type(e).__name__}: {e}").payload())
+    finally:
+        reset_host(token)
 
 
 @mcp.tool(
@@ -276,8 +304,9 @@ async def hosp_treat(
         if ctx is not None:
             await ctx.report_progress(amount, total, message)
 
+    token = bind_host(ctx)
     try:
-        return await treat.treat(
+        return finish(await treat.treat(
             case_id=case_id,
             resume=resume,
             auto_approve_low_risk=auto_approve_low_risk,
@@ -294,11 +323,13 @@ async def hosp_treat(
             project_root=project_root,
             timeout_ms=timeout_ms,
             progress=_report,
-        )
+        ))
     except HospitalError as e:
-        return _guard(e)
+        return finish(_guard(e))
     except Exception as e:  # noqa: BLE001
-        return internal_error(f"{type(e).__name__}: {e}").payload()
+        return finish(internal_error(f"{type(e).__name__}: {e}").payload())
+    finally:
+        reset_host(token)
 
 
 @mcp.tool(
@@ -315,13 +346,17 @@ async def hosp_case(
     size: int = 50,
     order_by: str = "created_at desc",
     project_root: str = "",
+    ctx: Context | None = None,
 ) -> dict:
+    token = bind_host(ctx)
     try:
-        return await _case_query(case_id, status, include, report_id, page, size, order_by, project_root)
+        return finish(await _case_query(case_id, status, include, report_id, page, size, order_by, project_root))
     except HospitalError as e:
-        return _guard(e)
+        return finish(_guard(e))
     except Exception as e:  # noqa: BLE001
-        return internal_error(f"{type(e).__name__}: {e}").payload()
+        return finish(internal_error(f"{type(e).__name__}: {e}").payload())
+    finally:
+        reset_host(token)
 
 
 async def _case_query(
@@ -366,13 +401,19 @@ async def _case_query(
         if include == "findings":
             items, total = await db.list_findings(case_id, page=page, size=size)
             # history_refs 为派生字段不入库，查询时按指纹重挂（语义：截至当前的历史）
+            from ..core.models import counts_toward_efficacy
+
+            durable = [f for f in items if counts_toward_efficacy(f.concluded_by)]
             history = await db.find_fingerprint_history(
                 root,
-                sorted({f.fingerprint for f in items if f.fingerprint}),
+                sorted({f.fingerprint for f in durable if f.fingerprint}),
                 exclude_case_id=case_id,
-                content_keys=sorted({f.content_key for f in items if f.content_key}),
+                content_keys=sorted({f.content_key for f in durable if f.content_key}),
             )
             for f in items:
+                if not counts_toward_efficacy(f.concluded_by):
+                    f.history_refs = []
+                    continue
                 f.history_refs = [
                     {**r, "note": "此前病例曾出现同形态发现（复发）"}
                     for r in lookup_history(history, f.fingerprint, f.content_key)

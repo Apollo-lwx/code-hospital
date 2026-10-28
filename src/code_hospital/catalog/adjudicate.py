@@ -63,7 +63,7 @@ _CLASS = {
 def adjudicate_findings(project_root: str, findings: list) -> None:
     """就地写入裁决。其他仪器的发现保持原样。"""
     for finding in findings:
-        if finding.tool not in _SECURITY_TOOLS:
+        if finding.tool not in _SECURITY_TOOLS and not _unconfirmed_deserialize(finding):
             continue
         verdict, because, severity = _review(project_root, finding)
         _apply(finding, verdict, because, severity, _CLASS.get(finding.rule_id, ""))
@@ -80,6 +80,24 @@ def _apply(finding, verdict: str, because: str, severity: str, attack_class: str
         return
     note = f"{label}：{because}" if because else f"{label}："
     finding.message = f"{note} {finding.message}"[:500]
+
+
+_BAD_PATH_PREFIX = re.compile(
+    r"""(?:startsWith|startswith)\(\s*(?:"""
+    r"""(?:path|node:path)\.(?:resolve|join|normalize)\(\s*[A-Za-z0-9_$.]+\s*\)"""
+    r"""|os\.path\.(?:abspath|realpath|normpath|join)\(\s*[A-Za-z0-9_$.]+\s*\)"""
+    r"""|(?:Path|pathlib\.Path)\(\s*[A-Za-z0-9_$.]+\s*\)\.resolve\(\s*\)"""
+    r""")\s*\)"""
+)
+
+
+def _bad_path_prefix(line: str) -> bool:
+    return _BAD_PATH_PREFIX.search(line) is not None
+
+
+def _unconfirmed_deserialize(finding) -> bool:
+    blob = f"{finding.rule_id} {finding.message}".lower()
+    return "pickle" in blob or "dill" in blob or "joblib.load" in blob
 
 
 def _review(project_root: str, finding) -> tuple[str, str, str]:
@@ -101,9 +119,17 @@ def _review_leak(project_root: str, finding) -> tuple[str, str, str]:
     if line is None:
         return "needs_validation", "这一行现在读不到，不能排除密钥还在", ""
     literals = [item.strip() for item in _QUOTED.findall(line)]
-    if literals and all(len(item) < 8 or _PLACEHOLDER.match(item) for item in literals):
+    if literals and all(_placeholder_secret(item) for item in literals):
         return "rejected", "这一行只有占位符，不是可用的密钥材料", "info"
     return "confirmed", "这一行还能读到，先不要自动改。复核不再展开密钥原文", ""
+
+
+def _placeholder_secret(literal: str) -> bool:
+    if len(literal) < 8 or _PLACEHOLDER.match(literal):
+        return True
+    if "..." in literal:
+        return True
+    return "BEGIN " in literal and "END " not in literal
 
 
 def _review_ruler(project_root: str, finding) -> tuple[str, str, str]:
@@ -115,6 +141,10 @@ def _review_ruler(project_root: str, finding) -> tuple[str, str, str]:
         return "rejected", "命中落在注释里", "info"
     if finding.rule_id == "security.hardcoded-secret":
         return _review_literal_secret(project_root, finding)
+    if finding.rule_id == "security.path-prefix":
+        if _bad_path_prefix(line):
+            return "confirmed", "前缀没有以分隔符结束，兄弟目录会通过检查", ""
+        return "rejected", "这一行已经带上路径分隔符，或前缀检查已经不在", "info"
     fact = _FACTS.get(finding.rule_id, "未证实低信任输入越过了边界，也没有隔离执行观察到结果")
     if not str(finding.file_path).endswith(".py"):
         return "needs_validation", fact, "minor"

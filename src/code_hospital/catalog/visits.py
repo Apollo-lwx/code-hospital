@@ -37,10 +37,10 @@ VISIT_LABELS = {
 # plus：在分诊套餐上加做。only：只拍这一号的仪器。
 _PANELS: dict[str, tuple[str, tuple[str, ...]]] = {
     "checkup": ("plus", ()),
-    "admission": ("plus", ("security-ruler", "defect-ruler", "test-gap")),
-    "security": ("only", ("security-ruler", "gitleaks", "semgrep", "java-pack")),
+    "admission": ("plus", ("security-ruler", "defect-ruler", "test-gap", "taint-ruler")),
+    "security": ("only", ("security-ruler", "java-review", "ts-review", "gitleaks", "semgrep", "java-pack")),
     "performance": ("only", ("perf-ruler", "hotspot-ruler")),
-    "defect": ("only", ("defect-ruler", "java-pack", "ruff", "spotbugs")),
+    "defect": ("only", ("defect-ruler", "python-review", "java-review", "ts-review", "java-pack", "ruff", "spotbugs")),
     "algorithm": ("only", ("algo-ruler",)),
     "types": ("only", ("type-ruler",)),
     "architecture": ("only", ("layer-ruler",)),

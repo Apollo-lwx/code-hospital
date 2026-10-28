@@ -1,5 +1,6 @@
 """复诊差分、再入院与出院门禁。"""
 
+import json
 import shutil
 import subprocess
 from pathlib import Path
@@ -111,6 +112,10 @@ async def test_resolved_rescan_discharges_cured(git_repo):
     assert result["gate"]["verdict"] == "pass"
     assert len(result["diff"]["resolved"]) == 1
     assert Path(result["summary_path"]).is_file()
+    assert Path(result["eval_set"]).is_file()
+    saved = json.loads(Path(result["eval_set"]).read_text(encoding="utf-8"))
+    assert saved["samples"][0]["case_id"] == case_id
+    assert saved["samples"][0]["resolved"]
     assert Path(result["follow_up"]["ci_snippet_path"]).is_file()
     async with Database(git_repo) as db:
         case = await db.get_case(case_id)

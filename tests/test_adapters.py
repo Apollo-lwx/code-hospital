@@ -4,7 +4,7 @@ import json
 
 from code_hospital.adapters.gitleaks_adapter import parse_gitleaks_json
 from code_hospital.adapters.ruff_adapter import map_severity, parse_ruff_json
-from code_hospital.adapters.semgrep_adapter import parse_semgrep_json
+from code_hospital.adapters.semgrep_adapter import parse_semgrep_json, semgrep_argv
 
 
 def test_ruff_parse_and_severity():
@@ -49,3 +49,14 @@ def test_gitleaks_parse_masks_secret():
     findings = parse_gitleaks_json(payload)
     assert findings[0].severity == "critical"
     assert "AKIAZZZZZZZZZZZZZZZZ" not in findings[0].evidence
+
+
+def test_semgrep_registry_stays_metrics_off():
+    argv = semgrep_argv("semgrep", "auto", ["src/a.py"])
+    assert "--metrics=off" in argv
+    assert "auto" not in argv
+    assert "p/python" in argv
+    assert "p/security-audit" in argv
+    local = semgrep_argv("semgrep", ".semgrep.yml", ["src/a.py"])
+    assert local[local.index("--config") + 1] == ".semgrep.yml"
+    assert "p/python" not in local

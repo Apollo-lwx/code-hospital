@@ -41,6 +41,17 @@ def test_placeholder_secret_is_rejected(tmp_path: Path):
     assert finding.verdict == "rejected"
 
 
+def test_pem_header_example_is_rejected(tmp_path: Path):
+    (tmp_path / "certificate.rs").write_text(
+        'let key = SecretString::new("-----BEGIN PRIVATE KEY-----\\n...");\n',
+        encoding="utf-8",
+    )
+    finding = _finding("gitleaks", "private-key", "certificate.rs", 1)
+    adjudicate_findings(str(tmp_path), [finding])
+    assert finding.verdict == "rejected"
+    assert finding.severity == "info"
+
+
 def test_intra_function_taint_is_confirmed_without_execution(tmp_path: Path):
     (tmp_path / "app.py").write_text(
         "def lookup(request):\n"
@@ -54,6 +65,28 @@ def test_intra_function_taint_is_confirmed_without_execution(tmp_path: Path):
     assert finding.verdict == "confirmed"
     assert finding.severity == "major"
     assert "没有执行" in finding.message
+
+
+def test_path_prefix_stays_major_when_the_separator_is_missing(tmp_path: Path):
+    (tmp_path / "guard.js").write_text(
+        "if (!repoDir.startsWith(path.resolve(repoBase))) return\n",
+        encoding="utf-8",
+    )
+    finding = _finding("security-ruler", "security.path-prefix", "guard.js", 1, "major")
+    adjudicate_findings(str(tmp_path), [finding])
+    assert finding.verdict == "confirmed"
+    assert finding.severity == "major"
+
+
+def test_semgrep_pickle_without_untrusted_input_is_minor(tmp_path: Path):
+    (tmp_path / "app.py").write_text("def load(path):\n    return torch.load(path)\n", encoding="utf-8")
+    finding = _finding(
+        "semgrep", "trailofbits.python.pickles-in-pytorch.pickles-in-pytorch", "app.py", 2, "major",
+    )
+    finding.message = "Functions reliant on pickle can result in arbitrary code execution."
+    adjudicate_findings(str(tmp_path), [finding])
+    assert finding.verdict == "needs_validation"
+    assert finding.severity == "minor"
 
 
 def test_security_ledger_leaves_auth_and_sandbox_uncovered():

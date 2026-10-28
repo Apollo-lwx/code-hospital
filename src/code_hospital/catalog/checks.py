@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import ast
+import json
 import re
 import shutil
 from pathlib import Path
@@ -60,6 +61,7 @@ def _normalize(row: dict) -> dict:
         "code": str(row.get("code") or ""),
         "external": [str(item) for item in (row.get("external") or [])],
         "artifact": str(row.get("artifact") or ""),
+        "group": str(row.get("group") or ""),
     }
 
 
@@ -290,12 +292,15 @@ def run_checks(
             if external["text"]:
                 pieces.append(external["text"])
         if "llm" in item["executors"]:
+            from .filing import CONTRACT_LINE, contract_for
+
             prior = "\n\n".join(facts[need] for need in item["needs"])
             own = "\n\n".join(pieces)
             executors.append({
                 "kind": "llm",
                 "status": "pending",
                 "text": _llm_task(item, prior, own),
+                "contract": contract_for(item["id"]),
             })
         facts[item["id"]] = "\n\n".join(pieces) or item["question"]
         status = "open" if any(row["status"] == "pending" for row in executors) else "done"
@@ -305,6 +310,7 @@ def run_checks(
 
 def summarize_checks(checks: list[dict]) -> str:
     pending = sum(1 for row in checks if row["status"] == "open")
+    budget = sum(1 for row in checks if row["status"] == "budget")
     blocked = sum(1 for row in checks if row["status"] == "blocked")
     absent = sum(
         1
@@ -312,10 +318,136 @@ def summarize_checks(checks: list[dict]) -> str:
         for executor in row["executors"]
         if executor["kind"] == "external" and executor["status"] == "absent"
     )
+    head = f"检查事项 {len(checks)} 项：待宿主 LLM {pending} 项"
+    if budget:
+        head += f"，因预算未做 {budget} 项"
     return (
-        f"检查事项 {len(checks)} 项：待宿主 LLM {pending} 项，被前置挡住 {blocked} 项，"
-        f"外部工具未到岗 {absent} 处。未交卷的事项不能写成已经分析过。"
+        f"{head}，被前置挡住 {blocked} 项，外部工具未到岗 {absent} 处。"
+        "未交卷的事项不能写成已经分析过。"
     )
+
+
+_ISSUE_LINE = re.compile(
+    r"^(?P<path>.+?):(?P<start>\d+)(?:-(?P<end>\d+))?:\s*(?P<msg>\S.*)$"
+)
+_NONE_LINE = re.compile(r"^(没有|none)[。.]?$", re.IGNORECASE)
+_READ_LINE = re.compile(r"^(已读|read)\s*[:：]\s*(?P<body>.+)$", re.IGNORECASE)
+
+
+def filing_accepted(note: str) -> bool:
+    """合入交卷只有这两种说明算完成。其余说明都表示还不能诊断。"""
+    text = (note or "").strip()
+    return text.startswith("宿主已交卷") or text.startswith("宿主已通读")
+
+
+def file_host_diff(
+    checks: list[dict], answers: dict | None, scope_files: list[str],
+    previous: dict | None = None,
+) -> tuple[list[dict], str]:
+    """把本轮交卷收成新条目。上一轮已经写入的留在病历里，相同问题不重复返回。"""
+    from .filing import settle_filing
+
+    specs, note, ledger = settle_filing(checks, answers, scope_files, previous)
+    by_id = {row["id"]: row for row in (ledger or {}).get("items") or []}
+    for item in checks:
+        row = by_id.get(item.get("id"))
+        if row is None or row["status"] not in {"filed", "clear"}:
+            continue
+        raw = (answers or {}).get(item["id"])
+        if raw is None or (isinstance(raw, str) and not str(raw).strip()):
+            continue
+        text = str(raw).strip() if isinstance(raw, str) else _stored(raw)
+        for executor in item.get("executors") or []:
+            if executor.get("kind") == "llm":
+                executor["status"] = "done"
+                executor["text"] = text
+        if item.get("executors") and not any(
+            executor.get("status") == "pending" for executor in item["executors"]
+        ):
+            item["status"] = "done"
+    return specs, note
+
+
+def _stored(raw) -> str:
+    return json.dumps(raw, ensure_ascii=False)
+
+
+def _parse_diff_issues(text: str, scope_files: list[str]) -> tuple[list[dict], str]:
+    known = _scope_index(scope_files)
+    specs: list[dict] = []
+    clean = False
+    read: set[str] = set()
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if _NONE_LINE.match(line):
+            clean = True
+            continue
+        read_match = _READ_LINE.match(line)
+        if read_match:
+            read.update(_read_paths(read_match.group("body"), known))
+            continue
+        issue = _ISSUE_LINE.match(line)
+        if issue is None:
+            return [], "交卷要按「文件:行: 说明」写，或者写「没有」并另起一行「已读：」列出文件。"
+        path = _resolve_path(issue.group("path").strip(), known)
+        if not path:
+            return [], f"「{issue.group('path').strip()}」不在这次合入范围里，不能写入病历。"
+        start = int(issue.group("start"))
+        end = int(issue.group("end") or start)
+        if start < 1 or end < start:
+            return [], f"{path} 的行号无效。"
+        specs.append({
+            "file_path": path,
+            "line_start": start,
+            "line_end": end,
+            "message": issue.group("msg").strip(),
+        })
+    if specs and clean:
+        return [], "同一份交卷里不能既写问题又写没有。"
+    if specs:
+        return specs, ""
+    if not clean:
+        return [], "交卷要按「文件:行: 说明」写，或者写「没有」并另起一行「已读：」列出文件。"
+    missing = [path for path in known["paths"] if path not in read]
+    if missing:
+        shown = "、".join(missing[:8])
+        return [], f"还有文件没列入已读（{shown}），不能写成没有功能问题。"
+    return [], ""
+
+
+def _scope_index(scope_files: list[str]) -> dict:
+    paths = [rel.replace("\\", "/").lstrip("./") for rel in scope_files]
+    names: dict[str, list[str]] = {}
+    for path in paths:
+        names.setdefault(path.rsplit("/", 1)[-1], []).append(path)
+    return {"paths": paths, "by_path": set(paths), "names": names}
+
+
+def _resolve_path(token: str, known: dict) -> str:
+    path = token.replace("\\", "/").lstrip("./")
+    if path.startswith("/") or (len(path) > 1 and path[1] == ":"):
+        return ""
+    if path in known["by_path"]:
+        return path
+    if "/" in path:
+        return ""
+    hits = known["names"].get(path) or []
+    if len(hits) == 1:
+        return hits[0]
+    return ""
+
+
+def _read_paths(body: str, known: dict) -> set[str]:
+    found: set[str] = set()
+    for token in re.split(r"[\s,，、;；]+", body.strip()):
+        if not token:
+            continue
+        path = _resolve_path(token, known)
+        if path:
+            found.add(path)
+    return found
 
 
 def _result(item: dict, status: str, executors: list[dict], note: str) -> dict:
@@ -323,6 +455,7 @@ def _result(item: dict, status: str, executors: list[dict], note: str) -> dict:
         "id": item["id"],
         "question": item["question"],
         "artifact": item["artifact"],
+        "group": item.get("group") or "",
         "needs": list(item["needs"]),
         "status": status,
         "note": note,
@@ -331,10 +464,13 @@ def _result(item: dict, status: str, executors: list[dict], note: str) -> dict:
 
 
 def _llm_task(item: dict, prior: str, own: str) -> str:
+    from .filing import CONTRACT_LINE
+
     lines = [
         f"事项 {item['id']}：{item['question']}",
         f"要交出：{item['artifact']}",
         "只根据下面已经交出的事实来写。事实里没有的模块不要编。",
+        CONTRACT_LINE,
     ]
     if prior:
         lines += ["", "前置产物：", prior]
@@ -841,3 +977,20 @@ _CODE["access_signals"] = _access_signals
 _CODE["concurrency_signals"] = _concurrency_signals
 _CODE["serialization_signals"] = _serialization_signals
 _CODE["naming_signals"] = _naming_signals
+
+
+def _diff_map(project_root: str, files: list[str]) -> str:
+    """合入范围的文件清单。通读由宿主完成，这里不代替读代码。"""
+    del project_root
+    if not files:
+        return "这次范围里没有源文件。没有文件可通读，不能写成没有功能问题。"
+    lines = ["合入范围里要打开通读的文件（仪器命中只是证据）："]
+    shown = files[:40]
+    lines.extend(f"- {rel}" for rel in shown)
+    if len(files) > len(shown):
+        lines.append(f"- 其余 {len(files) - len(shown)} 个文件同样要读")
+    lines.append("没读完的文件不能把这次合入写成没有功能问题。")
+    return "\n".join(lines)
+
+
+_CODE["diff_map"] = _diff_map

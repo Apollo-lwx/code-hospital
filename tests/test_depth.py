@@ -148,6 +148,131 @@ def test_visit_panels_leave_checkup_shallow():
     assert "security-ruler" in general
     assert "ruff" in general
     assert "type-ruler" in general
+    admission = selected_instrument_ids("outpatient", files, [], [], "admission")
+    assert "taint-ruler" in admission
+    assert "security-ruler" in admission
+    assert "ruff" in admission
+
+
+def test_is_literal_keeps_singletons(tmp_path: Path):
+    (tmp_path / "cmp.py").write_text(
+        "def f(x):\n"
+        "    return (x is None, x is True, x is False, x is ..., x is 0, x is 'a')\n",
+        encoding="utf-8",
+    )
+    grouped, _limits = scan_depth(str(tmp_path), ["cmp.py"], ["defect-ruler"])
+    hits = [row for row in grouped["defect-ruler"] if row["rule_id"] == "defect.is-literal"]
+    assert len(hits) == 2
+
+
+def test_admission_softens_unused_import_and_star_undefined(tmp_path: Path):
+    from code_hospital.catalog.noise import soften_findings
+    from code_hospital.core.models import Finding
+
+    (tmp_path / "star.py").write_text("from os import *\nvalue = missing\n", encoding="utf-8")
+    (tmp_path / "types.py").write_text(
+        "from typing import TYPE_CHECKING\n"
+        "if TYPE_CHECKING:\n"
+        "    ghost = missing\n"
+        "value = also_missing\n",
+        encoding="utf-8",
+    )
+
+    def finding(rule: str, path: str, line: int) -> Finding:
+        return Finding(
+            id=f"{rule}-{path}-{line}", case_id="c", report_id="r", tool="ruff",
+            rule_id=rule, severity="major", file_path=path, line_start=line, line_end=line,
+            message="x", fingerprint=f"fp-{rule}-{path}-{line}",
+        )
+
+    unused = finding("F401", "star.py", 1)
+    starred = finding("F821", "star.py", 2)
+    in_block = finding("F821", "types.py", 3)
+    outside = finding("F821", "types.py", 4)
+    checkup = finding("F401", "star.py", 1)
+    soften_findings(str(tmp_path), "admission", [unused, starred, in_block, outside])
+    soften_findings(str(tmp_path), "checkup", [checkup])
+    assert unused.severity == "nit"
+    assert starred.severity == "nit"
+    assert in_block.severity == "nit"
+    assert outside.severity == "major"
+    assert checkup.severity == "major"
+    empty = finding("F541", "star.py", 1)
+    soften_findings(str(tmp_path), "admission", [empty])
+    kept = finding("F541", "star.py", 1)
+    soften_findings(str(tmp_path), "checkup", [kept])
+    assert empty.severity == "nit"
+    assert kept.severity == "major"
+
+
+def test_path_prefix_without_separator_is_confirmed(tmp_path: Path):
+    (tmp_path / "guard.js").write_text(
+        "if (!repoDir.startsWith(path.resolve(repoBase))) {\n"
+        "  return\n"
+        "}\n"
+        "if (!repoDir.startsWith(path.resolve(repoBase) + path.sep)) {\n"
+        "  return\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "guard.py").write_text(
+        "import os\n"
+        "from pathlib import Path\n"
+        "def bad(repo, base):\n"
+        "    return repo.startswith(os.path.abspath(base))\n"
+        "def also(repo, base):\n"
+        "    return repo.startswith(Path(base).resolve())\n"
+        "def ok(repo, base):\n"
+        "    return repo.startswith(os.path.abspath(base) + os.sep)\n",
+        encoding="utf-8",
+    )
+    grouped, _limits = scan_depth(
+        str(tmp_path), ["guard.js", "guard.py"], ["security-ruler"],
+    )
+    hits = [row for row in grouped["security-ruler"] if row["rule_id"] == "security.path-prefix"]
+    assert len(hits) == 3
+    assert {row["line_start"] for row in hits} == {1, 4, 6}
+
+
+def test_named_failure_with_another_path_is_not_swallowed(tmp_path: Path):
+    (tmp_path / "parse.py").write_text(
+        "def parse(raw):\n"
+        "    try:\n"
+        "        return [str(int(raw))]\n"
+        "    except ValueError:\n"
+        "        pass\n"
+        "    return raw.split(',')\n"
+        "\n"
+        "def polish(rust):\n"
+        "    try:\n"
+        "        rust = rust.strip()\n"
+        "    except Exception:\n"
+        "        pass\n"
+        "    return rust\n"
+        "\n"
+        "def show(path, open_browser):\n"
+        "    if open_browser:\n"
+        "        try:\n"
+        "            open_browser(path)\n"
+        "        except Exception:\n"
+        "            pass\n"
+        "    return path\n"
+        "\n"
+        "def token(paths):\n"
+        "    for path in paths:\n"
+        "        try:\n"
+        "            data = path.read_text()\n"
+        "            if data:\n"
+        "                return data\n"
+        "        except Exception:\n"
+        "            pass\n"
+        "    return None\n",
+        encoding="utf-8",
+    )
+    grouped, _limits = scan_depth(str(tmp_path), ["parse.py"], ["defect-ruler"])
+    hits = [row for row in grouped["defect-ruler"] if row["rule_id"] == "defect.swallowed"]
+    assert len(hits) == 1
+    assert hits[0]["line_start"] > 6
 
 
 def test_depth_rules_enter_the_formulary():

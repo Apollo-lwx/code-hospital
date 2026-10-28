@@ -71,9 +71,64 @@ class FindingStatus(str, Enum):
 
 
 class Origin(str, Enum):
+    """初发、医源性新症或无关新症。结论来源写在 concluded_by。"""
+
     INITIAL = "initial"
     NEW_RELATED = "new_related"
     NEW_UNRELATED = "new_unrelated"
+
+
+class ConcludedBy(str, Enum):
+    """谁下的结论。疗效和指纹差分统计 instrument、external、code。"""
+
+    INSTRUMENT = "instrument"
+    HOST_LLM = "host_llm"
+    EXTERNAL = "external"
+    CODE = "code"
+
+
+def classify_source(tool: str, rule_id: str = "", engine: str = "") -> str:
+    """仪器产物、外聘引擎、宿主交卷。模板归因不走这里。"""
+    if tool == "host" or rule_id == "diff.issue":
+        return ConcludedBy.HOST_LLM.value
+    if engine == "external":
+        return ConcludedBy.EXTERNAL.value
+    return ConcludedBy.INSTRUMENT.value
+
+
+def counts_toward_efficacy(concluded_by: str) -> bool:
+    return concluded_by != ConcludedBy.HOST_LLM.value
+
+
+def concluded_by_counts(findings) -> dict[str, int]:
+    counts = {item.value: 0 for item in ConcludedBy}
+    for finding in findings:
+        key = getattr(finding, "concluded_by", "") or ConcludedBy.INSTRUMENT.value
+        if key not in counts:
+            key = ConcludedBy.INSTRUMENT.value
+        counts[key] += 1
+    return counts
+
+
+def source_summary(findings) -> str:
+    counts = concluded_by_counts(findings)
+    parts = [f"仪器 {counts['instrument']} 条", f"模型 {counts['host_llm']} 条"]
+    if counts["external"]:
+        parts.append(f"外聘 {counts['external']} 条")
+    if counts["code"]:
+        parts.append(f"代码 {counts['code']} 条")
+    return " / ".join(parts)
+
+
+def finding_rank(finding) -> tuple:
+    """宿主交卷排在仪器发现后面，不占严重度的前排。"""
+    lead = 0 if counts_toward_efficacy(getattr(finding, "concluded_by", "")) else 1
+    return (
+        lead,
+        SEVERITY_ORDER.get(getattr(finding, "severity", ""), 9),
+        getattr(finding, "file_path", "") or "",
+        int(getattr(finding, "line_start", 0) or 0),
+    )
 
 
 class Scope(BaseModel):
@@ -129,6 +184,8 @@ class Finding(BaseModel):
     symbol: str = ""
     # 分层尺采用的契约 id，写入 scope_key 的 contract: 段。
     contract_id: str = ""
+    # 这条发现来自哪条清单。空字符串表示不是清单交卷。
+    check_id: str = ""
     fixable: bool = False
     # 安全科裁决。空字符串表示这台仪器不走独立核实。
     verdict: str = ""
@@ -142,6 +199,8 @@ class Finding(BaseModel):
     context_anchor: str = ""
     status: str = FindingStatus.NEW.value
     origin: str = Origin.INITIAL.value
+    # 谁下的结论。默认定性仪器。宿主交卷写 host_llm。
+    concluded_by: str = ConcludedBy.INSTRUMENT.value
     first_seen_round: int = 1
     last_seen_round: int = 1
     # 同指纹历史复发记录（派生字段，检验时关联，不入库；初发为 []）
@@ -166,6 +225,8 @@ class Diagnosis(BaseModel):
     member_ids: list[str] = Field(default_factory=list)
     specialty_id: str = ""
     formulary_matched: bool = True
+    # 模板归因写 code。整簇都是宿主交卷时写 host_llm。
+    concluded_by: str = ConcludedBy.CODE.value
 
 
 class ReportRecord(BaseModel):

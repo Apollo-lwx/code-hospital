@@ -1,6 +1,8 @@
 # 号别自动排哪些内置包。新增内置包：往本目录放一份 yaml，再在这里点名。
 # 用户自己的包不要写在这里，写在被诊疗仓库的 code-hospital.yaml。
 visits:
+  admission:
+    - diff-review
   architecture:
     - principles
     - patterns
@@ -13,10 +15,28 @@ visits:
     - serialization
     - access
 when:
+  - pack: python-checklist
+    visit: admission
+    any_suffix: [".py"]
+  - pack: java-checklist
+    visit: admission
+    any_suffix: [".java"]
+  - pack: ts-checklist
+    visit: admission
+    any_suffix: [".ts", ".tsx"]
   - pack: effective-java
     visit: architecture
     any_suffix: [".java"]
 requires:
+  python-checklist:
+    any_suffix: [".py"]
+    missing: python-checklist 需要 Python 文件，这次没排
+  java-checklist:
+    any_suffix: [".java"]
+    missing: java-checklist 需要 Java 文件，这次没排
+  ts-checklist:
+    any_suffix: [".ts", ".tsx"]
+    missing: ts-checklist 需要 TypeScript 文件，这次没排
   effective-java:
     any_suffix: [".java"]
     missing: effective-java 需要 Java 文件，这次没排
