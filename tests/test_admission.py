@@ -147,6 +147,7 @@ async def test_auto_advance_clean_filing_is_not_a_pass(tmp_path: Path):
             "py.checklist.behavior": clean,
             "py.checklist.errors": clean,
             "py.checklist.state": clean,
+            "diff.surface": clean,
         },
     )
     assert result["filing_note"].startswith("宿主已通读")
@@ -173,6 +174,7 @@ async def test_host_clues_stay_out_of_the_prescription(tmp_path: Path):
             "py.checklist.behavior": "没有\n已读：src/a.py",
             "py.checklist.errors": "src/a.py:3: 异常被接住后继续返回",
             "py.checklist.state": "没有\n已读：src/a.py",
+            "diff.surface": "没有\n已读：src/a.py",
         },
     )
     host_ids = {item["id"] for item in diagnosed["diagnoses"] if item["concluded_by"] == "host_llm"}

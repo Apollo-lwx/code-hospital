@@ -407,7 +407,7 @@ def _parse_diff_issues(text: str, scope_files: list[str]) -> tuple[list[dict], s
     if specs and clean:
         return [], "同一份交卷里不能既写问题又写没有。"
     if specs:
-        return specs, ""
+        return _require_scope({spec["file_path"] for spec in specs} | read, known, specs)
     if not clean:
         return [], "交卷要按「文件:行: 说明」写，或者写「没有」并另起一行「已读：」列出文件。"
     missing = [path for path in known["paths"] if path not in read]
@@ -415,6 +415,14 @@ def _parse_diff_issues(text: str, scope_files: list[str]) -> tuple[list[dict], s
         shown = "、".join(missing[:8])
         return [], f"还有文件没列入已读（{shown}），不能写成没有功能问题。"
     return [], ""
+
+
+def _require_scope(covered: set[str], known: dict, specs: list[dict]) -> tuple[list[dict], str]:
+    missing = [path for path in known["paths"] if path not in covered]
+    if missing:
+        shown = "、".join(missing[:8])
+        return specs, f"还有文件没列入已读（{shown}），不能诊断。"
+    return specs, ""
 
 
 def _scope_index(scope_files: list[str]) -> dict:
@@ -980,17 +988,26 @@ _CODE["naming_signals"] = _naming_signals
 
 
 def _diff_map(project_root: str, files: list[str]) -> str:
-    """合入范围的文件清单。通读由宿主完成，这里不代替读代码。"""
+    """合入范围的文件清单。按文件分开读，这里不代替读代码。"""
     del project_root
     if not files:
         return "这次范围里没有源文件。没有文件可通读，不能写成没有功能问题。"
-    lines = ["合入范围里要打开通读的文件（仪器命中只是证据）："]
-    shown = files[:40]
-    lines.extend(f"- {rel}" for rel in shown)
-    if len(files) > len(shown):
-        lines.append(f"- 其余 {len(files) - len(shown)} 个文件同样要读")
-    lines.append("没读完的文件不能把这次合入写成没有功能问题。")
-    return "\n".join(lines)
+    header = [
+        "按文件分开读。一次只打开一个文件，读完再打开下一个。",
+        f"合入范围共 {len(files)} 个文件，要打开通读（仪器命中只是证据）：",
+    ]
+    body: list[str] = []
+    omitted = 0
+    closing = "没读完的文件不能把这次合入写成没有功能问题。"
+    for index, rel in enumerate(files):
+        draft = "\n".join([*header, *body, f"- {rel}", closing])
+        if len(draft) > _CAP:
+            omitted = len(files) - index
+            break
+        body.append(f"- {rel}")
+    if omitted:
+        closing = f"还有 {omitted} 个文件没有列在上面，同样要按文件读。{closing}"
+    return "\n".join([*header, *body, closing])
 
 
 _CODE["diff_map"] = _diff_map

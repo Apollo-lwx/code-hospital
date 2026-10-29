@@ -10,8 +10,9 @@ import json
 VERSION = 1
 CONTRACT_LINE = (
     "交卷契约 v1：文本仍可用；对象为 "
-    '{"issues":[{"file":"仓库相对路径","line":1,"message":"说明"}]} '
+    '{"issues":[{"file":"仓库相对路径","line":1,"message":"说明"}],"read":["没写到问题的文件"]} '
     '或 {"clear":true,"read":["范围内每个文件"]}。'
+    "写了问题的文件算看过，其余范围内文件仍要列入 read 或「已读：」，没列全不能诊断。"
 )
 _OPEN = "尚未交卷，不能写成没有功能问题。"
 _BAD_JSON = "交卷契约不是合法 JSON。"
@@ -23,7 +24,7 @@ def contract_for(item_id: str) -> dict:
     return {
         "version": VERSION,
         "id": item_id,
-        "text": "每行「文件:行: 说明」，或一行「没有」再一行「已读：」列出范围内每个文件",
+        "text": "每行「文件:行: 说明」。写了问题的文件算看过，其余文件列入「已读：」。或一行「没有」再一行「已读：」列出范围内每个文件",
         "object": {
             "issues": [{"file": "仓库相对路径", "line": 1, "message": "说明"}],
             "clear": {"clear": True, "read": ["范围内每个文件"]},
@@ -97,8 +98,6 @@ def _settle_item(item: dict, answers: dict | None, scope_files: list[str], prior
         note = "已交卷" if status == "filed" else "已通读范围内文件" if status == "clear" else _OPEN
         return _ledger_row(item["id"], status, kept, note)
     specs, problem = parse_answer(raw, scope_files)
-    if problem:
-        return _ledger_row(item["id"], "invalid", kept, problem)
     if specs:
         for spec in specs:
             if any(_same_issue(spec, row) for row in kept):
@@ -107,6 +106,9 @@ def _settle_item(item: dict, answers: dict | None, scope_files: list[str], prior
             stamped["check_id"] = item["id"]
             kept.append(_kept_row(stamped))
             fresh.append(stamped)
+    if problem:
+        return _ledger_row(item["id"], "invalid", kept, problem)
+    if specs:
         return _ledger_row(item["id"], "filed", kept, "已交卷")
     if kept:
         return _ledger_row(item["id"], "filed", kept, "已有交卷仍在病历里")
@@ -295,7 +297,16 @@ def _parse_object(data: dict, scope_files: list[str]) -> tuple[list[dict], str]:
                 "line_end": end,
                 "message": message,
             })
-        return specs, ""
+        from .checks import _require_scope
+
+        covered = {spec["file_path"] for spec in specs}
+        read = data.get("read")
+        if isinstance(read, list):
+            for token in read:
+                found = _resolve_path(str(token), known)
+                if found:
+                    covered.add(found)
+        return _require_scope(covered, known, specs)
     if clear is True:
         found: set[str] = set()
         read = data.get("read")

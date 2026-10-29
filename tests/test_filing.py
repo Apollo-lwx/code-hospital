@@ -52,6 +52,42 @@ def test_clear_object_requires_every_file():
     assert note == "宿主已通读本次 diff，并写明没有功能问题。"
 
 
+def test_issues_still_need_every_scoped_file():
+    specs, problem = parse_answer("src/a.py:2: 返回值被丢掉", ["src/a.py", "src/b.py"])
+    assert specs[0]["file_path"] == "src/a.py"
+    assert "src/b.py" in problem
+    assert "不能诊断" in problem
+    filed, note = file_host_diff(
+        [_pending()],
+        {"diff.issues": "src/a.py:2: 返回值被丢掉"},
+        ["src/a.py", "src/b.py"],
+    )
+    assert len(filed) == 1
+    assert not filing_accepted(note)
+    assert "src/b.py" in note
+    ledger = filing_ledger(
+        [_pending()],
+        {"diff.issues": "src/a.py:2: 返回值被丢掉"},
+        ["src/a.py", "src/b.py"],
+    )
+    row = ledger["items"][0]
+    assert row["status"] == "invalid"
+    assert row["issues"] == 1
+    covered, covered_note = file_host_diff(
+        [_pending()],
+        {"diff.issues": "src/a.py:2: 返回值被丢掉\n已读：src/b.py"},
+        ["src/a.py", "src/b.py"],
+    )
+    assert len(covered) == 1
+    assert filing_accepted(covered_note)
+    specs, problem = parse_answer(
+        {"issues": [{"file": "src/a.py", "line": 2, "message": "丢掉"}], "read": ["src/b.py"]},
+        ["src/a.py", "src/b.py"],
+    )
+    assert problem == ""
+    assert specs[0]["file_path"] == "src/a.py"
+
+
 def test_object_rejects_a_mixed_or_outside_filing():
     _specs, mixed = parse_answer(
         {"clear": True, "issues": [{"file": "src/a.py", "line": 1, "message": "有"}]},

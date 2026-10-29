@@ -58,6 +58,25 @@ def test_admission_asks_host_to_read_the_diff(tmp_path):
     assert "测试有没有把这套错行为写成断言" in llm["text"]
     assert "拿旧状态当新状态" in llm["text"]
     assert "没列全不能写成没有" in llm["text"]
+    assert "没列全不能诊断" in llm["text"]
+    assert "按文件分开读" in llm["text"]
+    surface = next(row for row in rows if row["id"] == "diff.surface")
+    surface_llm = next(item for item in surface["executors"] if item["kind"] == "llm")
+    assert surface_llm["status"] == "pending"
+    assert "可访问性" in surface_llm["text"]
+    assert "不写行为对错" in surface_llm["text"]
+    assert "按文件分开读" in code
+
+
+def test_diff_map_names_files_it_cannot_list():
+    from code_hospital.catalog.checks import _diff_map
+
+    files = [f"src/{'directory' * 4}/module_{index:03d}.py" for index in range(120)]
+    text = _diff_map(".", files)
+    assert "按文件分开读" in text
+    assert "还有" in text
+    assert "不能把这次合入写成没有功能问题" in text
+    assert len(text) <= 4000
 
 
 def test_builtin_architecture_items_are_ordered():
@@ -364,6 +383,7 @@ def test_repository_checklist_replaces_builtin(tmp_path):
         checks,
         {
             "diff.issues": "src/a.py:2: 返回值被丢掉",
+            "diff.surface": "没有\n已读：src/a.py",
             "team.pay": "src/a.py:4: 金额被改了两次",
         },
         ["src/a.py"],

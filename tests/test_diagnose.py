@@ -157,6 +157,7 @@ async def test_admission_writes_host_diff_into_the_chart(git_repo):
             "py.checklist.behavior": "没有\n已读：src/a.py",
             "py.checklist.errors": "src/a.py:3: 异常被接住后继续返回",
             "py.checklist.state": "没有\n已读：src/a.py",
+            "diff.surface": "没有\n已读：src/a.py",
         },
     )
     by_cat = {d["category"]: d for d in res["diagnoses"]}
@@ -214,6 +215,7 @@ async def test_later_round_keeps_the_first_host_issue(git_repo):
             "py.checklist.behavior": "没有\n已读：src/a.py",
             "py.checklist.errors": "没有\n已读：src/a.py",
             "py.checklist.state": "没有\n已读：src/a.py",
+            "diff.surface": "没有\n已读：src/a.py",
         },
     )
     assert "病历里共 2 条" in second["filing_note"]
