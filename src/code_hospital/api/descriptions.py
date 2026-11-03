@@ -25,6 +25,13 @@ stage_confirmed=true; every advancing tool returns a handoff block telling you w
 to present and how to resume. Cases registered with auto_advance=true skip all gates. Any tool
 may return status="pending_question" when user input is required — never guess; the safe-side
 default applies if unanswered.
+
+Every stage and every check step may include the host model. Code and regex only normalize
+and enforce the charter. The model still files in the v1 contract, not free prose:
+assist={step: {"issues":[{"file","line","message"}],"read":[...]}} or lines "file:line: message"
+plus "已读：". A note that is not that contract is rejected and is not written into the report.
+Omitting assist does not block the stage. A filing does not clear an open checklist by itself
+and does not enter the prescription by itself.
 """
 
 REGISTER_DESC = """\

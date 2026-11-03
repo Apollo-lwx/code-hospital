@@ -77,7 +77,7 @@ _RULE_PLAIN = {
     "java.sql-concat": "SQL 被拼接",
     "ts.line-length": "TypeScript 行太长",
     "ts.function-lines": "函数过长（估算）",
-    "ts.any": "用了 any",
+    "ts.any": "as any 抹掉了已有类型",
     "ts.console-log": "留下了 console.log",
     "ts.todo": "留下了待办标记",
     "ts.trailing-whitespace": "行尾有空白",
@@ -457,7 +457,7 @@ def render_register_report(case: Case, report_id: str, precheck_hits: int, dupli
 def _source_cell(finding: Finding) -> str:
     return {
         "instrument": "仪器",
-        "host_llm": "待核实",
+        "host_llm": "模型",
         "external": "外聘",
         "code": "代码",
     }.get(finding.concluded_by, "仪器")
@@ -467,7 +467,7 @@ def _pending_leads(case: Case, findings: list[Finding]) -> list[str]:
     leads = [item for item in findings if not counts_toward_efficacy(item.concluded_by)]
     if not leads:
         return []
-    lines = ["## 待核实线索", "", "这些是宿主交卷。", ""]
+    lines = ["## 待核实线索", "", "这些是模型交卷，还不是仪器章程，也不进疗效。", ""]
     for finding in leads:
         msg = finding.message.replace("|", "\\|").replace("\n", " ")[:80]
         lines.append(
@@ -520,6 +520,8 @@ def render_scan_report(
     limitations: list[str],
     memory_context: dict | None = None,
     checks: list[dict] | None = None,
+    model_assisted: bool = False,
+    host_scan: dict | None = None,
 ) -> str:
     ranked = sorted(findings, key=finding_rank)
     durable = [item for item in ranked if counts_toward_efficacy(item.concluded_by)]
@@ -546,10 +548,11 @@ def render_scan_report(
         f"| {scope_desc} | {len(ranked)} | {counts['critical']} | {counts['major']}"
         f" | {counts['minor']} | {counts['nit'] + counts['info']} |",
         "",
-        source_summary(ranked),
+        source_summary(ranked, model_assisted=model_assisted),
         "",
-        "> 这五档是检查工具自己的分法，不是漏洞通告里的超危、高危。上面五档统计仪器、外聘和医院代码。模型交卷记在待核实线索。"
-        "必须先处理指密钥或同类安全项；明确缺陷指已经能指出的代码问题，例如没用到的导入；"
+        "> 这五档只统计仪器章程，不是模型判断，也不是漏洞通告里的超危、高危。"
+        "模型未交卷时不能把章程条数当成已经分析完；模型落到文件和行号的结论另计。"
+        "必须先处理指密钥或同类安全项；明确缺陷指章程里已经能指出的代码问题，例如没用到的导入；"
         "一般问题偏格式；风格建议是可改可不改的写法，函数超过行数和文件超过行数也算在这里；参考信息并进「风格与提示」。",
         "",
     ]
@@ -609,9 +612,30 @@ def render_scan_report(
         "## 覆盖与限制",
         "",
     ]
-    parts += [f"- {ln}" for ln in limitations] if limitations else ["- 无"]
+    coverage = list(limitations) + _host_scan_limits(host_scan)
+    parts += [f"- {ln}" for ln in coverage] if coverage else ["- 无"]
     parts.append(_footer(case))
     return "\n".join(parts)
+
+
+def _host_scan_limits(host_scan: dict | None) -> list[str]:
+    if not host_scan:
+        return []
+    batch = list(host_scan.get("batch") or [])
+    lines = [
+        (
+            f"全库阅读：未读 {host_scan.get('unread')} / 共 {host_scan.get('total')}。"
+            f"这一批 {len(batch)} 个文件，在工具出参 host_scan 里。"
+            "模型交卷必须是交卷契约，自由文字不算产物。"
+        )
+    ]
+    plan = str(host_scan.get("plan_path") or "")
+    if plan:
+        lines.append(f"分批清单：{plan}")
+    joint = list(host_scan.get("joint") or [])
+    if joint:
+        lines.append("联合分析还没读：" + "、".join(str(path) for path in joint))
+    return lines
 
 
 def _outside_questions(questions: list[dict] | None) -> list[str]:
@@ -628,7 +652,7 @@ def _check_section(checks: list[dict]) -> list[str]:
     parts = [
         "## 检查事项",
         "",
-        "事项按名册顺序执行。代码和外部工具先交事实，宿主 LLM 再交判断。"
+        "事项按名册顺序执行。代码和正则先交章程事实，每一步都可以由宿主模型辅助判断。"
         "待交卷的事项不能写成已经分析过。",
         "",
     ]
@@ -650,6 +674,16 @@ def _check_section(checks: list[dict]) -> list[str]:
             parts.append(f"- 要交出：{item['artifact']}")
         if item.get("note"):
             parts.append(f"- {item['note']}")
+        filed = (item.get("assist") or {}).get("filed")
+        if isinstance(filed, dict):
+            for issue in filed.get("issues") or []:
+                place = str(issue.get("file") or "")
+                if issue.get("line"):
+                    place = f"{place}:{issue.get('line')}"
+                parts.append(f"- {place}: {issue.get('message')}")
+            note = str(filed.get("note") or "")
+            if note and filed.get("status") != "filed":
+                parts.append(f"- {note}")
         for executor in item.get("executors") or []:
             label = labels.get(executor["kind"], executor["kind"])
             state = status_labels.get(executor["status"], executor["status"])
@@ -670,6 +704,7 @@ def render_diagnose_report(
     questions: list[dict] | None = None,
     filing_note: str = "",
     budget_note: str = "",
+    model_assisted: bool = False,
 ) -> str:
     """诊断书（契约 §5.4）。clusters 为 (Diagnosis, findings) 对，位置只出现在报告里。"""
     members = [finding for _diagnosis, group in clusters for finding in group]
@@ -691,13 +726,16 @@ def render_diagnose_report(
             f" | {stats['llm_patch']} | {stats['manual']} |"
         ),
         "",
-        source_summary(members),
+        source_summary(members, model_assisted=model_assisted),
+        "",
+    ]
+    parts += [
+        "> 分组和处置建议来自规则表，是章程，不是模型判断。"
+        "模型判断只计已经落到文件和行号的交卷。",
         "",
     ]
     if use_llm:
-        parts += ["> 宿主声明将自行增强解读。本诊断书仍是模板归因，未调用模型。", ""]
-    else:
-        parts += ["> 分组和处置建议来自规则表，不是模型判断。", ""]
+        parts += ["> 宿主声明会增强解读。没有落到文件和行号的，仍不计进模型条数。", ""]
     if budget_note:
         parts += [f"> {budget_note}", ""]
     if durable:
@@ -717,7 +755,7 @@ def render_diagnose_report(
     else:
         parts.append("这一轮没有仪器发现。")
     if leads:
-        parts += ["## 待核实线索", "", "这些是宿主交卷。", ""]
+        parts += ["## 待核实线索", "", "这些是模型交卷，还不是仪器章程，也不进疗效。", ""]
         parts += _group_blocks(case, leads)
     parts.append(_footer(case))
     return "\n".join(parts)

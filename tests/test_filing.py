@@ -17,12 +17,11 @@ def test_object_issues_file_like_text():
         ["src/a.py"],
     )
     assert problem == ""
-    assert specs == [{
-        "file_path": "src/a.py",
-        "line_start": 2,
-        "line_end": 2,
-        "message": "返回值被丢掉",
-    }]
+    assert specs[0]["file_path"] == "src/a.py"
+    assert specs[0]["line_start"] == 2
+    assert specs[0]["line_end"] == 2
+    assert specs[0]["message"] == "返回值被丢掉"
+    assert specs[0]["severity"] == "major"
     filed, note = file_host_diff(
         [_pending()],
         {"diff.issues": {"issues": [{"file": "src/a.py", "line": 2, "message": "返回值被丢掉"}]}},
@@ -145,10 +144,11 @@ def test_later_round_adds_without_repeating_the_first_issue():
         ["src/a.py"],
         ledger,
     )
-    assert added == [{
-        "file_path": "src/a.py", "line_start": 4, "line_end": 4,
-        "message": "又一条", "check_id": "diff.issues",
-    }]
+    assert len(added) == 1
+    assert added[0]["file_path"] == "src/a.py"
+    assert added[0]["line_start"] == 4
+    assert added[0]["message"] == "又一条"
+    assert added[0]["check_id"] == "diff.issues"
     assert filing_accepted(note)
     assert "病历里共 2 条" in note
     assert "本轮新写入 1 条" in note
@@ -211,3 +211,50 @@ def test_task_sheet_carries_the_contract(tmp_path):
     assert "issues" in llm["contract"]["object"]
     assert CONTRACT_LINE in llm["text"]
     assert "要交出" in llm["text"]
+
+
+def test_rich_entries_keep_siblings_that_fit():
+    specs, note = parse_answer(
+        {
+            "findings": [
+                {
+                    "file_path": "src/a.py",
+                    "line_start": 4,
+                    "summary": "事务在提交前返回",
+                    "severity": "minor",
+                    "symbol": "save",
+                    "evidence": "return before commit",
+                },
+                {"file": "missing.py", "message": "这条路径不在范围内"},
+            ],
+            "diagnoses": [
+                {
+                    "category": "state-split",
+                    "root_cause": "客户端和库的状态字段不是同一套",
+                    "files": ["src/a.py"],
+                    "severity": "major",
+                    "fixability": "manual",
+                },
+                {
+                    "message": "下单是否成功要看支付仓的回调",
+                    "referrals": [{
+                        "target_repo": "D:/pay",
+                        "hypothesis": "回调状态和订单状态不是同一套",
+                    }],
+                },
+            ],
+        },
+        ["src/a.py"],
+    )
+    assert len(specs) == 3
+    assert specs[0]["symbol"] == "save"
+    assert specs[0]["severity"] == "minor"
+    assert specs[0]["evidence"] == "return before commit"
+    assert specs[1]["rule_id"] == "state-split"
+    assert specs[1]["file_path"] == "src/a.py"
+    assert specs[1]["line_start"] == 0
+    assert "处置：manual" in specs[1]["message"]
+    assert specs[2]["file_path"] == ""
+    assert "跨库 D:/pay" in specs[2]["message"]
+    assert "missing.py" in note
+    assert "同批跳过" in note

@@ -64,6 +64,7 @@ async def hosp_register(
     requested_instruments: list[str] | None = None,
     visit_kind: str = "checkup",
     project_root: str = "",
+    assist: dict | None = None,
     ctx: Context | None = None,
 ) -> dict:
     token = bind_host(ctx)
@@ -80,6 +81,7 @@ async def hosp_register(
             requested_instruments=requested_instruments,
             visit_kind=visit_kind,
             project_root=project_root,
+            assist=assist,
         ))
     except HospitalError as e:
         return finish(_guard(e))
@@ -103,6 +105,7 @@ async def hosp_scan(
     size: int = 50,
     order_by: str = "severity desc",
     project_root: str = "",
+    assist: dict | None = None,
     ctx: Context | None = None,
 ) -> dict:
     token = bind_host(ctx)
@@ -116,6 +119,7 @@ async def hosp_scan(
             size=size,
             order_by=order_by,
             project_root=project_root,
+            assist=assist,
         ))
     except HospitalError as e:
         return finish(_guard(e))
@@ -136,6 +140,7 @@ async def hosp_diagnose(
     stage_confirmed: bool = False,
     check_answers: dict | None = None,
     project_root: str = "",
+    assist: dict | None = None,
     ctx: Context | None = None,
 ) -> dict:
     token = bind_host(ctx)
@@ -146,6 +151,7 @@ async def hosp_diagnose(
             stage_confirmed=stage_confirmed,
             project_root=project_root,
             check_answers=check_answers,
+            assist=assist,
         ))
     except HospitalError as e:
         return finish(_guard(e))
@@ -170,6 +176,7 @@ async def hosp_prescribe(
     acceptance_decision: str = "",
     decision: str = "",
     project_root: str = "",
+    assist: dict | None = None,
     ctx: Context | None = None,
 ) -> dict:
     token = bind_host(ctx)
@@ -184,6 +191,7 @@ async def hosp_prescribe(
             acceptance_decision=acceptance_decision,
             decision=decision,
             project_root=project_root,
+            assist=assist,
         ))
     except HospitalError as e:
         return finish(_guard(e))
@@ -210,6 +218,7 @@ async def hosp_dispense(
     stage_confirmed: bool = False,
     follow_autofix: bool = False,
     project_root: str = "",
+    assist: dict | None = None,
     ctx: Context | None = None,
 ) -> dict:
     token = bind_host(ctx)
@@ -226,6 +235,7 @@ async def hosp_dispense(
             stage_confirmed=stage_confirmed,
             follow_autofix=follow_autofix,
             project_root=project_root,
+            assist=assist,
         ))
     except HospitalError as e:
         return finish(_guard(e))
@@ -252,6 +262,7 @@ async def hosp_discharge(
     gate_decision: str = "",
     level: str = "standard",
     project_root: str = "",
+    assist: dict | None = None,
     ctx: Context | None = None,
 ) -> dict:
     token = bind_host(ctx)
@@ -268,6 +279,7 @@ async def hosp_discharge(
             gate_decision=gate_decision,
             level=level,
             project_root=project_root,
+            assist=assist,
         ))
     except HospitalError as e:
         return finish(_guard(e))
@@ -298,6 +310,7 @@ async def hosp_treat(
     visit_kind: str = "checkup",
     project_root: str = "",
     timeout_ms: int = 120_000,
+    assist: dict | None = None,
     ctx: Context | None = None,
 ) -> dict:
     async def _report(amount: float, total: float | None, message: str) -> None:
@@ -323,6 +336,7 @@ async def hosp_treat(
             project_root=project_root,
             timeout_ms=timeout_ms,
             progress=_report,
+            assist=assist,
         ))
     except HospitalError as e:
         return finish(_guard(e))
@@ -346,11 +360,15 @@ async def hosp_case(
     size: int = 50,
     order_by: str = "created_at desc",
     project_root: str = "",
+    assist: dict | None = None,
     ctx: Context | None = None,
 ) -> dict:
+    from ..core.assist import assist_scope
+
     token = bind_host(ctx)
     try:
-        return finish(await _case_query(case_id, status, include, report_id, page, size, order_by, project_root))
+        with assist_scope(assist, project_root):
+            return finish(await _case_query(case_id, status, include, report_id, page, size, order_by, project_root))
     except HospitalError as e:
         return finish(_guard(e))
     except Exception as e:  # noqa: BLE001

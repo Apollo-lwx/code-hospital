@@ -110,9 +110,16 @@ def concluded_by_counts(findings) -> dict[str, int]:
     return counts
 
 
-def source_summary(findings) -> str:
+def source_summary(findings, model_assisted: bool = False) -> str:
+    """仪器条数是章程。模型没交卷写未交卷，不写 0。已交说明但没落到行，不算结论条数。"""
     counts = concluded_by_counts(findings)
-    parts = [f"仪器 {counts['instrument']} 条", f"模型 {counts['host_llm']} 条"]
+    parts = [f"仪器 {counts['instrument']} 条章程"]
+    if counts["host_llm"]:
+        parts.append(f"模型 {counts['host_llm']} 条")
+    elif model_assisted:
+        parts.append("模型已辅助，尚未逐条落成结论")
+    else:
+        parts.append("模型未交卷")
     if counts["external"]:
         parts.append(f"外聘 {counts['external']} 条")
     if counts["code"]:

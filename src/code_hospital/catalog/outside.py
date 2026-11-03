@@ -357,7 +357,8 @@ def _questions(block, notes: list[str], label: str) -> list[dict]:
                 "text": (
                     f"事项 {ident}：{question}\n"
                     f"要交出：{artifact}\n"
-                    "只根据这一阶段报告里已经写出的内容来写。没有的文件不要编。"
+                    "这是事项之一，不是扫描范围。读未读文件后再写，不限于这一项。"
+                    "没读过的文件不要写成已经看过。"
                 ),
             }],
         })

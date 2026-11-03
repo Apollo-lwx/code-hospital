@@ -174,6 +174,14 @@ def cluster_findings(
                 else "code"
             ),
         )
+        if diagnosis.concluded_by == "host_llm":
+            text = "；".join(item.message for item in members if item.message)
+            if text:
+                if matched.confidence < 0.5 and not text.startswith("待复核"):
+                    text = "待复核：" + text
+                diagnosis.root_cause = text[:500]
+            if head.rule_id not in {"", "host.review", "diff.issue"}:
+                diagnosis.category = head.rule_id[:60]
         clusters.append((diagnosis, members))
     clusters.sort(key=lambda pair: (
         0 if any(counts_toward_efficacy(item.concluded_by) for item in pair[1]) else 1,
@@ -241,13 +249,17 @@ async def _file_host_diff(db, root: str, case, answers: dict | None) -> str:
     findings = [
         normalize(
             RawFinding(
-                rule_id="diff.issue",
+                rule_id=spec.get("rule_id") or "diff.issue",
                 message=spec["message"],
                 file_path=spec["file_path"],
                 line_start=spec["line_start"],
                 line_end=spec["line_end"],
-                severity="major",
-                extra={"check_id": spec.get("check_id") or ""},
+                severity=spec.get("severity") or "major",
+                evidence=spec.get("evidence") or "",
+                extra={
+                    "check_id": spec.get("check_id") or "",
+                    "symbol": spec.get("symbol") or "",
+                },
             ),
             "host",
             case.id,
@@ -294,7 +306,7 @@ async def diagnose(
     project_root: str = "",
     check_answers: dict | None = None,
 ) -> dict:
-    """hosp_diagnose 主逻辑。模板归因，不调模型。"""
+    """hosp_diagnose 主逻辑。模板归因。宿主判断从 assist 或 check_answers 交回。"""
     from .reception import resolve_project_root
 
     root = resolve_project_root(project_root)
@@ -425,6 +437,7 @@ async def diagnose(
             md = render_diagnose_report(
                 case, report_id, clusters, stats, use_llm, questions, filing_note,
                 budget_note=(case.coverage or {}).get("budget", {}).get("note") or "",
+                model_assisted=bool((case.coverage or {}).get("model_assisted")),
             )
             report_path = hospital_root(root) / "reports" / case_id / f"diagnose-r{case.round}.md"
             report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -438,10 +451,21 @@ async def diagnose(
                 ),
                 created_at=now_ms(),
             ))
+            from ..catalog.host_scan import record as record_host_scan
+            from ..catalog.host_scan import view as host_scan_view
+            from ..catalog.host_scan import write_plan
+            from ..core.assist import current_assist
+            from ..safety.repo_files import scope_file_list
+
+            scope_files, _skipped = await scope_file_list(root, case.scope_type, case.scope.model_dump())
+            coverage = record_host_scan(case.coverage, scope_files, current_assist(), check_answers)
+            host_scan = host_scan_view(scope_files, coverage)
+            host_scan["plan_path"] = write_plan(root, case_id, scope_files, coverage)
             await db.update_case(
                 case_id,
                 status="diagnosed",
                 pending_gate="" if case.auto_advance else "diagnosed",
+                coverage_json=json.dumps(coverage, ensure_ascii=False),
             )
             return {
                 "case_id": case_id,
@@ -452,6 +476,7 @@ async def diagnose(
                 "stats": stats,
                 "questions": questions,
                 "filing_note": filing_note,
+                "host_scan": host_scan,
                 "report_path": str(report_path),
                 "handoff": handoff(case_id, "diagnosed", case.auto_advance, next_tool="hosp_prescribe"),
             }

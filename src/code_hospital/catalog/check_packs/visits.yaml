@@ -24,6 +24,8 @@ when:
   - pack: ts-checklist
     visit: admission
     any_suffix: [".ts", ".tsx"]
+  - pack: ts-any
+    any_suffix: [".ts", ".tsx"]
   - pack: effective-java
     visit: architecture
     any_suffix: [".java"]
@@ -37,6 +39,9 @@ requires:
   ts-checklist:
     any_suffix: [".ts", ".tsx"]
     missing: ts-checklist 需要 TypeScript 文件，这次没排
+  ts-any:
+    any_suffix: [".ts", ".tsx"]
+    missing: ts-any 需要 TypeScript 文件，这次没排
   effective-java:
     any_suffix: [".java"]
     missing: effective-java 需要 Java 文件，这次没排

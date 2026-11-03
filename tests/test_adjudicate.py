@@ -24,6 +24,30 @@ def test_constant_eval_is_rejected(tmp_path: Path):
     assert "字面量" in finding.message
 
 
+def test_sql_concat_and_any_stay_unconfirmed(tmp_path: Path):
+    (tmp_path / "Query.java").write_text(
+        'class Q { String s(String table) { return "SELECT * FROM " + table; } }\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "view.tsx").write_text(
+        "export const Password = 'Contraseña';\n"
+        "const theme = { token: 'string.sql' };\n"
+        "function grow(x: any) { return x; }\n"
+        'const password = "super-secret-value";\n',
+        encoding="utf-8",
+    )
+    sql = _finding("java-review", "java.sql-concat", "Query.java", 1)
+    label = _finding("ts-review", "ts.hardcoded-secret", "view.tsx", 1)
+    grammar = _finding("ts-review", "ts.hardcoded-secret", "view.tsx", 2)
+    secret = _finding("ts-review", "ts.hardcoded-secret", "view.tsx", 4)
+    adjudicate_findings(str(tmp_path), [sql, label, grammar, secret])
+    assert sql.verdict == "needs_validation" and sql.severity == "minor"
+    assert "注入" in sql.message
+    assert label.verdict == "rejected" and label.severity == "info"
+    assert grammar.verdict == "rejected"
+    assert secret.verdict == "needs_validation" and secret.severity == "minor"
+
+
 def test_untraced_eval_stays_unprescribed(tmp_path: Path):
     (tmp_path / "app.py").write_text("def f(value):\n    return eval(value)\n", encoding="utf-8")
     finding = _finding("security-ruler", "security.exec", "app.py", 2)

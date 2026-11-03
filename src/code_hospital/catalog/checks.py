@@ -150,7 +150,8 @@ def _pack_target(entry) -> tuple[str, str]:
 
 
 def _gate_matches(gate: dict, visit_kind: str, files: list[str] | None) -> bool:
-    if str(gate.get("visit") or "") != visit_kind:
+    wanted = str(gate.get("visit") or "")
+    if wanted and wanted != visit_kind:
         return False
     suffixes = [str(item).lower() for item in (gate.get("any_suffix") or [])]
     if not suffixes:
@@ -459,6 +460,8 @@ def _read_paths(body: str, known: dict) -> set[str]:
 
 
 def _result(item: dict, status: str, executors: list[dict], note: str) -> dict:
+    from ..core.assist import step_slot
+
     return {
         "id": item["id"],
         "question": item["question"],
@@ -468,6 +471,7 @@ def _result(item: dict, status: str, executors: list[dict], note: str) -> dict:
         "status": status,
         "note": note,
         "executors": executors,
+        "assist": step_slot(item),
     }
 
 
@@ -477,7 +481,7 @@ def _llm_task(item: dict, prior: str, own: str) -> str:
     lines = [
         f"事项 {item['id']}：{item['question']}",
         f"要交出：{item['artifact']}",
-        "只根据下面已经交出的事实来写。事实里没有的模块不要编。",
+        "下面是章程事实，不是诊断范围。宿主还要读未读文件，发现问题不限于这一项，也不限于事实里已经点到的模块。",
         CONTRACT_LINE,
     ]
     if prior:
@@ -555,8 +559,30 @@ def _source_files(files: list[str]) -> list[str]:
     return chosen[:300]
 
 
+_LANG_SUFFIX = {
+    ".py": "py", ".java": "java", ".ts": "ts", ".tsx": "tsx",
+    ".js": "js", ".jsx": "jsx", ".go": "go", ".kt": "kt", ".kts": "kt",
+}
+
+
+def _census(files: list[str]) -> dict[str, dict[str, int]]:
+    """按顶层目录和语言计数。Python 的 import 分析仍只用 _source_files。"""
+    census: dict[str, dict[str, int]] = {}
+    for rel in files:
+        path = Path(rel)
+        lang = _LANG_SUFFIX.get(path.suffix.lower())
+        if lang is None:
+            continue
+        if any(part in _SKIP for part in path.parts):
+            continue
+        bucket = census.setdefault(_top(rel), {})
+        bucket[lang] = bucket.get(lang, 0) + 1
+    return census
+
+
 def _arch_map(project_root: str, files: list[str]) -> str:
     root = Path(project_root)
+    census = _census(files)
     modules: dict[str, int] = {}
     entries: list[str] = []
     imported: list[tuple[str, str, str]] = []
@@ -572,15 +598,19 @@ def _arch_map(project_root: str, files: list[str]) -> str:
         for module in _imports(text):
             imported.append((top, module.split(".")[0], rel))
     known = set(modules)
-    lines = ["模块（范围内的源码文件数）："]
-    if modules:
-        for name, count in sorted(modules.items(), key=lambda item: (-item[1], item[0]))[:30]:
-            lines.append(f"- {name}：{count} 个文件")
+    lines = ["模块（按目录和语言计数）："]
+    if census:
+        ranked = sorted(census.items(), key=lambda item: (-sum(item[1].values()), item[0]))[:30]
+        for name, langs in ranked:
+            body = "、".join(f"{lang} {langs[lang]}" for lang in sorted(langs))
+            lines.append(f"- {name}：{body}")
+        if len(census) > 30:
+            lines.append(f"- 其余 {len(census) - 30} 个目录这次没有列出")
     else:
         lines.append("- 范围内没有源码模块")
-    lines.append("入口：")
-    lines.extend(f"- {item}" for item in entries[:20]) if entries else lines.append("- 范围内没有认出入口")
-    lines.append("仓库内部依赖：")
+    lines.append("入口（只认 Python）：")
+    lines.extend(f"- {item}" for item in entries[:20]) if entries else lines.append("- 范围内没有认出 Python 入口")
+    lines.append("Python 跨模块 import：")
     seen: set[tuple[str, str]] = set()
     for source, target, rel in imported:
         if target not in known or source == target or (source, target) in seen:
@@ -588,8 +618,10 @@ def _arch_map(project_root: str, files: list[str]) -> str:
         seen.add((source, target))
         lines.append(f"- {source} → {target}（{rel}）")
     if not seen:
-        lines.append("- 没有认出跨模块 import")
-    lines.append("这是从路径和 import 抽出的事实，结构名称留给宿主 LLM。")
+        lines.append("- 没有认出 Python 跨模块 import")
+    if any(lang != "py" for langs in census.values() for lang in langs):
+        lines.append("Java、TypeScript 和其他语言的依赖这次没有从 import 抽出。")
+    lines.append("这是从路径、语言计数和 Python import 抽出的事实，结构名称留给宿主 LLM。")
     return "\n".join(lines)
 
 

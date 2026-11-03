@@ -62,7 +62,11 @@ def has_location(finding) -> bool:
         line = int(getattr(finding, "line_start", 0) or 0)
     except (TypeError, ValueError):
         line = 0
-    return bool(path) and line >= 1
+    if path and line >= 1:
+        return True
+    if path:
+        return True
+    return bool(str(getattr(finding, "message", "") or "").strip())
 
 
 def screen_diagnoses(diagnoses, findings_by_id: dict, rules: AdmissionRules) -> tuple[list, list[dict]]:

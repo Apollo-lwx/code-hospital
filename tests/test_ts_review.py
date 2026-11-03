@@ -53,18 +53,30 @@ def test_ts_review_reports_text_rules(tmp_path: Path):
     assert {
         "ts.line-length",
         "ts.function-lines",
-        "ts.any",
         "ts.console-log",
         "ts.todo",
         "ts.trailing-whitespace",
         "ts.hardcoded-secret",
         "ts.dom-write",
     } <= _ids(raws)
+    assert "ts.any" not in _ids(raws)
     symbols = {row["symbol"] for row in raws if row["rule_id"] == "ts.function-lines"}
     assert symbols == {"grow", "also"}
     assert sum(1 for row in raws if row["rule_id"] == "ts.console-log") == 1
     assert sum(1 for row in raws if row["rule_id"] == "ts.dom-write") == 2
     assert any("TS 解析未建" in note and "估算" in note for note in notes)
+    assert any("不由正则" in note for note in notes)
+
+
+def test_any_is_left_to_the_host(tmp_path: Path):
+    (tmp_path / "view.tsx").write_text(
+        "function grow(x: any) { return x; }\n"
+        "const detail = connectionDetail as any;\n",
+        encoding="utf-8",
+    )
+    raws, notes = scan_ts_review(str(tmp_path), ["view.tsx"])
+    assert "ts.any" not in _ids(raws)
+    assert any("不由正则" in note for note in notes)
 
 
 def test_comments_strings_and_javascript_stay_out(tmp_path: Path):

@@ -101,6 +101,15 @@ def test_arch_map_sees_cross_module_import(tmp_path):
     arch = next(row for row in rows if row["id"] == "arch.map")
     code = next(item["text"] for item in arch["executors"] if item["kind"] == "code")
     assert "api → core" in code
+    assert "api：py 1" in code
+    java = tmp_path / "server"
+    java.mkdir()
+    (java / "App.java").write_text("class App {}\n", encoding="utf-8")
+    again, _notes = run_checks(str(tmp_path), ["api/routes.py", "core/db.py", "server/App.java"])
+    mapped = next(row for row in again if row["id"] == "arch.map")
+    text = next(item["text"] for item in mapped["executors"] if item["kind"] == "code")
+    assert "server：java 1" in text
+    assert "没有从 import 抽出" in text
     trade = next(row for row in rows if row["id"] == "arch.tradeoff")
     assert trade["status"] == "open"
     llm = next(item for item in trade["executors"] if item["kind"] == "llm")
@@ -336,14 +345,23 @@ def test_admission_schedules_language_checklists(tmp_path):
     assert "py.checklist.behavior" in python_ids
     assert "java.checklist.behavior" not in python_ids
     assert "ts.checklist.behavior" not in python_ids
+    assert "ts.any" not in python_ids
     assert python_notes == ""
     java_ids = [row["id"] for row in load_checks(str(tmp_path), "admission", ["Box.java"])[0]]
     assert "java.checklist.shared" in java_ids
     assert "py.checklist.behavior" not in java_ids
     ts_ids = [row["id"] for row in load_checks(str(tmp_path), "admission", ["app.tsx"])[0]]
     assert "ts.checklist.dom" in ts_ids
+    assert "ts.any" in ts_ids
     checkup_ids = [row["id"] for row in load_checks(str(tmp_path), "checkup", ["src/a.py"])[0]]
     assert "py.checklist.behavior" not in checkup_ids
+    assert "ts.any" not in checkup_ids
+    general_ids = [row["id"] for row in load_checks(str(tmp_path), "general", ["app.tsx"])[0]]
+    assert "ts.any" in general_ids
+    any_item = next(row for row in load_checks(str(tmp_path), "general", ["app.tsx"])[0] if row["id"] == "ts.any")
+    assert any_item["executors"] == ["llm"]
+    assert any_item["group"] == "checklist"
+    assert "不是扫描范围" in any_item["artifact"]
 
 
 def test_open_checklist_keeps_filing_unclosed(tmp_path):

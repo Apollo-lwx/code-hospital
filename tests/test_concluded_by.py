@@ -72,7 +72,7 @@ def test_scan_report_counts_sources_and_ranks_host_last():
     )
     instrument = _finding(id="fnd_ruff", severity="nit", file_path="a.py")
     md = render_scan_report(case, "rpt_1", [], [host, instrument], [])
-    assert "仪器 1 条 / 模型 1 条" in md
+    assert "仪器 1 条章程 / 模型 1 条" in md
     assert "待核实线索" in md
     detail = md.split("## 发现明细", 1)[1]
     assert detail.find("a.py") < detail.find("z.py")
@@ -101,12 +101,12 @@ def test_diagnose_report_splits_pending_leads():
         case, "rpt_1", [(host_dx, [host]), (instrument_dx, [instrument])],
         {"total_findings": 2, "clusters": 2, "autofix": 0, "llm_patch": 0, "manual": 2},
     )
-    assert "仪器 1 条 / 模型 1 条" in md
+    assert "仪器 1 条章程 / 模型 1 条" in md
     body = md.split("## 问题分组", 1)[1]
     pending = body.split("## 待核实线索", 1)
     assert "F401" in pending[0]
     assert "diff.issue" in pending[1]
-    assert "这些是宿主交卷。" in pending[1]
+    assert "这些是模型交卷，还不是仪器章程，也不进疗效。" in pending[1]
 
 
 def test_semantic_conclusion_does_not_share_an_instrument_diagnosis():
@@ -145,7 +145,8 @@ def test_stamp_source_counts_lands_on_the_ledger():
     assert ledger["concluded_by_counts"] == {
         "instrument": 1, "host_llm": 1, "external": 0, "code": 0,
     }
-    assert source_summary([_finding()]) == "仪器 1 条 / 模型 0 条"
+    assert source_summary([_finding()]) == "仪器 1 条章程 / 模型未交卷"
+    assert source_summary([_finding()], model_assisted=True) == "仪器 1 条章程 / 模型已辅助，尚未逐条落成结论"
 
 
 @pytest.mark.asyncio

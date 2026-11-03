@@ -60,13 +60,59 @@ _CLASS = {
 }
 
 
+_CONTEXT_RULES = frozenset({
+    "java.sql-concat",
+    "java.hardcoded-secret",
+    "ts.hardcoded-secret",
+})
+_GRAMMAR_TOKEN = re.compile(r"^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)+$")
+_LETTER_WORD = re.compile(r"[^\W\d_]+$", re.UNICODE)
+
+
 def adjudicate_findings(project_root: str, findings: list) -> None:
-    """就地写入裁决。其他仪器的发现保持原样。"""
+    """就地写入裁决。安全科和点名的语言尺会改结论，其余仪器保持原样。"""
     for finding in findings:
+        if finding.rule_id in _CONTEXT_RULES:
+            verdict, because, severity, attack = _review_context(project_root, finding)
+            _apply(finding, verdict, because, severity, attack)
+            continue
         if finding.tool not in _SECURITY_TOOLS and not _unconfirmed_deserialize(finding):
             continue
         verdict, because, severity = _review(project_root, finding)
         _apply(finding, verdict, because, severity, _CLASS.get(finding.rule_id, ""))
+
+
+def _review_context(project_root: str, finding) -> tuple[str, str, str, str]:
+    """一行正则证不上用途时，不写成必须先处理或明确缺陷。"""
+    if finding.rule_id == "java.sql-concat":
+        return (
+            "needs_validation",
+            "未证实拼进来的是低信任的值。标识符、测试和组装好的语句不能写成注入",
+            "minor",
+            "injection",
+        )
+    return _review_literal_name(project_root, finding)
+
+
+def _review_literal_name(project_root: str, finding) -> tuple[str, str, str, str]:
+    line = _read_line(project_root, finding.file_path, finding.line_start)
+    if line is None:
+        return "needs_validation", "这一行现在读不到，不能排除密钥还在", "minor", "secret-in-source"
+    literals = [item.strip() for item in _QUOTED.findall(line)]
+    if literals and all(_named_literal(item) for item in literals):
+        return "rejected", "这一行是界面文案、单词或语法类别，不是密钥材料", "info", ""
+    return (
+        "needs_validation",
+        "未证实这一行是可用的密钥，先不要当成必须先处理",
+        "minor",
+        "secret-in-source",
+    )
+
+
+def _named_literal(literal: str) -> bool:
+    if _GRAMMAR_TOKEN.match(literal):
+        return True
+    return bool(_LETTER_WORD.fullmatch(literal)) and len(literal) <= 16
 
 
 def _apply(finding, verdict: str, because: str, severity: str, attack_class: str) -> None:

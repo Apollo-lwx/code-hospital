@@ -151,23 +151,30 @@ def remember_capabilities(ledger: dict | None, prior: dict | None = None) -> dic
 
 
 def finish(payload):
-    """未支持 elicitation 时给出可见降级。支持或尚未探测时原样返回。"""
+    """未支持 elicitation 时给出可见降级。每个阶段再挂上宿主辅助位。"""
+    from ..core.assist import attach_ai, current_assist, current_root
+
     if not isinstance(payload, dict):
         return payload
     probe = _probe.get()
-    if not probe or probe.get("elicitation"):
-        return payload
-    stamped = dict(payload)
-    stamped["degraded"] = True
-    stamped["degraded_reason"] = GATE_LINE
-    return stamped
+    stamped = payload
+    if probe and not probe.get("elicitation"):
+        stamped = dict(payload)
+        stamped["degraded"] = True
+        stamped["degraded_reason"] = GATE_LINE
+    return attach_ai(stamped, assist=current_assist(), project_root=current_root())
 
 
 def hosted(fn):
-    """科室出口：探测已绑定时给返回值打上降级标记。"""
+    """科室出口：探测已绑定时给返回值打上降级标记，并收下这次宿主辅助。"""
 
     @wraps(fn)
     async def wrapper(*args, **kwargs):
-        return finish(await fn(*args, **kwargs))
+        from ..core.assist import assist_scope
+
+        assist = kwargs.pop("assist", None)
+        root = str(kwargs.get("project_root") or "")
+        with assist_scope(assist, root):
+            return finish(await fn(*args, **kwargs))
 
     return wrapper

@@ -9,7 +9,6 @@ _SECRET = re.compile(
     r"""(?i)\b(password|passwd|secret|api[_-]?key|apikey|token|private[_-]?key)\b\s*[:=]\s*["']([^"']*)["']"""
 )
 _PLACEHOLDER = re.compile(r"^(x+|changeme|todo|placeholder|your[_-]?key|password|secret)$", re.I)
-_ANY = re.compile(r"(?::\s*any\b|\bas\s+any\b|<\s*any\b|,\s*any\s*[,>]|\bany\s*\[\])")
 _CONSOLE = re.compile(r"\bconsole\.log\s*\(")
 _TODO = re.compile(r"\b(?:TODO|FIXME|HACK|XXX)\b")
 _INNER = re.compile(r"\binnerHTML\s*=")
@@ -31,6 +30,7 @@ def scan_ts_review(project_root: str, files: list[str]) -> tuple[list[dict], lis
     notes = [
         "TS 解析未建，函数长度按 function 和 => 估算。花括号要写在同一行，类方法若没有这两种写法就估算不到。"
         "文件行数仍由 structure-ruler 计。",
+        "any 不由正则判断。范围内有 TypeScript 时，交给宿主看它是类型边界还是抹掉了已有类型。",
     ]
     root = Path(project_root)
     ts_files = [rel for rel in files if Path(rel).suffix.lower() in _EXTS]
@@ -63,8 +63,6 @@ def _file(text: str, file_path: str, line_length: int, function_lines: int, raws
         if _TODO.search(line):
             _add(raws, "ts.todo", "留下了 TODO、FIXME、HACK 或 XXX", file_path, index, index, "nit")
         code = masked[index - 1] if index - 1 < len(masked) else ""
-        if _ANY.search(code):
-            _add(raws, "ts.any", "用了 any", file_path, index, index, "major")
         if _CONSOLE.search(code):
             _add(raws, "ts.console-log", "留下了 console.log", file_path, index, index, "minor")
         if _INNER.search(code):

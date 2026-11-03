@@ -199,6 +199,15 @@ async def collect_findings(
         root,
     ))
     findings.sort(key=finding_rank)
+    from ..core.assist import model_assisted, model_findings
+
+    findings.extend(model_findings(case.id, report_id, root, files))
+    from ..core.assist import format_notes
+
+    limitations.extend(format_notes())
+    if model_assisted():
+        ledger["model_assisted"] = True
+    findings.sort(key=finding_rank)
     stamp_findings(findings)
     ledger = stamp_source_counts(ledger, findings)
     hired = [row["hired"] for row in devices if row.get("hired")]
@@ -823,11 +832,23 @@ async def scan(
         from ..catalog.loop import note_recurrence
 
         ledger = note_recurrence(root, findings, limitations, ledger)
+        from ..catalog.host_scan import record as record_host_scan
+        from ..catalog.host_scan import view as host_scan_view
+        from ..catalog.host_scan import write_plan
+        from ..core.assist import current_assist
+
+        ledger = record_host_scan(ledger, files, current_assist(), None)
+        host_scan = host_scan_view(
+            files, ledger, [str(row.get("question") or row.get("id") or "") for row in checks],
+        )
+        host_scan["plan_path"] = write_plan(root, case_id, files, ledger)
 
         # 检验报告（PR 可贴）
         case.updated_at = now_ms()
         md = render_scan_report(
             case, report_id, devices, findings, limitations, memory_context, checks,
+            model_assisted=bool(ledger.get("model_assisted")),
+            host_scan=host_scan,
         )
         report_path = hospital_root(root) / "reports" / case_id / "scan-r1.md"
         report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -873,6 +894,7 @@ async def scan(
             "suggested_acceptance_commands": detect_acceptance_commands(root),
             "memory_context": memory_context,
             "checks": checks,
+            "host_scan": host_scan,
             "report_path": str(report_path),
             "handoff": handoff(case_id, "scanned", case.auto_advance, next_tool="hosp_diagnose"),
         })
