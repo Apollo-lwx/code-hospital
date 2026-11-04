@@ -369,13 +369,16 @@ async def hosp_market(
     project_root: str = "",
     question_id: str = "",
     answer: str = "",
+    choice: str = "",
+    requisition_id: str = "",
     ctx: Context | None = None,
 ) -> dict:
     token = bind_host(ctx)
     try:
         return finish(await _market(
             action, manifest_path, instrument_id, confirm, project_root,
-            question_id=question_id, answer=answer,
+            question_id=question_id, answer=answer, choice=choice,
+            requisition_id=requisition_id,
         ))
     except HospitalError as e:
         return finish(_guard(e))
@@ -387,7 +390,8 @@ async def hosp_market(
 
 async def _market(action: str, manifest_path: str, instrument_id: str,
                   confirm: bool, project_root: str,
-                  question_id: str = "", answer: str = "") -> dict:
+                  question_id: str = "", answer: str = "", choice: str = "",
+                  requisition_id: str = "") -> dict:
     """能力市场。装仪器不改仓库，装进来一律先跑影子。
 
     `add` **不是一步装完**：先问人。医院不替客户决定「要不要让第三方读这个仓库」，
@@ -427,14 +431,28 @@ async def _market(action: str, manifest_path: str, instrument_id: str,
                 target=str(doc.get("id") or "manifest_path"),
                 next_action="按问题清单改 manifest 再装；缺字段就补，不要为绕过校验改 id",
             )
+        requisition = await _resolve_requisition(root, requisition_id)
+        if requisition:
+            # 问之前先查：补不上这条启事的仪器，不能把「它是来补 .kt 的」
+            # 写在问题上让人点同意——假前提换来的同意不算同意。
+            why = market.requisition_problem(doc, requisition)
+            if why:
+                raise invalid_operation(
+                    why, target="requisition_id",
+                    next_action=(
+                        "换一台声明覆盖这类文件的仪器，或者这次不带 requisition_id 装；"
+                        "但别把它记成已招到——它查不动这一类"
+                    ),
+                )
         if not question_id:
             # 第一次调 add：不写盘，先问。宿主拿到 pending_question 去问用户，
-            # 回答后带上 question_id + answer 再来。票据一次性，用掉即作废。
-            asked = _install_question(doc)
+            # 回答后带上 question_id + choice + answer 再来。票据一次性，用掉即作废。
+            asked = _install_question(doc, requisition)
             qid = str(asked["question"]["id"])
             asked["resume_hint"] = (
                 f'hosp_market(action="add", manifest_path="{manifest_path}", '
-                f'question_id="{qid}", answer="<用户的原话>")'
+                f'question_id="{qid}", choice="<用户选的那个：install / skip / pause>", '
+                f'answer="<用户的原话>")'
             )
             presented = await present(asked)
             if presented.stop:
@@ -444,6 +462,7 @@ async def _market(action: str, manifest_path: str, instrument_id: str,
                 return {
                     "ok": False,
                     "id": str(doc.get("id") or ""),
+                    "choice": presented.choice,
                     "note": "没装。用户选了暂不安装，这一类文件继续记为未查。",
                 }
             consent = {"answer": presented.text or "用户当场确认安装", "via": "elicitation"}
@@ -454,6 +473,28 @@ async def _market(action: str, manifest_path: str, instrument_id: str,
                     why, target="question_id",
                     next_action="先调一次 add（不带 question_id）把问题交给用户，再带回答回来",
                 )
+            picked = choice.strip().lower()
+            if not picked:
+                # 只给原话不给选择：医院读不出「暂停」和「装」的分别，也不该去读。
+                # 猜错的代价是替用户签了字，所以宁可拒绝一次。
+                raise invalid_operation(
+                    "带 question_id 回来时还要带 choice，说明用户选了什么",
+                    target="choice",
+                    next_action='choice="install" 才装；用户选不装或稍后再定，就原样带回 "skip" / "pause"',
+                )
+            if picked not in ("install", "skip", "pause"):
+                raise invalid_operation(
+                    f"choice「{picked}」认不出来，只能是 install / skip / pause",
+                    target="choice",
+                    next_action="把用户的选项原样带回来，不要自己归纳成别的词",
+                )
+            if picked != "install":
+                return {
+                    "ok": False,
+                    "id": str(doc.get("id") or ""),
+                    "choice": picked,
+                    "note": "没装。用户选了暂不安装，这一类文件继续记为未查。",
+                }
             if not answer.strip():
                 raise invalid_operation(
                     "安装要人点头：把用户的原话带回来（answer）",
@@ -461,7 +502,7 @@ async def _market(action: str, manifest_path: str, instrument_id: str,
                     next_action="不要自己编一个回答；把问题原样给用户，再把他的选择带回来",
                 )
             consent = {"answer": answer, "via": "convention"}
-        got = market.install(root, manifest_path, consent=consent)
+        got = market.install(root, manifest_path, consent=consent, requisition=requisition)
         if not got.get("ok"):
             raise invalid_operation(
                 "manifest 没装成：" + "；".join(got.get("problems") or ["未知原因"]),
@@ -671,7 +712,44 @@ def _approval_question(check: dict, rows: list[dict], ref: str) -> dict:
     )
 
 
-def _install_question(doc: dict) -> dict:
+async def _resolve_requisition(root: str, requisition_id: str) -> dict | None:
+    """把宿主报上的 requisition_id 对回覆盖账里的那条启事。
+
+    只收 id，扩展名从病例的覆盖账里查——不收宿主给的扩展名。
+    否则宿主可以报一条「覆盖 .kt」的启事、装一台只查 .py 的仪器，
+    校验就成了摆设。
+
+    对不上就报错，不退回「当作没提」：悄悄降级会让宿主以为接上了，
+    下一轮报告里那条启事还是没人认领，而它已经花了一次安装。
+    """
+    if not requisition_id:
+        return None
+    from ..catalog import ledger
+    from ..core.errors import invalid_operation
+    from ..storage.db import Database
+
+    async with Database(root) as db:
+        cases, _ = await db.list_cases(root, size=20)
+        for case in cases:
+            for req in ledger.requisitions(case.coverage):
+                if req["gap_id"] == requisition_id:
+                    return {
+                        "gap_id": req["gap_id"],
+                        "extensions": req["extensions"],
+                        "case_id": case.id,
+                        "file_count": req["file_count"],
+                    }
+    raise invalid_operation(
+        f"覆盖账里没有这条启事：{requisition_id}",
+        target="requisition_id",
+        next_action=(
+            "从 hosp_case(include=\"requisitions\") 或报告里把 gap id 原样抄回来；"
+            "对不上就先别填这个参数——不带它也能装，只是不记成回应某条启事"
+        ),
+    )
+
+
+def _install_question(doc: dict, requisition: dict | None = None) -> dict:
     """把「要装的是个什么东西」原样摆到人面前，再问装不装。
 
     manifest 是客户提供的文件，按不可信输入处理：id 与扩展名都过一遍净化，
@@ -694,11 +772,16 @@ def _install_question(doc: dict) -> dict:
             ("network", "联网"), ("executes_code", "执行代码"),
         ) if risk.get(key)
     ) or "没声明任何风险动作"
+    purpose = ""
+    if requisition:
+        want = "、".join(f".{item}" for item in requisition.get("extensions") or [])
+        purpose = f"它是来补那条启事的：本次有 {requisition.get('file_count')} 个 {want} 文件没人查。\n"
     return ask(
         "install_instrument",
         (
             f"要装一台第三方仪器「{ident}」，运行方式 {transport}，声明覆盖 {what}。\n"
             f"风险声明：{flags}。\n"
+            f"{purpose}"
             "装上先进影子期：会跑、结果只进覆盖账，不进报告、不进处方、不进疗效。"
             "样本够了还要你签字才能转正。\n"
             "装不装？"
@@ -709,7 +792,7 @@ def _install_question(doc: dict) -> dict:
             ("pause", "暂停，稍后再定"),
         ],
         "不装，什么都不发生（不写文件、不写索引）",
-        "把用户的回答带回来再装",
+        "把用户的选择带回来：choice=\"install\" | \"skip\" | \"pause\"",
     )
 
 
@@ -830,6 +913,23 @@ async def _case_query(
                 for r in reports
                 if not report_id or r.id == report_id
             ]
+        elif include == "requisitions":
+            # 招聘启事的机器可读版本。报告里那句话是给人看的，这个块是给宿主接的：
+            # 装仪器时要报 `requisition_id`，值只能从这儿（或报告）原样抄，不能自己编。
+            from ..catalog import ledger as _ledger
+            from ..catalog.market import claimed_by as _claimed_by
+
+            rows = []
+            for req in _ledger.requisitions(case.coverage):
+                rows.append({
+                    **req,
+                    "claimed_by": _claimed_by(root, req["gap_id"]),
+                    "install_hint": (
+                        f'hosp_market(action="add", manifest_path="<manifest>", '
+                        f'requisition_id="{req["gap_id"]}")'
+                    ),
+                })
+            result["requisitions"] = rows
         return result
 
 

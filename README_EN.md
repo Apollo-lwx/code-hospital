@@ -131,7 +131,7 @@ Report artifacts land in `.hospital/reports/<case_id>/` (the lab report can be p
 | `hosp_dispense` | Treatment: patent medicine (`ruff --fix`) edits code dose by dose; decoction takes a token, then `submit_patch` passes four validations before landing; over-the-counter items are skipped | ✅ patent medicine & decoction submission |
 | `hosp_discharge` | Follow-up diff + discharge gate co-signing + follow-up plan. Readmits if iatrogenic new symptoms appear and the course isn't finished | ✅ follow-up & gate |
 | `hosp_treat` | One-click full course (auto mode): low-risk self-approves, high-risk downgrades to over-the-counter; decoction stops at `need_patch` | ✅ orchestration |
-| `hosp_market` | Capability market: install / verify / list / review / promote / retire / restore instruments (shipped ones too, retirement is reversible); installing asks the user first, everything starts in probation | ✅ shadow period |
+| `hosp_market` | Capability market: install / verify / list / review / promote / retire / restore instruments (shipped ones too, retirement is reversible); installing asks the user first and only their answer installs, everything starts in probation | ✅ shadow period |
 | `hosp_rule` | Institutional rules: count deviations, show enforceable checks, turn an approved one into a server-side hard check (judgement lives in rsi) | ✅ discipline hardening |
 
 ## Roadmap

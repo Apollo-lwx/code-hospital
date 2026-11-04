@@ -208,6 +208,11 @@ pagination via $page / $size / $orderBy.
 When the case has an open gate, the result also carries gate{artifact, artifact_digest,
 requires_ack} — this is the supported way to recover a lost artifact digest before
 confirming a stage.
+
+include="requisitions" returns the open capability gaps that are worth hiring for
+(gap_id, extensions, file_count, sample files, claimed_by). Carry a gap_id verbatim into
+hosp_market(action="add", requisition_id=...) to record that an install answers that
+requisition. Do not invent a gap_id.
 """
 
 
@@ -280,10 +285,17 @@ action:
 - add: install a manifest file (manifest_path). **It does not install on the first call.**
   Installing a third party means handing it your repository, so the first call asks the user
   and returns pending_question - the description of the device, its transport, its extensions
-  and its declared risks, nothing else. Call again with question_id and answer (the user's own
-  words) to finish. Tickets are single-use and expire in 24 hours; without one the install is
-  refused. Whatever the user said is stored on the instrument record, so "who agreed to this"
-  stays answerable afterwards. Rejected if it reuses an existing id, asks for builtin transport,
+  and its declared risks, nothing else. Call again with question_id, choice and answer to
+  finish. `choice` is the structured selection (install / skip / pause) and is what actually
+  decides: answer alone is never read for meaning, because "pause" and "install" cannot be
+  told apart from prose and guessing wrong signs for the user. Tickets are single-use and
+  expire in 24 hours; without one the install is refused. Whatever the user said is stored on
+  the instrument record, so "who agreed to this" stays answerable afterwards.
+  Optional requisition_id ties the install to an open hiring requisition (see
+  hosp_case include="requisitions"). It is verified: a device that does not declare coverage
+  for the extensions that requisition named is refused, so "hired" can never mean "still
+  unchecked". Leave it out for an instrument the customer bought on their own.
+  Rejected if it reuses an existing id, asks for builtin transport,
   points a command outside PATH, or carries shell metacharacters in args. A third-party manifest
   claiming tier=core is quietly downgraded to probation - core belongs to shipped instruments
   only. A device that declares writes_repo installs but will not run during probation (the

@@ -211,10 +211,20 @@ this case concludes, so never call it mid-visit.
 - `add` **does not install on the first call**. It returns `pending_question`
   (kind `install_instrument`): what the device is, what it declares to cover, what it
   declares to touch. Put that question to the user **verbatim**, then call `add` again with
-  `question_id` and `answer` (the user's own words). Do not answer it yourself, do not
-  invent a reason, do not skip the question because "the user obviously wants this" —
-  installing a third party hands it the repository. Tickets are single-use and expire in
-  24 hours. If the user says no, stop: that part of the range stays recorded as unchecked.
+  `question_id`, `choice` and `answer` (the user's own words). `choice` is what decides:
+  only `"install"` installs; `"skip"` and `"pause"` both leave the repository untouched.
+  Never derive `choice` from what the user said — "先别装，等等看" and "装吧，别等了" both
+  contain the word for install, and guessing wrong signs on their behalf. Do not answer the
+  question yourself, do not invent a reason, do not skip it because "the user obviously
+  wants this" — installing a third party hands it the repository. Tickets are single-use and
+  expire in 24 hours. If the user says no, stop: that part of the range stays recorded as
+  unchecked. It will show up as a hiring requisition again next scan — that is the fact not
+  having changed, not the hospital nagging. Do not suppress it, and do not decide on your own
+  when to bring it up again.
+- `add` accepts an optional `requisition_id` when the install answers a hiring requisition.
+  Take the value verbatim from `hosp_case(include="requisitions")`; never invent one, and
+  never pass a device that does not declare coverage for the extensions that requisition
+  named — it is refused, because "hired" must not come to mean "still unchecked".
 - `add` refuses an id that collides with a core instrument. Do not work around it by
   renaming; a device that impersonates a shipped ruler corrupts every later diff.
 - `retire` keeps the manifest and the record. Do not delete files under

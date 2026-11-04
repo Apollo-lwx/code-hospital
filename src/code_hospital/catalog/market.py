@@ -66,6 +66,9 @@ def installed(project_root: str) -> dict[str, dict]:
         doc["origin"] = "market"
         doc["trial"] = meta.get("trial") if isinstance(meta.get("trial"), dict) else {}
         doc["verdict"] = meta.get("verdict") if isinstance(meta.get("verdict"), dict) else {}
+        # 带出「它回应的是哪条启事」，不带出 consent：用户原话留在 index 里供审计，
+        # 不进任何往外走的路径——那是别人说的句子，不是这台仪器的属性。
+        doc["requisition"] = meta.get("requisition") if isinstance(meta.get("requisition"), dict) else {}
         out[ident] = doc
     # 内置仪器没有 manifest 文件，退役只登记在 index 里。不并进来，
     # `hosp_market list` 会继续说「还没装过任何第三方仪器」，客户以为没退成。
@@ -144,11 +147,7 @@ def claims(project_root: str) -> dict[str, dict]:
     for ident, doc in installed(project_root).items():
         if doc.get("problems") or doc.get("tier") not in ("probation", "active"):
             continue
-        state = (
-            "已转正" if doc.get("tier") == "active"
-            else f"影子期第 {int((doc.get('trial') or {}).get('runs') or 0)} 轮"
-        )
-        row = {"instrument": ident, "state": state, "tier": doc.get("tier")}
+        row = {"instrument": ident, "state": _state_of(doc), "tier": doc.get("tier")}
         for ext in doc.get("extensions") or []:
             key = str(ext).lstrip(".").lower()
             if not key:
@@ -172,7 +171,12 @@ def names(project_root: str = "") -> set[str]:
     return taken
 
 
-def install(project_root: str, source: str | Path, consent: dict | None = None) -> dict:
+def install(
+    project_root: str,
+    source: str | Path,
+    consent: dict | None = None,
+    requisition: dict | None = None,
+) -> dict:
     """装一份 manifest。返回 {ok, id, tier, problems, note}。
 
     失败不落盘。成功只落 manifest 原文加一条 index 记录，
@@ -181,6 +185,11 @@ def install(project_root: str, source: str | Path, consent: dict | None = None) 
     `consent` 是「人点过头」的痕迹，由调用方（MCP 层）负责取得并核对票据后传进来。
     这里只负责把它记进 index：装了什么、谁点的头、原话是什么。
     装了不记，事后就答不出「这台是谁同意装的」——那和没问过一样。
+
+    `requisition` 是「这台是来回应哪条招聘启事的」：`{gap_id, extensions}`。
+    由调用方从当前病例的覆盖账里查出来，不是宿主随便给的。装了要校验它真查得动
+    这条启事点名的类型——说了能关、实际不查，装上就是「已招到」的假象：
+    报告不再提这件事，而文件仍然没人查。那是整条招聘闭环里最难看出来的一种错。
     """
     doc, problems = mf.load_file(source)
     if problems:
@@ -194,6 +203,10 @@ def install(project_root: str, source: str | Path, consent: dict | None = None) 
             "problems": [f"id「{ident}」已被占用；第三方仪器不能顶替已有仪器，换个 id 再装"],
             "note": "",
         }
+    if requisition:
+        why = requisition_problem(doc, requisition)
+        if why:
+            return {"ok": False, "id": ident, "problems": [why], "note": ""}
 
     base = market_root(project_root)
     (base / _MANIFEST_DIR).mkdir(parents=True, exist_ok=True)
@@ -218,6 +231,14 @@ def install(project_root: str, source: str | Path, consent: dict | None = None) 
             "via": str(consent.get("via") or ""),
             "at": int(consent.get("at") or time.time() * 1000),
         }
+    if requisition:
+        index[ident]["requisition"] = {
+            "gap_id": str(requisition.get("gap_id") or "")[:80],
+            "extensions": sorted({
+                str(item).lstrip(".").lower() for item in requisition.get("extensions") or []
+            } - {""}),
+            "at": int(time.time() * 1000),
+        }
     _write_index(project_root, index)
     return {
         "ok": True,
@@ -226,6 +247,55 @@ def install(project_root: str, source: str | Path, consent: dict | None = None) 
         "problems": [],
         "note": _install_note(doc, index[ident]),
     }
+
+
+def requisition_problem(doc: dict, requisition: dict) -> str:
+    """这台仪器真的查得动那条启事点名的类型吗。
+
+    两种放行：manifest 声明了这些扩展名，或者声明 `extensions: []`——那是
+    「全类型口径」，它声称自己什么都查。后者不加检查，但也不算白说：
+    它跑起来的设备行会自己说话。
+
+    调用方在**问用户之前**就该问这一句：一台补不上这条启事的仪器，
+    却把「它是来补 .kt 启事的」写在问题上让人做决定，那就是拿假前提换同意。
+    """
+    want = {str(item).lstrip(".").lower() for item in requisition.get("extensions") or []} - {""}
+    if not want:
+        return ""
+    declared = {str(item).lstrip(".").lower() for item in doc.get("extensions") or []} - {""}
+    if not declared:
+        return ""
+    if want & declared:
+        return ""
+    listed = "、".join(f".{item}" for item in sorted(want))
+    own = "、".join(f".{item}" for item in sorted(declared))
+    return (
+        f"这台只声明查 {own}，不查 {listed}；装了关不掉那条启事，"
+        "不能记成已招到。要么换一台，要么不回应这条启事"
+    )
+
+
+def claimed_by(project_root: str, gap_id: str) -> dict | None:
+    """哪台仪器在装的时候点名回应了这条启事。
+
+    精确到启事，不靠「它大概覆盖这个扩展名」去猜：一台仪器可能覆盖五种类型，
+    只回应了其中一条，按扩展名推会把另外几条也记成「已招到」，而它们没人管。
+    """
+    if not gap_id:
+        return None
+    for ident, doc in sorted(installed(project_root).items()):
+        if doc.get("problems") or doc.get("tier") not in ("probation", "active"):
+            continue
+        if str((doc.get("requisition") or {}).get("gap_id") or "") != gap_id:
+            continue
+        return {"instrument": ident, "state": _state_of(doc), "tier": doc.get("tier")}
+    return None
+
+
+def _state_of(doc: dict) -> str:
+    if doc.get("tier") == "active":
+        return "已转正"
+    return f"影子期第 {int((doc.get('trial') or {}).get('runs') or 0)} 轮"
 
 
 def _install_note(doc: dict, meta: dict) -> str:
@@ -815,6 +885,7 @@ __all__ = [
     "TICKET_TTL",
     "blocked_reason",
     "claims",
+    "claimed_by",
     "consume_question",
     "install",
     "installed",
@@ -826,6 +897,7 @@ __all__ = [
     "note_run",
     "plan",
     "promote",
+    "requisition_problem",
     "retire",
     "restore",
     "retired_ids",

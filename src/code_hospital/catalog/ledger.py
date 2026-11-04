@@ -168,10 +168,11 @@ def note_memory(coverage: dict, *, channel: str = "", owner: str = "", **fields)
 
 
 def _gap_id(kind: str, signals: list[str]) -> str:
-    """缺口按「哪一类问题」归并，不按扩展名拆开。
+    """缺口 id：一种问题 + 它点名的信号。
 
-    同一条规则命中 ts 和 tsx，是同一个能力缺口；招聘时招的是一台仪器，
-    不是给每种扩展名各招一台。
+    缺口按扩展名分别记账，所以同一种问题在 `.kt` 和 `.rb` 上是两条缺口、
+    两个 id。合并过一版，代价是「这条启事」的身份变成「本轮缺的全部扩展名」：
+    装一台补上一类，id 就变成另一个，跨轮追不住，也接不上安装记录。
     """
     key = "|".join([kind, ",".join(sorted(signals))])
     return "gap-" + hashlib.sha1(key.encode("utf-8")).hexdigest()[:10]
@@ -729,7 +730,7 @@ def recruitment_lines(coverage: dict | None, project_root: str = "") -> list[str
     否则读者分不清「没人管」和「已在试用」。认领关系从 manifest 的 extensions 推出来，
     不另存一张表——存了就有两份记录，迟早有一份是旧的。
     """
-    from .market import claims
+    from .market import claimed_by, claims
 
     found = requisitions(coverage)
     claimed = claims(project_root) if project_root else {}
@@ -740,7 +741,11 @@ def recruitment_lines(coverage: dict | None, project_root: str = "") -> list[str
         what = ("、".join(f".{item}" for item in exts)) if exts else "这一类检查"
         count = int(req["file_count"])
         body = f"招聘启事：本次范围含 {count} 个 {what} 文件，在岗仪器都不看这类文件。"
-        holder = next((claimed[ext] for ext in exts if ext in claimed), None)
+        # 先认「装的时候点名回应了这条」的，再退到「覆盖这类文件的」。
+        # 前者是声明，后者是推断；推断只用来避免说反话（明明有台在跑却说没人管）。
+        holder = claimed_by(project_root, req["gap_id"]) if project_root else None
+        if not holder:
+            holder = next((claimed[ext] for ext in exts if ext in claimed), None)
         if holder:
             body += (
                 f"已招 {holder['instrument']}（{holder['state']}）。"
