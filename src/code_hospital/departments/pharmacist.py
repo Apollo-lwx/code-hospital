@@ -20,6 +20,7 @@ import sys
 from pathlib import Path
 
 from ..adapters.base import AdapterError, _run
+from ..api.capabilities import digest_file
 from ..core.algorithms import (
     CheckResult,
     PatchParseError,
@@ -137,7 +138,10 @@ def _suggest_follow(payload: dict) -> dict:
     return copied
 
 
-def _handoff(case_id: str, item_id: str, next_item_id: str, auto_advance: bool) -> dict:
+def _handoff(
+    case_id: str, item_id: str, next_item_id: str, auto_advance: bool,
+    artifact_digest: str = "",
+) -> dict:
     waiting = bool(next_item_id) and not auto_advance
     return {
         "stage": f"dose:{item_id}",
@@ -148,6 +152,10 @@ def _handoff(case_id: str, item_id: str, next_item_id: str, auto_advance: bool) 
             f'请用户确认本味护理记录。确认后 hosp_dispense(prescription_id=…, '
             f'stage_confirmed=true) 继续下一味 {next_item_id}。'
         )[:300] if waiting else "",
+        "artifact_digest": artifact_digest if waiting else "",
+        "ack_hint": (
+            f"同时带上 ack=\"{artifact_digest}\"。院规固化阶段回执后，不带会被拒绝。"
+        ) if waiting and artifact_digest else "",
     }
 
 
@@ -180,6 +188,7 @@ async def dispense(
     resolution: str = "",
     dry_run: bool = False,
     stage_confirmed: bool = False,
+    ack: str = "",
     follow_autofix: bool = False,
     project_root: str = "",
 ) -> dict:
@@ -215,14 +224,18 @@ async def dispense(
             return await _verify_only(db, root, case, rx, item_id)
         if mode == "resolve_conflict":
             return await _resolve_conflict(
-                db, root, case, rx, item_id, resolution, stage_confirmed,
+                db, root, case, rx, item_id, resolution, stage_confirmed, ack,
             )
         if follow_autofix and (case.pending_gate or "").startswith("dose:"):
             await db.update_case(case.id, pending_gate="")
             case.pending_gate = ""
-        from ..api.capabilities import admit_stage
+        from ..api.capabilities import admit_stage, artifact_digest
 
-        admit_stage(stage_confirmed, case.pending_gate or "")
+        _artifact, expected = await artifact_digest(db, case)
+        admit_stage(
+            stage_confirmed, case.pending_gate or "",
+            ack=ack, expected=expected, project_root=root,
+        )
         if case.pending_gate and not stage_confirmed:
             halted = await release(ask(
                 "stage_confirm",
@@ -832,9 +845,23 @@ def _blocked(
     }
 
 
+async def _note_scope_creep(db, case, reason: str) -> None:
+    """补丁越界要留一条账。人可能没看见，纪律账不能没看见。"""
+    from ..catalog.ledger import ensure, record_deviation
+
+    coverage = ensure(dict(case.coverage or {}))
+    record_deviation(
+        coverage, "scope_creep",
+        stage="dispensed", case_id=case.id, round_no=case.round, detail=reason,
+    )
+    await db.update_case(case.id, coverage_json=json.dumps(coverage, ensure_ascii=False))
+    case.coverage = coverage
+
+
 async def _rollback_conflict(
     db, root, case, rx, item, executor: str, drift_files: list[str], reason: str, before: dict,
 ) -> dict:
+    await _note_scope_creep(db, case, reason)
     _path, snapshot_hash = _write_snapshot(root, case.id, item["id"], case.round, before)
     dose = {
         "id": new_id("dose"),
@@ -1015,7 +1042,7 @@ async def _verify_item(db, root, case, item: dict, latest: dict) -> dict:
     return nursing
 
 
-async def _resolve_conflict(db, root, case, rx, item_id: str, resolution: str, stage_confirmed: bool) -> dict:
+async def _resolve_conflict(db, root, case, rx, item_id: str, resolution: str, stage_confirmed: bool, ack: str = "") -> dict:
     if resolution not in _RESOLUTIONS:
         raise bad_argument("resolution 须为 manual_resolved / retry / skip_item", target="resolution")
     if not item_id:
@@ -1025,9 +1052,12 @@ async def _resolve_conflict(db, root, case, rx, item_id: str, resolution: str, s
         raise not_found(f"药味不存在：{item_id}", target="item_id")
     gate = case.pending_gate or ""
     if gate and gate != f"dose:{item['id']}":
-        from ..api.capabilities import admit_stage
+        from ..api.capabilities import admit_stage, artifact_digest
 
-        admit_stage(stage_confirmed, gate)
+        _artifact, expected = await artifact_digest(db, case)
+        admit_stage(
+            stage_confirmed, gate, ack=ack, expected=expected, project_root=root,
+        )
         if not stage_confirmed:
             halted = await release(ask(
                 "stage_confirm",
@@ -1267,7 +1297,13 @@ async def _finish(db, case, rx, item, dose, nursing, applied: bool) -> dict:
         "nursing": nursing,
         "case_status": "dispensing",
         "next_item_id": nxt,
-        "handoff": _handoff(case.id, item["id"], nxt, case.auto_advance),
+        "handoff": _handoff(
+            case.id, item["id"], nxt, case.auto_advance,
+            artifact_digest=digest_file(
+                hospital_root(case.project_root) / "reports" / case.id
+                / f"dispense-r{case.round}.md"
+            ),
+        ),
     }
 
 

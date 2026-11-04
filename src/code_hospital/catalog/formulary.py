@@ -28,6 +28,9 @@ _ROUTES: tuple[tuple[str, str, str], ...] = (
     ("python-review", "python.", "python"),
     ("java-review", "java.", "java"),
     ("ts-review", "ts.", "general"),
+    # 函数过长的判断归结构科：它和 structure.function_lines 是同一个度量，
+    # 只是由 ts-review 分语言检出。落在全科会让「拆分」这味药开不出来。
+    ("ts-review", "ts.function-lines", "structure"),
     ("eslint", "*", "general"),
     ("jscpd", "*", "structure"),
     ("java-pack", "java.", "java"),

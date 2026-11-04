@@ -17,10 +17,12 @@ from ..core.models import (
     Case,
     Finding,
     Severity,
+    counts_in_report,
     counts_toward_efficacy,
     finding_rank,
     source_summary,
 )
+from ..safety.evidence import TIER_PLAIN
 
 _SEV_LABEL = {
     Severity.CRITICAL.value: SEVERITY_PLAIN["critical"],
@@ -455,26 +457,60 @@ def render_register_report(case: Case, report_id: str, precheck_hits: int, dupli
 
 
 def _source_cell(finding: Finding) -> str:
-    return {
+    label = {
         "instrument": "仪器",
         "host_llm": "模型",
         "external": "外聘",
         "code": "代码",
     }.get(finding.concluded_by, "仪器")
+    tier = getattr(finding, "evidence_tier", "") or ""
+    if label == "模型" and tier:
+        return f"模型（{TIER_PLAIN.get(tier, tier)}）"
+    return label
 
 
 def _pending_leads(case: Case, findings: list[Finding]) -> list[str]:
-    leads = [item for item in findings if not counts_toward_efficacy(item.concluded_by)]
+    """进不了结论区的模型结论。必须写清楚差在哪一步，不能只写「待核实」。"""
+    leads = [item for item in findings if not counts_in_report(item)]
     if not leads:
         return []
-    lines = ["## 待核实线索", "", "这些是模型交卷，还不是仪器章程，也不进疗效。", ""]
-    for finding in leads:
+    lines = [
+        "## 待核实线索",
+        "",
+        "这些是模型交卷，还不是仪器章程，也不进疗效。"
+        "每条后面的方括号是它的证据档：只有「引文已核」能进上面的结论区。",
+        "",
+    ]
+    for finding in sorted(leads, key=finding_rank):
         msg = finding.message.replace("|", "\\|").replace("\n", " ")[:80]
+        tier = getattr(finding, "evidence_tier", "") or "clue"
         lines.append(
-            f"- {_file_link(case.project_root, finding.file_path, finding.line_start)} · {finding.rule_id} · {msg}"
+            f"- {_file_link(case.project_root, finding.file_path, finding.line_start)}"
+            f" · {finding.rule_id} · {msg} · [{TIER_PLAIN.get(tier, tier)}]"
         )
     lines.append("")
     return lines
+
+
+def _cluster_graded(pair) -> bool:
+    """整簇都是模型结论、且每一条的引文都核对上了，才算「可定级」。"""
+    group = pair[1]
+    return bool(group) and all(
+        item.concluded_by == "host_llm" and getattr(item, "evidence_tier", "") == "anchored"
+        for item in group
+    )
+
+
+def _cluster_source(members: list[Finding]) -> str:
+    """模型结论的来源必须写清楚锚到哪一步，不能一律写「待核实线索」。"""
+    tiers = {(getattr(item, "evidence_tier", "") or "clue") for item in members}
+    if tiers == {"anchored"}:
+        return f"模型（引文已核 {len(members)} 处）"
+    if "ungrounded" in tiers:
+        return "模型（引文与文件对不上，仅作线索）"
+    if "anchored" in tiers:
+        return "模型（部分引文已核，其余只到文件行）"
+    return "模型（未附原文，只到文件行）"
 
 
 def _group_blocks(case: Case, clusters: list[tuple]) -> list[str]:
@@ -493,7 +529,7 @@ def _group_blocks(case: Case, clusters: list[tuple]) -> list[str]:
             f"- 涉及: {places}",
         ]
         if diagnosis.concluded_by == "host_llm":
-            parts.append("- 来源: 待核实线索")
+            parts.append("- 来源: " + _cluster_source(members))
         if diagnosis.history_refs:
             hist = "；".join(
                 f"`{h['case_id']}` {h.get('outcome') or '在治'} {h.get('rounds', 1)} 轮"
@@ -512,6 +548,19 @@ def _group_blocks(case: Case, clusters: list[tuple]) -> list[str]:
     return parts
 
 
+def _graded_note(graded: list[Finding]) -> list[str]:
+    """模型结论进结论区时，必须当场说清楚它凭什么进、以及它不是什么。"""
+    if not graded:
+        return []
+    lines = [
+        f"> 其中 {len(graded)} 条是模型结论，引文已与文件逐字核对，所以按严重度排进了上面这张表。",
+        "> 核对只能证明模型读过这一行，不能证明它的判断成立。"
+        "这些条目**不进疗效、也不进差分**——复发率仍然只统计可复现的仪器发现。",
+        "",
+    ]
+    return lines
+
+
 def render_scan_report(
     case: Case,
     report_id: str,
@@ -524,7 +573,8 @@ def render_scan_report(
     host_scan: dict | None = None,
 ) -> str:
     ranked = sorted(findings, key=finding_rank)
-    durable = [item for item in ranked if counts_toward_efficacy(item.concluded_by)]
+    durable = [item for item in ranked if counts_in_report(item)]
+    graded = [item for item in durable if not counts_toward_efficacy(item.concluded_by)]
     counts = {sev: 0 for sev in _SEV_LABEL}
     for f in durable:
         counts[f.severity] = counts.get(f.severity, 0) + 1
@@ -550,11 +600,14 @@ def render_scan_report(
         "",
         source_summary(ranked, model_assisted=model_assisted),
         "",
-        "> 这五档只统计仪器章程，不是模型判断，也不是漏洞通告里的超危、高危。"
+        "> 这五档只统计能当结论的条目：仪器章程，以及引文已与文件逐字核对的模型结论。"
+        "不是模型判断，也不是漏洞通告里的超危、高危。"
         "模型未交卷时不能把章程条数当成已经分析完；模型落到文件和行号的结论另计。"
         "必须先处理指密钥或同类安全项；明确缺陷指章程里已经能指出的代码问题，例如没用到的导入；"
         "一般问题偏格式；风格建议是可改可不改的写法，函数超过行数和文件超过行数也算在这里；参考信息并进「风格与提示」。",
         "",
+        *_graded_note(graded),
+        *_reading_banner(host_scan),
     ]
     if durable:
         parts += _scan_cards(case, durable)
@@ -562,7 +615,6 @@ def render_scan_report(
         parts += ["## 按规则看", "", "这一轮没有仪器发现。", ""]
     else:
         parts += _scan_cards(case, ranked)
-    parts += _pending_leads(case, ranked)
     parts += [
         "## 发现明细（按严重度排序）\n",
         "| # | 来源 | 严重度 | 规则 | 位置 | 摘要 | 病史 |",
@@ -590,6 +642,9 @@ def render_scan_report(
                 "",
             ]
 
+    # 线索排在明细和证据之后：它们是这一轮最不确定的内容，不该插在结论中间。
+    parts += _pending_leads(case, ranked)
+
     # 项目记忆（既往史）：有帮助但不可全信，独立成节并附信任声明
     if memory_context and memory_context.get("found"):
         parts += [
@@ -612,10 +667,83 @@ def render_scan_report(
         "## 覆盖与限制",
         "",
     ]
-    coverage = list(limitations) + _host_scan_limits(host_scan)
+    coverage = list(limitations) + _host_scan_limits(host_scan) + _deviation_notes(case.coverage)
+    coverage += _recruit_notes(case.coverage, case.project_root)
+    coverage += _rule_notes(case.project_root)
     parts += [f"- {ln}" for ln in coverage] if coverage else ["- 无"]
     parts.append(_footer(case))
     return "\n".join(parts)
+
+
+def _deviation_notes(coverage: dict | None) -> list[str]:
+    """执行偏差进限制项。缺口已经在限制项里，这里只补偏差。"""
+    from ..catalog.ledger import deviation_lines
+
+    return deviation_lines(coverage)
+
+
+def _recruit_notes(coverage: dict | None, project_root: str = "") -> list[str]:
+    """招聘启事也进检验报告。这不是诊断书才有的东西——
+
+    检验报告说「这些文件没有仪器查过」，和诊断书说「这些没有药」，是两件事。
+    只写在诊断书里，一份只出检验报告的客户会以为全都查过了。
+    """
+    from ..catalog.ledger import recruitment_lines
+
+    return recruitment_lines(coverage, project_root)
+
+
+def _rule_notes(project_root: str) -> list[str]:
+    """已经固化下来的院规。
+
+    报告里必须能看出「这条校验是因为历史上被绕过 N 次才加的」：
+    不写来历，宿主和用户只会觉得医院莫名其妙多要一个参数。
+    """
+    from ..catalog.discipline import rule_lines
+
+    return rule_lines(project_root)
+
+
+def _ledger_section(coverage: dict | None, project_root: str = "") -> list[str]:
+    """诊断书的「未查与缺口」。没有缺口时整节不出现，不写「无」。"""
+    from ..catalog.ledger import deviation_lines, gap_lines, recruitment_lines
+    from ..safety.evidence import evidence_lines
+
+    lines = (
+        gap_lines(coverage) + deviation_lines(coverage)
+        + evidence_lines(coverage) + recruitment_lines(coverage, project_root)
+        + _rule_notes(project_root)
+    )
+    if not lines:
+        return []
+    return ["## 未查与缺口", "", *[f"- {ln}" for ln in lines], ""]
+
+
+def _reading_banner(host_scan: dict | None) -> list[str]:
+    """模型读没读，决定这份报告是「筛出的线索」还是「分析过的结论」，要写在发现前面。
+
+    全部未读不是脚注里的一句统计，是整份报告的口径——藏在限制项第 18 条里，
+    读者只会看到 3000 条发现，看不到「一条都没读过」。
+    """
+    if not host_scan:
+        return []
+    total = int(host_scan.get("total") or 0)
+    unread = int(host_scan.get("unread") or 0)
+    if total <= 0:
+        return []
+    read = max(total - unread, 0)
+    if read == 0:
+        return [
+            "> **本轮没有任何模型阅读。** 下面的条数全部来自正则、AST 和度量，"
+            "只能当「机械筛出的线索」，不能当成「代码已经分析过」。",
+            "",
+        ]
+    if read * 2 < total:
+        return [
+            f"> 模型只读了 {read}/{total} 个文件，不到一半。没读的部分不能写成没有问题。",
+            "",
+        ]
+    return []
 
 
 def _host_scan_limits(host_scan: dict | None) -> list[str]:
@@ -711,8 +839,9 @@ def render_diagnose_report(
     durable: list[tuple] = []
     leads: list[tuple] = []
     for pair in clusters:
-        group = pair[1]
-        if group and all(item.concluded_by == "host_llm" for item in group):
+        if _cluster_graded(pair):
+            durable.append(pair)
+        elif pair[1] and all(item.concluded_by == "host_llm" for item in pair[1]):
             leads.append(pair)
         else:
             durable.append(pair)
@@ -731,7 +860,7 @@ def render_diagnose_report(
     ]
     parts += [
         "> 分组和处置建议来自规则表，是章程，不是模型判断。"
-        "模型判断只计已经落到文件和行号的交卷。",
+        "模型判断只计已经落到文件和行号、并且引文能在文件里核对上的交卷。",
         "",
     ]
     if use_llm:
@@ -755,8 +884,15 @@ def render_diagnose_report(
     else:
         parts.append("这一轮没有仪器发现。")
     if leads:
-        parts += ["## 待核实线索", "", "这些是模型交卷，还不是仪器章程，也不进疗效。", ""]
+        parts += [
+            "## 待核实线索",
+            "",
+            "这些是模型交卷，还不是仪器章程，也不进疗效。"
+            "没有抄原文的，只有文件行可看；引文对不上的，连位置都还没核实。",
+            "",
+        ]
         parts += _group_blocks(case, leads)
+    parts += _ledger_section(case.coverage, case.project_root)
     parts.append(_footer(case))
     return "\n".join(parts)
 
@@ -952,6 +1088,7 @@ def render_prescribe_report(case: Case, prescription_id: str, rx: dict, report_p
     ]
     parts += _prescribe_cards(case.project_root, items)
     parts += _efficacy_lines(rx.get("efficacy") or [])
+    parts += _memory_block(case)
     parts += [
         "## 处理清单（按顺序）\n",
         "| # | 改哪里 | 怎么处理 | 风险 | 怎么算改完 | 允许碰到的范围 |",
@@ -1029,6 +1166,7 @@ def render_discharge_report(
         "",
         f"- 疗程: {case.round} 轮",
         "",
+        *_memory_block(case),
         *_outside_questions(questions),
         *_chain_block(chains),
         *_functional_lines(case, chains),
@@ -1038,6 +1176,26 @@ def render_discharge_report(
         "",
         _footer(case),
     ])
+
+
+def _memory_block(case: Case) -> list[str]:
+    """记忆与经验。没有记忆基座时整节不出现——不写「无」，不占版面。"""
+    from ..catalog.ledger import memory_lines
+
+    lines = memory_lines(case.coverage)
+    if not lines:
+        return []
+    book = ((case.coverage or {}).get("memory") or {})
+    extra = [str(item) for item in (book.get("downgrade") or []) if str(item).strip()]
+    return [
+        "## 记忆与经验",
+        "",
+        "记忆给的是经验，不是本次范围的覆盖情况。它不进疗效统计，也不顶覆盖账。",
+        "",
+        *[f"- {ln}" for ln in lines],
+        *[f"- {ln}" for ln in extra],
+        "",
+    ]
 
 
 def _chain_block(chains: dict | None) -> list[str]:

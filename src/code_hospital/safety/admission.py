@@ -41,7 +41,25 @@ _DEFAULTS = {
 
 
 def rules_for(project_root: str, lane: str) -> AdmissionRules:
-    """这一路用哪一套开关。不认识的链路按施治的严档。"""
+    """这一路用哪一套开关。不认识的链路按施治的严档。
+
+    纪律固化批下来的校验在这里落地成**下限**：客户可以在 `code-hospital.yaml`
+    里放宽准入，但放宽不了已经被固化过的那几条。被绕过三次才加的规矩，
+    用一行配置就能关掉的话，等于没加。
+    """
+    return apply_floor(_configured(project_root, lane), project_root)
+
+
+def apply_floor(rules: AdmissionRules, project_root: str) -> AdmissionRules:
+    """把已批准的准入类校验压到规则上。只加不减。"""
+    from ..catalog.discipline import requires
+
+    if not requires(project_root, "location_floor"):
+        return rules
+    return replace(rules, require_location=True, block_clearance=True)
+
+
+def _configured(project_root: str, lane: str) -> AdmissionRules:
     base = _DEFAULTS.get(lane, _STRICT)
     overlay = _overlay(project_root).get(lane)
     if not isinstance(overlay, dict):
@@ -115,7 +133,12 @@ def guard_clearance(note: str, rules: AdmissionRules) -> str:
 
 
 def settle_semantic(clusters, rules: AdmissionRules) -> tuple[list, list[dict]]:
-    """语义结论留在诊断里当线索。严格档落不到文件和行号的丢掉并记下。"""
+    """语义结论留在诊断里当线索。严格档落不到文件和行号的丢掉并记下。
+
+    引文已经核对上的簇不再加「待核实线索」前缀：那句话的用途是标记「没有可核的东西」，
+    已经核过的再加就是自相矛盾。但「不进处方」照旧由 `screen_diagnoses` 管，
+    两件事各管一段，不互相顶替。
+    """
     kept = []
     drops = []
     for diagnosis, members in clusters:
@@ -131,19 +154,31 @@ def settle_semantic(clusters, rules: AdmissionRules) -> tuple[list, list[dict]]:
                 "line": int(getattr(head, "line_start", 0) or 0) if head else 0,
             })
             continue
-        diagnosis.root_cause = clue_wording(diagnosis.root_cause, rules)
+        diagnosis.root_cause = clue_wording(
+            diagnosis.root_cause, rules, anchored=_anchored(members),
+        )
         kept.append((diagnosis, members))
     return kept, drops
 
 
-def clue_wording(text: str, rules: AdmissionRules) -> str:
-    """严格档的宿主结论保留待核实，不写成已经坐实。"""
+def _anchored(members) -> bool:
+    return bool(members) and all(
+        getattr(item, "evidence_tier", "") == "anchored" for item in members
+    )
+
+
+def clue_wording(text: str, rules: AdmissionRules, anchored: bool = False) -> str:
+    """严格档的宿主结论保留待核实，不写成已经坐实。
+
+    「检查通过」这类断言在所有档位都要打掉转成「未核实」；「待核实线索」前缀只加给
+    还核不上的那些。引文已核的结论仍然不进处方，那是另一道闸。
+    """
     if not rules.clues_only:
         return text
     cleaned = text or ""
     for word in _PASS_WORDS:
         cleaned = cleaned.replace(word, "未核实")
-    if cleaned.startswith("待核实"):
+    if anchored or cleaned.startswith("待核实"):
         return cleaned[:500]
     return ("待核实线索：" + cleaned)[:500]
 

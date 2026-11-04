@@ -16,9 +16,14 @@ CHARTER = (
 )
 TASK = (
     "读这一批里的每个文件。业务是否正确、类型、安全、跨文件调用都要看，不限于提醒事项。"
+    "文档（md/rst/adoc）和 XML 也在范围内：文档写的是这个项目的规范与流程；"
+    "XML 要按内容判断它是什么——SQL 映射、构建声明还是运行时行为，不看文件名猜。"
     "交卷按契约：可以写结论、严重度、符号、证据、归因、相关文件和跨库转诊。行和文件可以空。"
+    "文档和 XML 的结论要进报告就抄原文：把那一句逐字写进 evidence，医院拿它比文件。"
+    "没抄原文的结论只能落到文件行，定级压到一般问题；抄了但对不上会记执行偏差。"
     "同一批里对不上的只跳过那一条。自由文字不算产物。没读的文件不能写成已经分析完。"
 )
+_DOC_SUFFIX = {".md", ".markdown", ".rst", ".adoc", ".txt"}
 JOINT = (
     "业务正确性如果依赖别的仓库，把仓库路径写进 assist.joint。"
     "那些路径记入联合分析，不自动当成已经读过，也不能写成行为已经正确。"
@@ -55,6 +60,7 @@ def view(files: list[str], coverage: dict | None, topics: list[str] | None = Non
         "role": "host_llm",
         "charter": CHARTER,
         "task": TASK,
+        "batch_note": batch_note(batch),
         "topics_are_not_limits": True,
         "topics": list(topics or []),
         "batch_index": start,
@@ -65,6 +71,23 @@ def view(files: list[str], coverage: dict | None, topics: list[str] | None = Non
         "joint": list((coverage or {}).get("host_scan", {}).get("joint") or []),
         "joint_note": JOINT,
     }
+
+
+def batch_note(batch: list[str]) -> str:
+    """这一批里混了文档和 XML 时要说一声，否则它们最容易被当成「不是源码」跳过。"""
+    docs = [path for path in batch if Path(path).suffix.lower() in _DOC_SUFFIX]
+    xmls = [path for path in batch if Path(path).suffix.lower() == ".xml"]
+    if not docs and not xmls:
+        return ""
+    bits = []
+    if docs:
+        bits.append(f"{len(docs)} 份文档")
+    if xmls:
+        bits.append(f"{len(xmls)} 份 XML")
+    return (
+        f"本批含 {'、'.join(bits)}。文档要读规范与流程；XML 要读内容判断是 SQL 映射、"
+        "构建声明还是运行时配置，不要因为不是源码就跳过，也不要只凭文件名归类。"
+    )
 
 
 def write_plan(project_root: str, case_id: str, files: list[str], coverage: dict | None) -> str:
@@ -79,7 +102,12 @@ def write_plan(project_root: str, case_id: str, files: list[str], coverage: dict
         "task": TASK,
         "topics_are_not_limits": True,
         "batches": [
-            {"index": index + 1, "files": batch, "read": all(path in read for path in batch)}
+            {
+                "index": index + 1,
+                "files": batch,
+                "read": all(path in read for path in batch),
+                **({"note": note} if (note := batch_note(batch)) else {}),
+            }
             for index, batch in enumerate(batches)
         ],
         "joint": list((coverage or {}).get("host_scan", {}).get("joint") or []),

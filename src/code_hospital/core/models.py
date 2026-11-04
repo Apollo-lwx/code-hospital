@@ -100,6 +100,17 @@ def counts_toward_efficacy(concluded_by: str) -> bool:
     return concluded_by != ConcludedBy.HOST_LLM.value
 
 
+def counts_in_report(finding) -> bool:
+    """能不能进报告结论区。仪器/外聘/代码照旧；模型结论还要求引文已核。
+
+    证据核对通过只说明「模型读过这一行」，不说明判断成立。所以这条判据
+    只决定**呈现位置**，不改变疗效与差分的口径——模型结论永远不进那两本账。
+    """
+    if counts_toward_efficacy(getattr(finding, "concluded_by", "")):
+        return True
+    return getattr(finding, "evidence_tier", "") == "anchored"
+
+
 def concluded_by_counts(findings) -> dict[str, int]:
     counts = {item.value: 0 for item in ConcludedBy}
     for finding in findings:
@@ -128,8 +139,13 @@ def source_summary(findings, model_assisted: bool = False) -> str:
 
 
 def finding_rank(finding) -> tuple:
-    """宿主交卷排在仪器发现后面，不占严重度的前排。"""
-    lead = 0 if counts_toward_efficacy(getattr(finding, "concluded_by", "")) else 1
+    """仪器章程在前，引文已核的模型结论其次，线索最后。"""
+    if counts_toward_efficacy(getattr(finding, "concluded_by", "")):
+        lead = 0
+    elif getattr(finding, "evidence_tier", "") == "anchored":
+        lead = 1
+    else:
+        lead = 2
     return (
         lead,
         SEVERITY_ORDER.get(getattr(finding, "severity", ""), 9),
@@ -208,6 +224,11 @@ class Finding(BaseModel):
     origin: str = Origin.INITIAL.value
     # 谁下的结论。默认定性仪器。宿主交卷写 host_llm。
     concluded_by: str = ConcludedBy.INSTRUMENT.value
+    # 模型结论的锚：anchored / located / ungrounded / clue。仪器发现留空。
+    # 只有 anchored 能进报告结论区，四档都不进疗效（见 safety/evidence.py）。
+    evidence_tier: str = ""
+    # 一条模型主张的内容指纹（文件+行+原文），用于重复交卷去重与复发比对。
+    evidence_digest: str = ""
     first_seen_round: int = 1
     last_seen_round: int = 1
     # 同指纹历史复发记录（派生字段，检验时关联，不入库；初发为 []）

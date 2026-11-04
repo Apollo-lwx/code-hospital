@@ -13,11 +13,14 @@ _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _ZERO_WIDTH = re.compile(r"[​‌‍⁠﻿]")
 _BIDI = re.compile(r"[‪-‮⁦-⁩]")
 # 疑似指令模式（提示层注入常见起手式），命中后以 [FILTERED] 替换
+# 分支之间不能留前导空格：留了就只有「前面带空格」的出现才匹配，
+# 句首的注入（最常见的形态）反而漏过去。
 _INSTRUCTIONISH = re.compile(
     r"(ignore\s+(all\s+)?(previous|above)\s+instructions?"
-    r"| disregard\s+(all\s+)?(previous|above)"
-    r"| 忽略(之前|上述|所有)的?(指令|指示|命令)"
-    r"| system\s*prompt\s*:| you\s+are\s+now\s)",
+    r"|disregard\s+(all\s+)?(previous|above)"
+    r"|忽略(之前|上述|所有)的?(指令|指示|命令)"
+    r"|system\s*prompt\s*:"
+    r"|you\s+are\s+now)",
     re.IGNORECASE,
 )
 

@@ -19,20 +19,50 @@ import yaml
 from ..core.errors import bad_argument
 
 # 内置排除目录（任意路径段命中即跳过；与 rsi-boot signal_discovery.EXCLUDED_DIRS 同思路）
-# 注意：.rsi 不排除——它是「既往病史」（项目记忆/用户画像），对诊疗有帮助，
-# 但以 advisory 上下文方式读取且标注不可全信（记忆可能过时/错误），见 storage/rsi_memory.py。
-# .hospital 必须排除——医院绝不把自家病历当扫描输入（篡改病历属禁止级）。
+# `.rsi` 必须排除——它是医院自己的记忆库（yaml 知识条目 + identity + 日志）。
+# 既往病史走 `storage/rsi_memory.py` 的 advisory 通道读取，那是**读**；
+# 扫描范围是「哪些文件要检查」，把记忆库也算进去等于让医院检查自己的笔记本，
+# 会污染覆盖账和调用链（yaml 找不到调用者，报一堆「这条链未建」）。
+# `.hospital` 必须排除——医院绝不把自家病历当扫描输入（篡改病历属禁止级）。
 _DENY_DIRS = {
     ".git", ".hg", ".svn", "node_modules", ".venv", "venv", "__pycache__",
     ".mypy_cache", ".pytest_cache", ".ruff_cache", "dist", "build", ".idea",
-    ".vscode", ".hospital",
+    ".vscode", ".hospital", ".rsi",
 }
 
-_SOURCE_EXT = {
+KIND_CODE = "code"
+KIND_CONFIG = "config"
+KIND_DOC = "doc"
+# 判不出结构、又没有机械检查器的 XML（logback / web.xml / 安装器描述）：
+# 它写的是运行时行为和装配关系，只能靠读。这类不报「缺仪器」，
+# 报「没人读」——否则招聘信号会变成「招一台 XML 检查器」。
+KIND_MARKUP = "markup"
+
+# 扩展名分开列，因为它们回答的是不同的问题：
+#   code   —— 仪器该不该扫（有规则、有行号、能开出方）
+#   config —— 结构、供应链、清单要解析它，但规则仪器不该逐行审它
+#   doc    —— 不交给规则，但必须进「模型该读的范围」：AGENTS.md / CONTRIBUTING.md
+#             写的就是这个项目的规范，漏掉它们等于让医院自己不看院规
+_CODE_EXT = {
     ".py", ".js", ".jsx", ".ts", ".tsx", ".go", ".java", ".kt", ".rb",
     ".rs", ".c", ".h", ".cpp", ".hpp", ".cs", ".php", ".swift", ".m",
-    ".scala", ".sh", ".bash", ".sql", ".yaml", ".yml", ".json", ".toml",
+    ".scala", ".sh", ".bash", ".sql",
 }
+_CONFIG_EXT = {".yaml", ".yml", ".json", ".toml", ".xml"}
+_DOC_EXT = {".md", ".markdown", ".rst", ".adoc", ".txt"}
+
+# .xml 不能按文件名判：叫 UserMapper.xml 的可能只是日志配置，
+# 而 resources/mybatis/query.xml 里就装着 SQL。先读头部按内容判结构。
+# SQL 的判据必须收紧到 MyBatis/iBatis 的 DTD 与 `mapper + namespace`——
+# 用 `<sql` 这种宽标记，`<sql-maven-plugin>` 会被误判成 SQL 映射。
+_XML_SNIFF_BYTES = 8192
+_XML_SQL_DTD = ("mybatis-3-mapper", "sql-map-2.dtd", "ibatis.apache.org")
+_XML_BUILD_MARKS = ("<project", "<modelversion", "<ivy-module", "maven.apache.org")
+_XML_BUILD_NAMES = {"pom.xml", "build.xml", "ivy.xml", "settings.xml", "maven-metadata.xml"}
+# 内容读不到时（无 project_root 或文件不可读）才退回路径判断，且只作兜底。
+_XML_SQL_PATHS = ("mapper", "sqlmap", "mybatis")
+
+_SOURCE_EXT = _CODE_EXT | _CONFIG_EXT | _DOC_EXT
 
 PROJECT_CONFIG = "code-hospital.yaml"
 
@@ -102,6 +132,58 @@ def is_denied(rel_path: str, custom_globs: list[str] | None = None) -> bool:
 
 def _is_source(rel_path: str) -> bool:
     return Path(rel_path).suffix.lower() in _SOURCE_EXT
+
+
+def _read_head(project_root: str, rel_path: str) -> str:
+    """读文件头用于归类。只读前 8KB，二进制直接当读不到。"""
+    if not project_root:
+        return ""
+    try:
+        with (Path(project_root) / rel_path).open("rb") as fh:
+            raw = fh.read(_XML_SNIFF_BYTES)
+    except OSError:
+        return ""
+    if b"\x00" in raw:
+        return ""
+    return raw.decode("utf-8", errors="replace").lower()
+
+
+def _xml_is_sql(head: str) -> bool:
+    if any(mark in head for mark in _XML_SQL_DTD):
+        return True
+    return "<mapper" in head and "namespace" in head
+
+
+def classify(project_root: str, rel_path: str) -> tuple[str, str]:
+    """返回 (类别, 依据)。依据要能复盘：「凭什么是代码」不能只写一句我判的。
+
+    依据取值：`ext:*` 按扩展名、`content:sql|build|unclear` 按内容、
+    `name:*` / `path:*` 按名字兜底（内容读不到时才用）。
+    """
+    posix = _strip_dot_slash(rel_path.replace("\\", "/")).lower()
+    suffix = Path(posix).suffix.lower()
+    name = Path(posix).name
+    if suffix in _DOC_EXT:
+        return KIND_DOC, "ext:doc"
+    if suffix == ".xml":
+        head = _read_head(project_root, rel_path)
+        if _xml_is_sql(head):
+            return KIND_CODE, "content:sql"
+        if any(mark in head for mark in _XML_BUILD_MARKS):
+            return KIND_CONFIG, "content:build"
+        if name in _XML_BUILD_NAMES:
+            return KIND_CONFIG, "name:build"
+        if any(mark in posix for mark in _XML_SQL_PATHS):
+            return KIND_CODE, "path:sql"
+        return KIND_MARKUP, ("content:unclear" if head else "name:unclear")
+    if suffix in _CONFIG_EXT:
+        return KIND_CONFIG, "ext:config"
+    return KIND_CODE, "ext:code"
+
+
+def kind_of(rel_path: str, project_root: str = "") -> str:
+    """文件归到 code / config / markup / doc。给 project_root 时 .xml 按内容判。"""
+    return classify(project_root, rel_path)[0]
 
 
 async def _list_repo_files(project_root: str) -> tuple[list[str], int]:

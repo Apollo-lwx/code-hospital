@@ -175,8 +175,14 @@ def handoff(
     stage: str,
     auto_advance: bool,
     next_tool: str = "",
+    artifact_digest: str = "",
 ) -> dict:
-    """阶段交接块（契约 §2.10）：指引宿主呈现产物并按模板等待用户确认。"""
+    """阶段交接块（契约 §2.10）：指引宿主呈现产物并按模板等待用户确认。
+
+    `artifact_digest` 是这份产物的内容摘要，也是宿主要回传的 `ack`。
+    它同时回答两个问题：「你给他看的是哪一份」和「你是不是真的把文件取到手了」。
+    取不到时留空——宿主照常推进，院规固化后这次会被降级记账，不会静默。
+    """
     awaiting = not auto_advance and bool(next_tool)
     return {
         "stage": stage,
@@ -188,5 +194,13 @@ def handoff(
             "stage_confirmed=true) 进入下一阶段。"
         )
         if awaiting
+        else "",
+        "artifact_digest": artifact_digest if awaiting else "",
+        "ack_hint": (
+            f'把 artifact_digest 同时作为 ack 传回：{next_tool}(case_id="{case_id}", '
+            f'stage_confirmed=true, ack="{artifact_digest}")。'
+            "院规固化阶段回执后，不带 ack 会被拒绝放行。"
+        )
+        if awaiting and artifact_digest
         else "",
     }

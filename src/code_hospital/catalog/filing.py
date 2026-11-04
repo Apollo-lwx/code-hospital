@@ -8,6 +8,9 @@ from __future__ import annotations
 import json
 
 VERSION = 1
+# 引文上限。核对是逐字比对，截断的引文对不上，会被判成编造——
+# 所以宁可给宽一点，并在契约里说明「太长就只抄关键那一句」。
+EVIDENCE_CAP = 800
 CONTRACT_OBJECT = {
     "issues": [{
         "file": "仓库相对路径，没有单点时可以空",
@@ -16,7 +19,7 @@ CONTRACT_OBJECT = {
         "symbol": "",
         "message": "结论",
         "severity": "critical|major|minor|nit|info",
-        "evidence": "",
+        "evidence": "从文件里逐字抄的原文；抄了才能定级，也接受 quote/snippet",
         "rule_id": "",
         "category": "",
         "root_cause": "",
@@ -37,6 +40,9 @@ CONTRACT_LINE = (
     "对象用 issues，也可以用 findings、diagnoses 或 items。"
     "条目可以写文件、行、符号、结论、严重度、证据、病种、归因、置信度、处置、相关文件和跨库转诊。"
     "行号可以是 0，文件可以空。file_path、line_start、summary、root_cause 这些别名同样算。"
+    "**要定级就抄原文**：把文件里那几行的原文逐字抄进 evidence（也能写 quote 或 snippet），"
+    "医院会拿它和文件比对。抄对了按你给的严重度进结论区；没抄原文的只能到文件行，定级压到一般问题；"
+    "抄了但对不上的按线索处理，并记一次执行偏差。原文太长就只抄关键那一句，别截半句。"
     "同一批里对不上的只跳过那一条，不把写对的退回。"
     "写了问题的文件算看过，其余范围内文件仍要列入 read 或「已读：」，没列全不能诊断。"
 )
@@ -50,7 +56,11 @@ def contract_for(item_id: str) -> dict:
     return {
         "version": VERSION,
         "id": item_id,
-        "text": "每行「文件:行: 说明」。写了问题的文件算看过，其余文件列入「已读：」。或一行「没有」再一行「已读：」列出范围内每个文件",
+        "text": (
+            "每行「文件:行: 说明」。写了问题的文件算看过，其余文件列入「已读：」。"
+            "或一行「没有」再一行「已读：」列出范围内每个文件。"
+            "文本行没有原文通道，只能到文件行；要定级就用对象写法附 evidence 原文"
+        ),
         "object": {
             "issues": CONTRACT_OBJECT["issues"],
             "clear": {"clear": True, "read": ["范围内每个文件"]},
@@ -525,7 +535,7 @@ def _normalize_entry(row, known: dict) -> tuple[dict | None, str]:
     fixability = _text(row, "fixability", "method").lower()
     if fixability not in _METHOD:
         fixability = ""
-    evidence = _text(row, "evidence")[:200]
+    evidence = _text(row, "evidence", "quote", "snippet")[:EVIDENCE_CAP]
     if root_cause and root_cause not in message:
         message = f"{message} 归因：{root_cause}"
     if related:

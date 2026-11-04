@@ -148,3 +148,31 @@ def test_reading_page_groups_one_function():
     outside = md.split("#### 没有落在某个函数里", 1)[1]
     assert md.count("#### 没有落在某个函数里") == 1
     assert "没用到的导入（`F401`） 2 处" in outside
+
+
+def test_zero_reading_is_stated_before_findings():
+    """模型一条都没读时，这句话要写在发现前面，不能只躺在限制项里。"""
+    case = Case(
+        id="case_y", project_root=".", title="示例", scope_type="repo",
+        scope=Scope(), triage_level="checkup", status="scanned",
+        created_at=1_700_000_000_000, updated_at=1_700_000_000_000,
+    )
+    md = render_scan_report(
+        case, "r1", [], [], ["函数超过 80 行算问题"],
+        host_scan={"unread": 12, "total": 12, "batch": ["a.py"], "plan_path": "p.json"},
+    )
+    banner = "本轮没有任何模型阅读"
+    assert banner in md
+    assert md.index(banner) < md.index("## 按规则看") if "## 按规则看" in md else True
+
+
+def test_partial_reading_says_how_much():
+    case = Case(
+        id="case_z", project_root=".", title="示例", scope_type="repo",
+        scope=Scope(), triage_level="checkup", status="scanned",
+        created_at=1_700_000_000_000, updated_at=1_700_000_000_000,
+    )
+    md = render_scan_report(
+        case, "r1", [], [], [], host_scan={"unread": 8, "total": 10, "batch": ["a.py"]},
+    )
+    assert "模型只读了 2/10 个文件" in md

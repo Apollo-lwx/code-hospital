@@ -173,6 +173,7 @@ async def discharge(
     waive_reason: str = "",
     distill_to_rsi: bool = False,
     stage_confirmed: bool = False,
+    ack: str = "",
     rounds_decision: str = "",
     gate_decision: str = "",
     level: str = "standard",
@@ -206,9 +207,13 @@ async def discharge(
                 target="case_id",
                 next_action="先 hosp_dispense 发完药味",
             )
-        from ..api.capabilities import admit_stage
+        from ..api.capabilities import admit_stage, artifact_digest
 
-        admit_stage(stage_confirmed, case.pending_gate or "")
+        _artifact, expected = await artifact_digest(db, case)
+        admit_stage(
+            stage_confirmed, case.pending_gate or "",
+            ack=ack, expected=expected, project_root=root,
+        )
         if case.pending_gate.startswith("dose:") and not stage_confirmed:
             halted = await release(stage_gate_question(
                 case_id, case.pending_gate, "hosp_discharge", "确认最后一味护理记录后开始复诊。"
@@ -319,10 +324,30 @@ async def discharge(
                 return waive_question
 
         outcome = _outcome(buckets, gate, has_manual)
+        recur = await _note_recurrence(db, root, buckets)
         return await _close(
             db, root, case, buckets, current, public, gate, outcome, report_id, rx,
-            distill_to_rsi, _ledger.get("chains"),
+            distill_to_rsi, _ledger.get("chains"), recur,
         )
+
+
+async def _note_recurrence(db, root: str, buckets: dict[str, list[Finding]]) -> dict:
+    """复发归因。三重门槛不齐就不记嫌疑——否则权重账变噪音池。
+
+    只有「此前判为已解决、现在又回来了」才算复发。本次新引入的医源性新症
+    （`new_related`）是补丁的锅，不是记忆的锅，同样要走门诊门槛，
+    因为它们也可能是某条经验说「这样改就行」的后果。
+    """
+    from ..catalog.memory_weight import note_recurrence
+
+    fresh = buckets["new_related"] + buckets["new_unrelated"]
+    empty = {"suspects": [], "unblamed": 0, "recurred": 0}
+    if not fresh:
+        return empty
+    try:
+        return await note_recurrence(db, root, [f.fingerprint for f in fresh])
+    except Exception as exc:  # noqa: BLE001 —— 归因失败不该拦住出院
+        return {**empty, "note": f"复发归因未完成：{type(exc).__name__}"}
 
 
 async def _persist_diff(db, case, buckets: dict[str, list[Finding]], current: list[Finding]) -> None:
@@ -348,18 +373,92 @@ async def _readmit(db, root, case, buckets, current, public) -> dict:
     await db.update_case(case.id, status="scanned", round=nxt, pending_gate=gate)
     case.round = nxt
     case.status = "scanned"
+    case.pending_gate = gate
+    # 摘要按医院自己这一侧算，和下次 admit_stage 核的时候用的是同一个函数、
+    # 同一份库状态，所以两边一定对得上。
+    from ..api.capabilities import artifact_digest
+
+    _artifact, digest = await artifact_digest(db, case)
     return {
         "status": "readmitted",
         "case_id": case.id,
         "round": nxt,
         "diff": {k: v for k, v in public.items() if k != "counts"},
         "nextAction": "新症待诊断，确认复诊检验报告后调用 hosp_diagnose",
-        "handoff": handoff(case.id, "scanned", case.auto_advance, "hosp_diagnose"),
+        "handoff": handoff(
+            case.id, "scanned", case.auto_advance, "hosp_diagnose",
+            artifact_digest=digest,
+        ),
     }
 
 
-async def _close(db, root, case, buckets, current, public, gate, outcome, report_id, rx, distill: bool, chains: dict | None) -> dict:
+async def _settle_memory(db, root, case, outcome: str, recur: dict | None) -> dict:
+    """出院判定 → 回报反馈 → 记权重账。
+
+    三态都要落账，不能只写成功那条路：`cli` 态必须显式记「未反馈」，
+    否则断掉的闭环看起来和通的没区别。
+
+    权重只给「判有效」加半票。判无效**不加 beta**——没证据不等于反证据，
+    beta 只加在能指认的复发和 rsi 侧已归因的错误上。
+    """
+    from ..catalog.ledger import ensure
+    from ..catalog.memory_weight import note_effective
+    from ..integrations.memory_port import open_port
+
+    coverage = ensure(dict(case.coverage or {}))
+    book = coverage["memory"]
+    recur = recur or {}
+    if int(recur.get("recurred") or 0):
+        book["recurred"] = int(book.get("recurred") or 0) + int(recur["recurred"])
+        names = [str(row.get("memory_id") or "") for row in recur.get("suspects") or []]
+        book["suspects"] = list(dict.fromkeys([*(book.get("suspects") or []), *names]))
+
+    channel = str(book.get("channel") or "absent")
+    token = str(book.get("token") or "")
+    recalled = [str(item) for item in (book.get("recalled") or []) if item]
+
+    if channel == "absent":
+        book["feedback"] = "absent"
+    elif channel == "cli":
+        book["feedback"] = "cli"
+    elif not token or not recalled:
+        book["feedback"] = "skipped"
+    else:
+        action = "accepted" if outcome in ("cured", "improved") else "ignored"
+        try:
+            port = await open_port(root)
+            got = await port.feedback(
+                token, action, comment=f"病例 {case.id} 结局 {outcome}",
+            )
+        except Exception as exc:  # noqa: BLE001 —— 反馈送不出去，出院照走
+            got = {"ok": False, "note": f"反馈未送达：{type(exc).__name__}"}
+        book["feedback"] = "reported" if got.get("ok") else "skipped"
+        if got.get("note"):
+            book["note"] = str(got["note"])[:300]
+
+    if outcome in ("cured", "improved") and recalled:
+        try:
+            await note_effective(db, root, recalled)
+        except Exception:  # noqa: BLE001 —— 权重账写不进去，不影响出院
+            pass
+
+    # 建议降级：写建议，不写动作。跨项目的降级要人批，医院只负责停下来。
+    from ..catalog.memory_weight import downgrade_lines
+
+    try:
+        rows = await db.memory_weights(recalled, root)
+        book["downgrade"] = downgrade_lines(list(rows.values()))
+    except Exception:  # noqa: BLE001
+        book["downgrade"] = []
+
+    await db.update_case(case.id, coverage_json=json.dumps(coverage, ensure_ascii=False))
+    case.coverage = coverage
+    return coverage
+
+
+async def _close(db, root, case, buckets, current, public, gate, outcome, report_id, rx, distill: bool, chains: dict | None, recur: dict | None = None) -> dict:
     await _persist_diff(db, case, buckets, current)
+    await _settle_memory(db, root, case, outcome, recur)
     status = "referred" if outcome == "referred" else "discharged"
     discharge_id = new_id("dis")
     folder = hospital_root(root) / "reports" / case.id

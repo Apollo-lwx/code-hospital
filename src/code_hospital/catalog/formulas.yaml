@@ -9,7 +9,7 @@
   acceptance_alias: lint
   indications:
     - kind: rule
-      rule_ids: [F401, F541, F841, E501, I001]
+      rule_ids: [F401, F541, F841, E501, I001, java.line-length, ts.line-length]
       prefixes: [I, UP, W, C4, RET, SIM, PIE, RUF]
 - id: split
   name: 拆分
@@ -21,7 +21,7 @@
   acceptance_alias: test
   indications:
     - kind: rule
-      rule_ids: [structure.function_lines, structure.file_lines, structure.cyclomatic]
+      rule_ids: [structure.function_lines, structure.file_lines, structure.cyclomatic, ts.function-lines, python.branch-count, python.too-many-params]
 - id: rename
   name: 正骨
   method: llm_patch
@@ -58,7 +58,7 @@
   acceptance_alias: test
   indications:
     - kind: rule
-      rule_ids: [BLE001, java.null-deref, java.resource-leak]
+      rule_ids: [BLE001, java.null-deref, java.resource-leak, java.empty-catch, python.bare-except, python.mutable-default, ts.dom-write]
       prefixes: [security., defect.]
 - id: seal
   name: 封存

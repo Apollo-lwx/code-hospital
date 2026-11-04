@@ -14,6 +14,7 @@ from pathlib import Path
 
 from ..adapters import all_adapters, register_defaults
 from ..adapters.base import AdapterError, RawFinding, ScannerAdapter
+from ..api.capabilities import digest_file
 from ..core.algorithms import lookup_history, stamp_findings
 from ..core.errors import invalid_operation, not_found
 from ..core.fingerprint import context_anchor as make_anchor
@@ -32,8 +33,14 @@ async def collect_findings(
     tools: list[str] | None = None,
     timeout_ms: int = 120_000,
     prior_coverage: dict | None = None,
+    *,
+    shadow: bool = True,
 ) -> tuple[list[dict], list[str], list[Finding], dict]:
-    """跑当前注册的设备并盖双键指纹。不入库，初诊和复诊共用。"""
+    """跑当前注册的设备并盖双键指纹。不入库，初诊和复诊共用。
+
+    `shadow=False` 时不跑市场影子仪器。补片只查一两味指定的设备，
+    再顺手拉一遍第三方服务，等于为一个题外目的付一次进程启动的钱。
+    """
     files, skipped = await scope_file_list(root, case.scope_type, case.scope.model_dump())
     limitations: list[str] = []
     if skipped:
@@ -164,6 +171,11 @@ async def collect_findings(
     await _attach_user_instruments(
         root, case, report_id, files, selected, devices, findings, limitations, timeout_ms,
     )
+    shadow_rows: list[dict] = []
+    if shadow:
+        shadow_rows = await _attach_market_instruments(
+            root, case, report_id, files, devices, findings, limitations, timeout_ms,
+        )
     if "design" in getattr(case, "requested_specialties", []):
         limitations.append("设计科第一期无检验仪器")
     from ..catalog.policy import describe, keeps, load_policy
@@ -210,6 +222,15 @@ async def collect_findings(
     findings.sort(key=finding_rank)
     stamp_findings(findings)
     ledger = stamp_source_counts(ledger, findings)
+    if shadow_rows:
+        # 影子仪器的发现从来没进 findings，所以这里只是把位置键记进覆盖账。
+        # 不进 devices：一台还没转正的仪器不该抬高覆盖率。
+        from ..catalog import market
+
+        observed = _score_shadow(root, shadow_rows, findings, devices)
+        trials = market.note_run(root, observed, report_id)
+        ledger["shadow"] = {"observed": observed}
+        limitations.append(_shadow_line(observed, trials))
     hired = [row["hired"] for row in devices if row.get("hired")]
     if hired:
         ledger["external"] = hired
@@ -311,6 +332,8 @@ def normalize(
         status="new",
         origin="initial",
         concluded_by=concluded_by_for(tool, raw.rule_id),
+        evidence_tier=str((raw.extra or {}).get("evidence_tier") or ""),
+        evidence_digest=str((raw.extra or {}).get("evidence_digest") or ""),
         first_seen_round=1,
         last_seen_round=1,
     )
@@ -469,6 +492,9 @@ _PACK_EXTENSIONS = {
 }
 
 
+_SHADOW_SAMPLES = 40
+
+
 def _pack_targets(instrument_id: str, files: list[str]) -> list[str]:
     exts = _PACK_EXTENSIONS.get(instrument_id, set())
     return [path for path in files if Path(path).suffix.lower() in exts]
@@ -546,6 +572,253 @@ async def _attach_user_instruments(root, case, report_id, files, selected, devic
         except AdapterError as exc:
             devices.append({"tool": instrument_id, "available": True, "version": "semgrep", "outcome": "retry"})
             limitations.append(f"{instrument_id}: {exc}")
+
+
+async def _attach_market_instruments(
+    root, case, report_id, files, devices, findings, limitations, timeout_ms,
+) -> list[dict]:
+    """市场装的第三方仪器：照跑。
+
+    分两档走，差别只在「发现去哪」：
+    - `probation`（默认）：发现不入 findings 表，只留位置键进影子账。
+      于是报告、处方、疗效、差分四条路都不需要各自记得排除它——
+      少一个忘记排除的地方，就少一次污染。
+    - `active`（转正后）：和仓库自带的仪器一样进 findings、进设备台账。
+
+    位置键用来回答转正要问的那个问题：这台仪器提的东西，
+    和现任查出的是不是同一批。
+    """
+    from ..catalog import market
+    from ..catalog.external_run import run_hired
+    from ..catalog.mcp_client import run_mcp
+    from ..catalog.packs import scan_rules
+
+    rows, notes = market.plan(root)
+    limitations.extend(notes)
+    observed: list[dict] = []
+    for ident, inst in rows.items():
+        transport = str(inst.get("transport") or "")
+        targets = files
+        exts = {f".{item}" for item in inst.get("extensions") or []}
+        if exts:
+            targets = [path for path in files if Path(path).suffix.lower() in exts]
+        try:
+            if transport == "mcp":
+                got = await run_mcp(root, inst, files, timeout_ms)
+            elif transport == "external":
+                got = await run_hired(root, inst, files, timeout_ms)
+            elif transport == "semgrep":
+                if not targets:
+                    observed.append(_shadow_row(ident, inst, "quiet", [], "本 scope 无适配文件", case.id))
+                    continue
+                raws = await scan_rules(root, targets, inst["rules"], ident, timeout_ms)
+                got = {
+                    "record": {
+                        "id": ident, "status": "ran" if raws else "quiet",
+                        "note": f"交产物 {len(raws)} 条", "findings": len(raws), "sandbox": False,
+                    },
+                    "raws": raws,
+                    "limitations": [],
+                }
+            else:
+                # 第三方不能用 builtin 档（校验已拦），这里兜住历史遗留文件。
+                observed.append(_shadow_row(ident, inst, "failed", [], f"不认识的跑法：{transport or '空'}", case.id))
+                continue
+        except AdapterError as exc:
+            observed.append(_shadow_row(ident, inst, "failed", [], str(exc)[:120], case.id))
+            continue
+        except Exception as exc:  # noqa: BLE001 —— 影子仪器挂了不该带崩这次检验
+            observed.append(_shadow_row(ident, inst, "failed", [], f"{type(exc).__name__}: {exc}"[:120], case.id))
+            continue
+
+        limitations.extend(got.get("limitations") or [])
+        records = [_raw_row(raw) for raw in got.get("raws") or []]
+        status = str((got.get("record") or {}).get("status") or "ran")
+        if inst.get("tier") == "active":
+            if records:
+                _fold_hired(
+                    root, case, report_id, ident,
+                    {"record": got.get("record") or {"id": ident, "status": status},
+                     "raws": records, "limitations": []},
+                    findings, [], devices, transport,
+                )
+                # 转正后它就是现任，扩展名要带进设备行——
+                # 否则它覆盖的范围到了缺口账上查无此仪器，缺口会一直报。
+                devices[-1]["extensions"] = list(inst.get("extensions") or [])
+            else:
+                devices.append({
+                    "tool": ident, "available": status != "absent",
+                    "version": transport,
+                    "outcome": "ok" if status in {"ran", "quiet"} else "terminal",
+                    "hired": got.get("record") or {"id": ident, "status": status},
+                    "extensions": list(inst.get("extensions") or []),
+                })
+            continue
+
+        keys = []
+        for raw in records:
+            finding = normalize(_as_raw(raw), ident, case.id, report_id, root)
+            # normalize 留空指纹，要 stamp 才补。影子不入库，所以自己盖一次。
+            stamp_findings([finding])
+            keys.append({
+                "file": finding.file_path,
+                "line": int(finding.line_start or 0),
+                "rule_id": finding.rule_id,
+                "fp": finding.fingerprint,
+            })
+            if len(keys) >= _SHADOW_SAMPLES:
+                break
+        row = _shadow_row(ident, inst, status, keys, "", case.id)
+        # 交了多少和核了多少是两件事：抽到 40 条以外的不做判定，
+        # 但账上不能把 3000 条写成 40 条——那是另一个谎。
+        row["findings"] = len(records)
+        row["examined"] = len(keys)
+        observed.append(row)
+    return observed
+
+
+def _raw_row(raw) -> dict:
+    """外聘进程给 dict，外聘 MCP 和 semgrep 给 RawFinding。统一成 dict 交给下游。"""
+    if isinstance(raw, RawFinding):
+        return {
+            "rule_id": raw.rule_id,
+            "message": raw.message,
+            "file_path": raw.file_path,
+            "line_start": int(raw.line_start or 0),
+            "line_end": int(raw.line_end or 0),
+            "severity": raw.severity,
+        }
+    return {
+        "rule_id": str(raw.get("rule_id") or "external"),
+        "message": str(raw.get("message") or ""),
+        "file_path": str(raw.get("file_path") or ""),
+        "line_start": int(raw.get("line_start") or 0),
+        "line_end": int(raw.get("line_end") or 0),
+        "severity": str(raw.get("severity") or "major"),
+    }
+
+
+def _as_raw(raw) -> RawFinding:
+    if isinstance(raw, RawFinding):
+        return raw
+    return RawFinding(
+        rule_id=str(raw.get("rule_id") or "external"),
+        severity=str(raw.get("severity") or "major"),
+        file_path=str(raw.get("file_path") or ""),
+        line_start=int(raw.get("line_start") or 0),
+        line_end=int(raw.get("line_end") or 0),
+        message=str(raw.get("message") or ""),
+    )
+
+
+def _shadow_row(ident: str, inst: dict, status: str, keys: list[dict], note: str,
+                case_id: str = "") -> dict:
+    return {
+        "instrument": ident,
+        "tier": str(inst.get("tier") or "probation"),
+        "ran": status,
+        "findings": len(keys),
+        "examined": len(keys),
+        "samples": keys[:_SHADOW_SAMPLES],
+        "note": note[:200],
+        "case_id": case_id,
+    }
+
+
+def _score_shadow(root: str, observed: list[dict], findings: list[Finding],
+                  devices: list[dict]) -> list[dict]:
+    """给影子行补三个数，就是转正判据要用的那三个。
+
+    - `corroborated`：它点的位置，现任也在同一处点了名（按位置比，不按规则号）；
+    - `checkable`：它点的位置，落在现任也看的文件类型上（分母，少了比率没意义）；
+    - `bad`：它点的位置根本不存在（文件不在范围、行号越界）。
+
+    这三个数只写进覆盖账，不进报告正文——影子期的结论仍然"不存在"。
+    """
+    from ..catalog import probation
+
+    covered = probation.covered_extensions(root, devices)
+    indexed = probation.spots(findings)
+    paths = [key.get("file") for row in observed for key in row.get("samples") or []]
+    counts = _line_counts(root, paths)
+    # 误报率的对照基线：同一批现任发现里有多少条点的位置不存在。
+    # 现任通常为 0，但"通常"不能写成"必然"，所以还是数一遍（有上限）。
+    # 数一次就够，不按仪器数量重复数。
+    inc_bad = _incumbent_bad(root, findings)
+    for row in observed:
+        samples = list(row.get("samples") or [])
+        row["corroborated"] = probation.corroborated(samples, indexed)
+        row["checkable"] = probation.checkable_count(samples, covered)
+        row["bad"] = probation.count_bad(samples, counts)
+        row["incumbent_claims"] = len(findings)
+        row["incumbent_bad"] = inc_bad
+    return observed
+
+
+_BAD_BASELINE_CAP = 500
+
+
+def _incumbent_bad(root: str, findings: list[Finding]) -> int:
+    """现任发现里点空位置的有几条。用来给影子仪器的误报率一个对照。"""
+    sample = list(findings)[:_BAD_BASELINE_CAP]
+    counts = _line_counts(root, [item.file_path for item in sample])
+    rows = [{"file": item.file_path, "line": int(item.line_start or 0)} for item in sample]
+    from ..catalog import probation
+
+    return probation.count_bad(rows, counts)
+
+
+def _line_counts(root: str, paths) -> dict[str, int | None]:
+    """每个文件有多少行。读不到就记 None（=这条位置算不存在）。
+
+    只用来判定"行号越界"这一种误报，所以不存在就是 None，不区分
+    "被排除"和"真没有"——这两种都说明它点错了地方。
+    """
+    from ..core.fingerprint import normalize_path
+
+    base = Path(root)
+    out: dict[str, int | None] = {}
+    for raw in paths or []:
+        key = normalize_path(str(raw or ""))
+        if not key or key in out or len(out) >= _BAD_BASELINE_CAP:
+            continue
+        if ".." in key.split("/"):
+            out[key] = None
+            continue
+        try:
+            out[key] = sum(1 for _ in (base / key).open("rb"))
+        except OSError:
+            out[key] = None
+    return out
+
+
+def _shadow_line(observed: list[dict], trials: dict[str, dict] | None = None) -> str:
+    """影子期的那一行。
+
+    发现不进报告，但「装了什么、跑了没有、离转正还差多少」必须说。
+    不说就等于静默降级——装了东西没生效却看起来一切正常，是最难查的那类问题。
+    """
+    from ..catalog import probation
+
+    parts = []
+    for row in observed:
+        ident = row.get("instrument") or "?"
+        if row.get("ran") not in ("ran", "quiet"):
+            parts.append(f"{ident} 没跑成（{row.get('note') or row.get('ran')}）")
+            continue
+        body = f"{ident} 交 {row.get('findings', 0)} 条"
+        examined = int(row.get("examined") or 0)
+        if examined and examined < int(row.get("findings") or 0):
+            body += f"（核了 {examined} 条）"
+        body += f"，与现任同处 {row.get('corroborated', 0)} 条"
+        book = probation.load((trials or {}).get(ident))
+        if book["runs"] or book["failed"]:
+            body += f"，样本 {book['runs'] + book['failed']}/{probation.MIN_RUNS} 轮"
+        parts.append(body)
+    return (
+        "市场仪器（影子期）：" + "；".join(parts) + "。"
+        "这些只进覆盖账，不进结论、不进处方、不进疗效。"
+    )
 
 
 async def _run_catalog_instruments(root, case, report_id, files, selected, devices, findings, limitations, timeout_ms):
@@ -696,6 +969,7 @@ async def scan(
     tools: list[str] | None = None,
     timeout_ms: int = 120_000,
     stage_confirmed: bool = False,
+    ack: str = "",
     page: int = 1,
     size: int = 50,
     order_by: str = "severity desc",
@@ -719,9 +993,13 @@ async def scan(
                             next_action="先 hosp_register 挂号")
 
         # 叫号检查：挂号单或补片检查单待确认时挂起，用户确认后重调本工具放行
-        from ..api.capabilities import admit_stage
+        from ..api.capabilities import admit_stage, artifact_digest
 
-        admit_stage(stage_confirmed, case.pending_gate or "")
+        _artifact, expected = await artifact_digest(db, case)
+        gate_event = admit_stage(
+            stage_confirmed, case.pending_gate or "",
+            ack=ack, expected=expected, project_root=root,
+        )
         if case.pending_gate and not stage_confirmed:
             from ..core.questions import release, stage_gate_question
 
@@ -829,21 +1107,42 @@ async def scan(
             limitations[:] = [row for row in limitations if not str(row).startswith("检查事项 ")]
             limitations.append(summarize_checks(checks))
         ledger = remember_capabilities(ledger, case.coverage)
-        from ..catalog.loop import note_recurrence
-
-        ledger = note_recurrence(root, findings, limitations, ledger)
         from ..catalog.host_scan import record as record_host_scan
         from ..catalog.host_scan import view as host_scan_view
         from ..catalog.host_scan import write_plan
         from ..core.assist import current_assist
 
+        # 先记本轮已读，再算缺口——否则「文档没人读」会被写成「文档没有仪器覆盖」。
         ledger = record_host_scan(ledger, files, current_assist(), None)
+        read_now = set((ledger.get("host_scan") or {}).get("read") or [])
+        from ..catalog.ledger import ensure as ensure_books, record_deviation, record_scope_gaps
+
+        ledger = ensure_books(ledger)
+        gap_notes = record_scope_gaps(ledger, files, devices, case_id, root, read=read_now)
+        limitations.extend(gap_notes)
+        if files and not ledger.get("units") and not gap_notes:
+            record_deviation(
+                ledger, "silent_degrade", stage="scanned", case_id=case_id, round_no=1,
+                detail="本轮没有覆盖单元，限制项也没写未查范围。",
+            )
+        if gate_event:
+            record_deviation(
+                ledger, str(gate_event.get("kind") or "gate_bypass"),
+                stage="scanned", case_id=case_id, round_no=1,
+                detail=str(gate_event.get("detail") or ""),
+            )
+        from ..catalog.loop import note_recurrence
+
+        ledger = note_recurrence(root, findings, limitations, ledger)
         host_scan = host_scan_view(
             files, ledger, [str(row.get("question") or row.get("id") or "") for row in checks],
         )
         host_scan["plan_path"] = write_plan(root, case_id, files, ledger)
 
         # 检验报告（PR 可贴）
+        # 渲染前把本轮账挂回 case：报告里的偏差、招聘启事都是从 case.coverage 读的，
+        # 不挂就是拿上一轮的账写这一轮的报告。
+        case.coverage = ledger
         case.updated_at = now_ms()
         md = render_scan_report(
             case, report_id, devices, findings, limitations, memory_context, checks,
@@ -896,7 +1195,10 @@ async def scan(
             "checks": checks,
             "host_scan": host_scan,
             "report_path": str(report_path),
-            "handoff": handoff(case_id, "scanned", case.auto_advance, next_tool="hosp_diagnose"),
+            "handoff": handoff(
+                case_id, "scanned", case.auto_advance, next_tool="hosp_diagnose",
+                artifact_digest=digest_file(report_path),
+            ),
         })
 
 
@@ -911,7 +1213,7 @@ async def _supplement(db, root: str, case, timeout_ms: int) -> dict:
     report_id = scan_report.id if scan_report else new_id("rpt")
     ordered = [row["instrument_id"] for row in case.scan_orders]
     devices, limitations, findings, ledger = await collect_findings(
-        root, case, report_id, ordered, timeout_ms, case.coverage,
+        root, case, report_id, ordered, timeout_ms, case.coverage, shadow=False,
     )
     catalog = catalog_instruments()
     seen = {device["tool"] for device in devices}
@@ -950,6 +1252,11 @@ async def _supplement(db, root: str, case, timeout_ms: int) -> dict:
     if note:
         limitations.append(note)
     ledger = note_budget(root, findings, [], limitations, ledger)
+    # 补片不跑影子仪器（只为了一两味指定的设备去拉第三方服务不值），
+    # 但上一轮的观测要留着——否则补一次片，「这台仪器跑过几次」就从账上消失了。
+    prior_shadow = (case.coverage or {}).get("shadow")
+    if isinstance(prior_shadow, dict) and prior_shadow.get("observed"):
+        ledger["shadow"] = prior_shadow
     ledger = remember_capabilities(
         stamp_source_counts(ledger, await db.all_findings(case.id)),
         case.coverage,
@@ -999,5 +1306,8 @@ async def _supplement(db, root: str, case, timeout_ms: int) -> dict:
         ),
         "limitations": limitations,
         "report_path": str(report_path),
-        "handoff": handoff(case.id, "scanned", case.auto_advance, next_tool="hosp_diagnose"),
+        "handoff": handoff(
+            case.id, "scanned", case.auto_advance, next_tool="hosp_diagnose",
+            artifact_digest=digest_file(report_path),
+        ),
     })

@@ -23,12 +23,21 @@ def pack_path(instrument_id: str) -> Path:
     return path
 
 
-def tool_for_rule(rule_id: str, fallback: str) -> str:
+def tool_for_rule(rule_id: str, produced_by: str) -> str:
+    """把通用引擎（semgrep）产出的规则名归到对应院内仪器。
+
+    只对 `produced_by == "semgrep"` 生效。院内尺子（java-review / ts-review 等）
+    自己也用 `java.` / `hotspot.` 前缀，但它们不是 semgrep 规则包——
+    一律重写会把「内置正则尺」记成「semgrep 规则包」，
+    报告于是同时写着「semgrep 未到岗」和几千条 java-pack 发现（假溯源）。
+    """
+    if produced_by != "semgrep":
+        return produced_by
     if rule_id.startswith("java."):
         return "java-pack"
     if rule_id.startswith("hotspot."):
         return "hotspot-ruler"
-    return fallback
+    return produced_by
 
 
 def semgrep_available() -> bool:

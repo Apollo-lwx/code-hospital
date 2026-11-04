@@ -83,19 +83,38 @@ async def _ready(git_repo: str, *cls: type[ScannerAdapter], auto: bool = True) -
 
 
 async def test_draft_carries_rsi_prohibitions(git_repo, monkeypatch):
-    async def fake(_root, task):
-        assert "用药禁忌" in task
-        return {
-            "prohibitions": [{"title": "禁止 eval", "content": "不要用 eval"}],
-            "efficacy": [{"title": "疗效账", "content": "F401 autofix 成功 4 次，失败 1 次"}],
-        }
+    """召回走记忆端口：禁止项进硬约束区，兼容旧键 rsi_prohibitions。"""
 
-    monkeypatch.setattr("code_hospital.integrations.rsi.recall_for_prescribe", fake)
+    class FakePort:
+        channel = "mcp"
+        owner = "hospital"
+
+        async def recall(self, task, *, role="", top_k=None):
+            assert "用药禁忌" in task
+            return {
+                "channel": "mcp", "task": task, "token": "tok-1",
+                "hits": [
+                    {"id": "kn-1", "kind": "prohibition", "tier": "hard",
+                     "title": "禁止 eval", "content": "不要用 eval", "health": {},
+                     "low_confidence": False},
+                    {"id": "kn-2", "kind": "item", "tier": "reference",
+                     "title": "疗效账", "content": "F401 autofix 成功 4 次，失败 1 次",
+                     "health": {}, "low_confidence": False},
+                ],
+                "recalled": ["kn-1", "kn-2"], "injected": 2, "withheld": 0,
+                "decisions": [], "skills": [], "note": "",
+            }
+
+    async def fake_port(_root, **_kw):
+        return FakePort()
+
+    monkeypatch.setattr("code_hospital.integrations.memory_port.open_port", fake_port)
     case_id = await _ready(git_repo, SecretAdapter)
     draft = await prescriber.prescribe(case_id=case_id, project_root=git_repo)
-    assert "rsi_prohibitions" in draft, list(draft)
+    assert draft["memory"]["channel"] == "mcp"
     assert draft["rsi_prohibitions"] == [{"title": "禁止 eval", "content": "不要用 eval"}]
-    assert draft["rsi_efficacy"][0]["title"] == "疗效账"
+    assert draft["memory"]["references"][0]["title"] == "疗效账"
+    assert draft["memory"]["withheld"] == 0
 
 
 async def test_diagnosis_gate_blocks_prescribe(git_repo):

@@ -31,8 +31,10 @@ from .descriptions import (
     DISCHARGE_DESC,
     DISPENSE_DESC,
     INSTRUCTIONS,
+    MARKET_DESC,
     PRESCRIBE_DESC,
     REGISTER_DESC,
+    RULE_DESC,
     SCAN_DESC,
     TREAT_DESC,
 )
@@ -101,6 +103,7 @@ async def hosp_scan(
     tools: list[str] | None = None,
     timeout_ms: int = 120_000,
     stage_confirmed: bool = False,
+    ack: str = "",
     page: int = 1,
     size: int = 50,
     order_by: str = "severity desc",
@@ -115,6 +118,7 @@ async def hosp_scan(
             tools=tools,
             timeout_ms=timeout_ms,
             stage_confirmed=stage_confirmed,
+            ack=ack,
             page=page,
             size=size,
             order_by=order_by,
@@ -138,6 +142,7 @@ async def hosp_diagnose(
     case_id: str,
     use_llm: bool = False,
     stage_confirmed: bool = False,
+    ack: str = "",
     check_answers: dict | None = None,
     project_root: str = "",
     assist: dict | None = None,
@@ -151,6 +156,7 @@ async def hosp_diagnose(
             stage_confirmed=stage_confirmed,
             project_root=project_root,
             check_answers=check_answers,
+            ack=ack,
             assist=assist,
         ))
     except HospitalError as e:
@@ -216,6 +222,7 @@ async def hosp_dispense(
     resolution: str = "",
     dry_run: bool = False,
     stage_confirmed: bool = False,
+    ack: str = "",
     follow_autofix: bool = False,
     project_root: str = "",
     assist: dict | None = None,
@@ -233,6 +240,7 @@ async def hosp_dispense(
             resolution=resolution,
             dry_run=dry_run,
             stage_confirmed=stage_confirmed,
+            ack=ack,
             follow_autofix=follow_autofix,
             project_root=project_root,
             assist=assist,
@@ -258,6 +266,7 @@ async def hosp_discharge(
     waive_reason: str = "",
     distill_to_rsi: bool = False,
     stage_confirmed: bool = False,
+    ack: str = "",
     rounds_decision: str = "",
     gate_decision: str = "",
     level: str = "standard",
@@ -275,6 +284,7 @@ async def hosp_discharge(
             waive_reason=waive_reason,
             distill_to_rsi=distill_to_rsi,
             stage_confirmed=stage_confirmed,
+            ack=ack,
             rounds_decision=rounds_decision,
             gate_decision=gate_decision,
             level=level,
@@ -347,6 +357,260 @@ async def hosp_treat(
 
 
 @mcp.tool(
+    name="hosp_market",
+    description=MARKET_DESC,
+    annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False),
+)
+async def hosp_market(
+    action: str = "list",
+    manifest_path: str = "",
+    instrument_id: str = "",
+    confirm: bool = False,
+    project_root: str = "",
+    ctx: Context | None = None,
+) -> dict:
+    token = bind_host(ctx)
+    try:
+        return finish(await _market(action, manifest_path, instrument_id, confirm, project_root))
+    except HospitalError as e:
+        return finish(_guard(e))
+    except Exception as e:  # noqa: BLE001
+        return finish(internal_error(f"{type(e).__name__}: {e}").payload())
+    finally:
+        reset_host(token)
+
+
+async def _market(action: str, manifest_path: str, instrument_id: str,
+                  confirm: bool, project_root: str) -> dict:
+    """能力市场。装仪器不改仓库，装进来一律先跑影子。"""
+    from ..catalog import market
+    from ..core.errors import invalid_operation
+    from ..departments.reception import resolve_project_root
+
+    root = resolve_project_root(project_root)
+    act = (action or "list").strip().lower()
+    if act == "list":
+        return market.listing(root)
+    if act == "verify":
+        ids = [instrument_id] if instrument_id else []
+        got = market.verify(root, ids)
+        got["note"] = (
+            "manifest 通过不等于跑得动：命令不在 PATH 上就是「装好了但没到岗」。"
+            if any(row["present"] is False for row in got["instruments"])
+            else "已装的全部能读到 manifest。"
+        )
+        return got
+    if act == "add":
+        if not manifest_path:
+            raise invalid_operation(
+                "装仪器要给 manifest_path（一份 manifest.yaml）",
+                target="manifest_path",
+                next_action="写一份 api: code-hospital/v1 的 manifest，再带路径调一次",
+            )
+        got = market.install(root, manifest_path)
+        if not got.get("ok"):
+            raise invalid_operation(
+                "manifest 没装成：" + "；".join(got.get("problems") or ["未知原因"]),
+                target=got.get("id") or "manifest_path",
+                next_action="按问题清单改 manifest 再装，不要改 id 去顶替已有仪器",
+            )
+        return got
+    if act == "retire":
+        got = market.retire(root, instrument_id)
+        if not got.get("ok"):
+            raise invalid_operation(
+                got.get("note") or "没有这台仪器", target="instrument_id",
+            )
+        return got
+    if act == "review":
+        ids = [instrument_id] if instrument_id else []
+        return market.review(root, ids)
+    if act == "promote":
+        got = market.promote(root, instrument_id, confirm=confirm)
+        if not got.get("ok"):
+            # 不够格、要签字、已退役——三种都不是参数写错，是状态不允许。
+            # 用 invalid_operation 是为了让宿主把 note 原样带回给人看。
+            raise invalid_operation(
+                got.get("note") or "转正没成",
+                target=got.get("id") or "instrument_id",
+                next_action=(
+                    "够格但没签字：同一次调用带 confirm=true。"
+                    if got.get("needs_confirm") else
+                    "先按 review 看三个数，缺哪个补哪个；不够格就是不够格，不要绕过。"
+                ),
+            )
+        return got
+    raise invalid_operation(
+        f"不认识的市场动作：{action}", target="action",
+        next_action="action 只能是 list / verify / add / retire / review / promote",
+    )
+
+
+@mcp.tool(
+    name="hosp_rule",
+    description=RULE_DESC,
+    annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False),
+)
+async def hosp_rule(
+    action: str = "list",
+    rule_id: str = "",
+    ref: str = "",
+    ack: str = "",
+    reason: str = "",
+    confirm: bool = False,
+    project_root: str = "",
+    ctx: Context | None = None,
+) -> dict:
+    token = bind_host(ctx)
+    try:
+        return finish(await _rule(action, rule_id, ref, ack, reason, confirm, project_root))
+    except HospitalError as e:
+        return finish(_guard(e))
+    except Exception as e:  # noqa: BLE001
+        return finish(internal_error(f"{type(e).__name__}: {e}").payload())
+    finally:
+        reset_host(token)
+
+
+async def _rule(action: str, rule_id: str, ref: str, ack: str, reason: str,
+                confirm: bool, project_root: str) -> dict:
+    """院规：摆事实、收批准、执行。
+
+    判断不在这里。要不要加严、加哪条，是记忆层的活——医院没有历史，
+    就没有资格说「该加严了」。这里只做三件事：把偏差数出来、
+    把能执行的校验摆出来、把人批过的那条翻到开。
+    """
+    from ..catalog import discipline
+    from ..core.errors import invalid_operation
+    from ..core.questions import present
+    from ..departments.reception import resolve_project_root
+
+    root = resolve_project_root(project_root)
+    act = (action or "list").strip().lower()
+    if act == "list":
+        return await discipline.collect(root)
+    if act == "reject":
+        raise invalid_operation(
+            "不批不需要医院记账",
+            target="action",
+            next_action=(
+                "不批就是不调用 approve，什么都不落盘。"
+                "「被拒过几次、什么时候再提」是记忆层的判断，"
+                "医院不建这份账——换个地方记就会跟记忆层分叉"
+            ),
+        )
+    if act != "approve":
+        raise invalid_operation(
+            f"不认识的院规动作：{action}", target="action",
+            next_action="action 只能是 list / approve",
+        )
+
+    gathered = await discipline.collect(root)
+    if gathered["memory"]["channel"] == "absent":
+        raise invalid_operation(
+            "没有接上记忆基座，不能批准",
+            target="ref",
+            next_action=(
+                "apply_floor 加的是配置里关不掉的校验，关不掉的东西必须能回答「凭什么」。"
+                "接上 rsi 再来批；这一轮医院只看看病，不给自己加不可撤销的约束"
+            ),
+        )
+
+    catalog = {row["id"]: row for row in gathered["checks"]}
+    check_id = (rule_id or "").strip()
+    if not check_id and len(catalog) == 1:
+        check_id = next(iter(catalog))
+    check = catalog.get(check_id)
+    if check is None:
+        raise invalid_operation(
+            f"没有这条可执行的校验：{rule_id or '（空）'}",
+            target="rule_id",
+            next_action=(
+                "只能从 list 返回的 checks 里挑一条；"
+                "医院执行不了的东西批准了也不会生效，那是纸面规范"
+            ),
+        )
+
+    ref = (ref or "").strip()
+    if not ref:
+        raise invalid_operation(
+            "批准必须带 ref（记忆层那条经验的 id）",
+            target="ref",
+            next_action=(
+                "先 action=list 看 memory.hits，挑一条作为依据；"
+                "记忆里没有相关经验时，说明这件事还不该被固化"
+            ),
+        )
+
+    approved_in_call = False
+    if not confirm:
+        # 先让人看一眼再批。有 elicitation 就当场弹卡片，回执由服务端记；
+        # 没有就走约定问题，宿主把话带给用户之后再带 confirm 回来。
+        presented = await present(_approval_question(check, gathered["deviations"], ref))
+        if presented.stop is not None:
+            acted = str((presented.stop.get("question") or {}).get("elicitation_action") or "")
+            if acted in {"decline", "cancel"}:
+                return {"status": "declined", "check": check_id, "note": "没批，什么都没改。"}
+            return presented.stop
+        if presented.choice != "approve":
+            return {"status": "declined", "check": check_id, "note": "没批，什么都没改。"}
+        # 当场批的，用户那一下就是回执，不再要 ack——
+        # 要求一个「证明你看过」的字段，在已经证明你看过之后就是多余的摩擦。
+        approved_in_call = True
+    if not approved_in_call:
+        want = discipline.digest(check_id, ref)
+        if str(ack or "").strip() != want:
+            raise invalid_operation(
+                "批准凭据对不上",
+                target="ack",
+                next_action=(
+                    f"ack 应为 {want}（绑定 check_id 与 ref）；"
+                    "换一条依据就是另一件事，凭据跟着变"
+                ),
+            )
+    from ..api.capabilities import has_receipt
+
+    entry = discipline.approve(
+        root, check_id, ref=ref,
+        channel="elicitation" if has_receipt() else "convention",
+    )
+    return {
+        "status": "approved",
+        "rule": entry,
+        "note": (
+            f"已批：{entry['check']}。从现在起服务端会执行这条校验，"
+            "`code-hospital.yaml` 里关不掉。代价是：" + entry["cost"]
+        ),
+    }
+
+
+def _approval_question(check: dict, rows: list[dict], ref: str) -> dict:
+    from ..core.questions import ask
+
+    related = [row for row in rows if row["kind"] in check["deviates"]]
+    count = sum(int(row["count"]) for row in related)
+    cases = {case for row in related for case in (row.get("cases") or [])}
+    kinds = "、".join(check["deviates"])
+    return ask(
+        "rule_approve",
+        (
+            f"要不要把这条校验固化下来？（{check['id']}）\n"
+            f"起因：{kinds} 累计 {count} 次（涉及 {len(cases)} 个病例）。\n"
+            f"依据：记忆条目 {ref}\n"
+            f"做法：{check['effect']}\n"
+            f"代价：{check['cost']}"
+        )[:1500],
+        [
+            ("approve", "批准，以后按这条硬校验"),
+            ("reject", "不批准，什么都不改"),
+            ("pause", "暂停，什么都不改"),
+        ],
+        "不批准，规则不生效",
+        f'hosp_rule(action="approve", rule_id="{check["id"]}", ref="{ref}")',
+    )
+
+
+@mcp.tool(
     name="hosp_case",
     description=CASE_DESC,
     annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True),
@@ -416,6 +680,23 @@ async def _case_query(
             "counts": await db.case_counts(case.id),
             "created_at": case.created_at, "updated_at": case.updated_at,
         }
+        if case.pending_gate:
+            # 门禁块的唯一用途是「摘要丢了还能取回来」。宿主不主动调也行，
+            # 但它被院规挡住的时候，这就是它唯一的出路——所以必须能取到。
+            from ..api.capabilities import artifact_digest
+            from ..catalog.discipline import requires
+
+            artifact, digest = await artifact_digest(db, case)
+            result["gate"] = {
+                "gate": case.pending_gate,
+                "artifact": artifact,
+                "artifact_digest": digest,
+                "requires_ack": requires(root, "gate_receipt"),
+                "note": (
+                    "确认产物后带 stage_confirmed=true 重调下一阶段；"
+                    "院规要求回执时还要带 ack=artifact_digest。"
+                ),
+            }
         if include == "findings":
             items, total = await db.list_findings(case_id, page=page, size=size)
             # history_refs 为派生字段不入库，查询时按指纹重挂（语义：截至当前的历史）

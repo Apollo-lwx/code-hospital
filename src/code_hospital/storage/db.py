@@ -64,7 +64,9 @@ CREATE TABLE IF NOT EXISTS findings (
     verdict TEXT NOT NULL DEFAULT '',
     unresolved TEXT NOT NULL DEFAULT '',
     attack_class TEXT NOT NULL DEFAULT '',
-    concluded_by TEXT NOT NULL DEFAULT 'instrument'
+    concluded_by TEXT NOT NULL DEFAULT 'instrument',
+    evidence_tier TEXT NOT NULL DEFAULT '',
+    evidence_digest TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_findings_case_fp ON findings(case_id, fingerprint);
 CREATE INDEX IF NOT EXISTS idx_findings_fp ON findings(fingerprint);
@@ -152,6 +154,21 @@ CREATE TABLE IF NOT EXISTS nursing_logs (
     created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_nursing_case ON nursing_logs(case_id, created_at);
+-- 记忆权重账（设计 4.8）。唯一离开 coverage_json 的账：跨病例聚合，
+-- 因为「这条经验在这个仓库长期管不管用」单个病例装不下。
+-- 主键带 project_root：同一条记忆在 A 仓库 0.2、B 仓库 0.9 是正常的。
+CREATE TABLE IF NOT EXISTS memory_weight (
+    memory_id TEXT NOT NULL,
+    project_root TEXT NOT NULL,
+    alpha REAL NOT NULL DEFAULT 1.0,
+    beta REAL NOT NULL DEFAULT 1.0,
+    recurred INTEGER NOT NULL DEFAULT 0,
+    effective INTEGER NOT NULL DEFAULT 0,
+    last_seen_at INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'active',
+    PRIMARY KEY (memory_id, project_root)
+);
+CREATE INDEX IF NOT EXISTS idx_memory_weight_root ON memory_weight(project_root, status);
 """
 
 HOSPITAL_DIR = ".hospital"
@@ -244,6 +261,12 @@ class Database:
             await self.conn.execute(
                 "ALTER TABLE findings ADD COLUMN concluded_by TEXT NOT NULL DEFAULT 'instrument'"
             )
+        # 证据层：模型结论的锚只有四档，historical 行留空表示「没有核对过」。
+        for name in ("evidence_tier", "evidence_digest"):
+            if name not in finding_cols:
+                await self.conn.execute(
+                    f"ALTER TABLE findings ADD COLUMN {name} TEXT NOT NULL DEFAULT ''"
+                )
         await self.conn.execute(
             "UPDATE findings SET concluded_by='host_llm'"
             " WHERE tool='host' OR rule_id='diff.issue'"
@@ -310,8 +333,9 @@ class Database:
             "INSERT INTO cases (id, project_root, title, scope_type, scope_json,"
             " triage_level, status, round, max_rounds, auto_advance, pending_gate,"
             " requested_specialties_json, requested_instruments_json, scan_orders_json,"
-            " instrument_notes_json, visit_kind, chief_complaint, created_at, updated_at)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " instrument_notes_json, visit_kind, chief_complaint, coverage_json,"
+            " created_at, updated_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 case.id, case.project_root, case.title, case.scope_type,
                 json.dumps(case.scope.model_dump(), ensure_ascii=False),
@@ -323,6 +347,7 @@ class Database:
                 json.dumps(case.instrument_notes, ensure_ascii=False),
                 case.visit_kind or "checkup",
                 (case.chief_complaint or "")[:500],
+                json.dumps(case.coverage or {}, ensure_ascii=False),
                 case.created_at, case.updated_at,
             ),
         )
@@ -444,8 +469,9 @@ class Database:
             "INSERT INTO findings (id, case_id, report_id, tool, rule_id, severity,"
             " file_path, line_start, line_end, symbol, message, evidence, fingerprint,"
             " content_key, context_anchor, status, origin, first_seen_round, last_seen_round,"
-            " contract_id, check_id, fixable, verdict, unresolved, attack_class, concluded_by)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " contract_id, check_id, fixable, verdict, unresolved, attack_class, concluded_by,"
+            " evidence_tier, evidence_digest)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             [
                 (
                     f.id, f.case_id, f.report_id, f.tool, f.rule_id, f.severity,
@@ -453,6 +479,7 @@ class Database:
                     f.evidence, f.fingerprint, f.content_key, f.context_anchor, f.status, f.origin,
                     f.first_seen_round, f.last_seen_round, f.contract_id, f.check_id, int(f.fixable),
                     f.verdict, f.unresolved, f.attack_class, f.concluded_by,
+                    f.evidence_tier, f.evidence_digest,
                 )
                 for f in findings
             ],
@@ -821,6 +848,104 @@ class Database:
         )
         await self.conn.commit()
         return log_id
+
+    # ---------- memory_weight（记忆权重账，唯一跨病例的账） ----------
+
+    async def memory_weights(self, ids: list[str], project_root: str) -> dict[str, dict]:
+        """按 id 批量取。没有记录就是 Beta(1,1) 的先验，不写空行。"""
+        ids = [item for item in dict.fromkeys(ids or []) if item]
+        if not ids:
+            return {}
+        out: dict[str, dict] = {}
+        for start in range(0, len(ids), 400):
+            chunk = ids[start:start + 400]
+            marks = ",".join("?" * len(chunk))
+            cur = await self.conn.execute(
+                f"SELECT * FROM memory_weight WHERE project_root=? AND memory_id IN ({marks})",
+                (project_root, *chunk),
+            )
+            for row in await cur.fetchall():
+                out[row["memory_id"]] = dict(row)
+        return out
+
+    async def bump_memory(
+        self, memory_id: str, project_root: str, *,
+        alpha: float = 0.0, beta: float = 0.0,
+        recurred: int = 0, effective: int = 0, status: str = "",
+    ) -> dict:
+        """原子累加。权重账只增不减的只有 alpha/beta 与两个计数，status 单独写。
+
+        不存在时按 Beta(1,1) 建行再加，避免"加了两次但先验加了两遍"。
+        """
+        if not memory_id:
+            return {}
+        await self.conn.execute(
+            "INSERT INTO memory_weight (memory_id, project_root, alpha, beta, recurred,"
+            " effective, last_seen_at, status)"
+            " VALUES (?,?,1.0,1.0,0,0,?,'active')"
+            " ON CONFLICT(memory_id, project_root) DO NOTHING",
+            (memory_id, project_root, now_ms()),
+        )
+        sets = ["last_seen_at=?"]
+        values: list = [now_ms()]
+        if alpha:
+            sets.append("alpha=alpha+?")
+            values.append(float(alpha))
+        if beta:
+            sets.append("beta=beta+?")
+            values.append(float(beta))
+        if recurred:
+            sets.append("recurred=recurred+?")
+            values.append(int(recurred))
+        if effective:
+            sets.append("effective=effective+?")
+            values.append(int(effective))
+        if status:
+            sets.append("status=?")
+            values.append(status)
+        await self.conn.execute(
+            f"UPDATE memory_weight SET {', '.join(sets)}"
+            " WHERE memory_id=? AND project_root=?",
+            (*values, memory_id, project_root),
+        )
+        await self.conn.commit()
+        cur = await self.conn.execute(
+            "SELECT * FROM memory_weight WHERE memory_id=? AND project_root=?",
+            (memory_id, project_root),
+        )
+        row = await cur.fetchone()
+        return dict(row) if row is not None else {}
+
+    async def list_memory_weights(self, project_root: str, status: str = "") -> list[dict]:
+        sql = "SELECT * FROM memory_weight WHERE project_root=?"
+        args: list = [project_root]
+        if status:
+            sql += " AND status=?"
+            args.append(status)
+        cur = await self.conn.execute(sql + " ORDER BY recurred DESC, last_seen_at DESC", tuple(args))
+        return [dict(row) for row in await cur.fetchall()]
+
+    async def resolved_case_refs(self, fingerprints: list[str], project_root: str) -> list[tuple[str, str]]:
+        """这些指纹在本仓库的哪些已出院病例里被判过 resolved。
+
+        复发归因的第二步靠它：新发现落回来，得知道当初是谁宣布它治好了。
+        """
+        wanted = [item for item in dict.fromkeys(fingerprints or []) if item]
+        if not wanted:
+            return []
+        out: list[tuple[str, str]] = []
+        for start in range(0, len(wanted), 400):
+            chunk = wanted[start:start + 400]
+            marks = ",".join("?" * len(chunk))
+            cur = await self.conn.execute(
+                "SELECT DISTINCT f.fingerprint, f.case_id FROM findings f"
+                " JOIN cases c ON c.id=f.case_id"
+                f" WHERE f.fingerprint IN ({marks}) AND f.status='resolved'"
+                " AND c.project_root=? AND c.status IN ('discharged','referred')",
+                (*chunk, project_root),
+            )
+            out.extend((row["fingerprint"], row["case_id"]) for row in await cur.fetchall())
+        return out
 
     # ---------- reports ----------
 

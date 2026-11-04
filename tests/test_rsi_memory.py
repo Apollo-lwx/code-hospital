@@ -54,8 +54,14 @@ def repo_with_rsi(tmp_path: Path) -> str:
     return str(tmp_path)
 
 
-def test_rsi_not_denied():
-    assert not is_denied(".rsi/memory/conventions/a.yaml")
+def test_rsi_is_out_of_scan_scope_but_still_read():
+    """记忆库不进扫描范围，但既往史照旧可读——两件事，两条通道。
+
+    扫描范围回答「哪些文件要检查」；把记忆库算进去，等于让医院检查自己的笔记本：
+    yaml 找不到调用者，覆盖账会被一堆「这条链未建」占满。
+    既往史走 `load_memory_brief` 直接读文件，不经范围枚举，所以不受影响。
+    """
+    assert is_denied(".rsi/memory/conventions/a.yaml")
     assert is_denied(".hospital/reports/x.md")  # 自家病历仍然禁止
 
 

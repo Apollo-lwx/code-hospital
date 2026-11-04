@@ -20,6 +20,20 @@ def rsi_on_path() -> bool:
     return shutil.which("rsi") is not None
 
 
+async def run_recall(root: str, task: str, *, role: str = "", top_k: int | None = None) -> dict:
+    """原始召回（不过滤、不清理）。给记忆端口归一化用。
+
+    `recall_for_prescribe` 是给开方直接用的窄接口，只挑禁止项和疗效账；
+    端口要完整的 prohibitions / items / skills / feedback_token。
+    CLI 没有 `--top-k`（实测只有 `--role`），条数上限由归一化阶段截断。
+    """
+    args = ["recall", task[:500]]
+    if role:
+        args = ["recall", "--role", role[:40], task[:500]]
+    payload = await _run(root, args)
+    return payload if isinstance(payload, dict) else {}
+
+
 async def recall_for_prescribe(root: str, task: str) -> dict:
     """开方前召回禁止项和疗效账。未安装或项目未初始化时两者都是空列表。"""
     from pathlib import Path

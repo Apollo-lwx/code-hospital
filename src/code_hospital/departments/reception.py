@@ -161,6 +161,7 @@ async def register(
             )
         )
 
+    from ..api.capabilities import digest_file
     from ..core.questions import handoff
 
     return {
@@ -171,7 +172,10 @@ async def register(
         "duplicate_cases": duplicates,
         "precheck": {"ran": scope_type != ScopeType.REPO.value, "hits": precheck_hits},
         "report_path": str(report_path),
-        "handoff": handoff(case.id, "registered", auto_advance, next_tool="hosp_scan"),
+        "handoff": handoff(
+            case.id, "registered", auto_advance, next_tool="hosp_scan",
+            artifact_digest=digest_file(report_path),
+        ),
     }
 
 

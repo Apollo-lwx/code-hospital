@@ -111,15 +111,147 @@ def _handoff(case_id: str, approved: bool) -> dict:
     }
 
 
-async def _with_rsi(root: str, payload: dict) -> dict:
-    from ..integrations.rsi import recall_for_prescribe
+_MEMORY_TOP_K = 8
 
-    found = await recall_for_prescribe(root, "开方前召回用药禁忌和疗效账")
-    if found["prohibitions"]:
-        payload["rsi_prohibitions"] = found["prohibitions"]
-    if found["efficacy"]:
-        payload["rsi_efficacy"] = found["efficacy"]
+
+def _memory_task(diagnoses: list, findings_by_id: dict | None = None) -> str:
+    """召回任务描述要具体。
+
+    rsi 的召回按任务描述匹配，一句固定的「开方前召回」只能捞到泛泛的经验。
+    带上本次的问题类型才捞得到「这条规则上次改坏了什么」。
+
+    同时写**规则 id 和病种名**：医院内部叫 `unused-variable`，
+    而人写经验时写的是 `F841`，只给其中一个必然漏。
+
+    只取规则名、病种名与科室名，不带文件路径和源码——那是病历的边界。
+    """
+    rules: set[str] = set()
+    kinds: set[str] = set()
+    for diagnosis in diagnoses:
+        category = str(getattr(diagnosis, "category", "") or "")
+        if category:
+            rules.add(category)
+        specialty = str(getattr(diagnosis, "specialty_id", "") or "")
+        if specialty:
+            kinds.add(specialty)
+        for fid in getattr(diagnosis, "member_ids", []) or []:
+            finding = (findings_by_id or {}).get(fid)
+            rule_id = str(getattr(finding, "rule_id", "") or "") if finding else ""
+            if rule_id:
+                rules.add(rule_id)
+
+    parts = ["开方前召回用药禁忌与既往疗效"]
+    if rules:
+        parts.append("本次问题类型：" + "、".join(sorted(rules)[:4]))
+    if kinds:
+        parts.append("相关科室：" + "、".join(sorted(kinds)[:2]))
+    return "。".join(parts)[:300]
+
+
+async def _recall_memory(root: str, case, db, task: str = "") -> dict:
+    """开方前召回：分档 + 记引用账。返回给宿主的分区结果。
+
+    记忆是外援，不是就诊必经环节：端口连不上、召回超时、格式不对，
+    一律降级成「本轮无记忆」，绝不拦开方。唯一不能省的是把降级**记下来**。
+    """
+    import json
+
+    from ..catalog.ledger import note_memory
+    from ..catalog.memory_weight import apply_policy
+    from ..integrations.memory_port import NullPort, open_port
+
+    task = task or "开方前召回用药禁忌与既往疗效"
+    try:
+        port = await open_port(root)
+        got = await port.recall(task, top_k=_MEMORY_TOP_K)
+    except Exception as exc:  # noqa: BLE001 —— 记忆挂了不该带崩开方
+        port, got = NullPort(root), {
+            "channel": "absent", "hits": [], "recalled": [], "injected": 0,
+            "withheld": 0, "token": "", "decisions": [], "skills": [],
+            "note": f"召回失败：{type(exc).__name__}",
+        }
+
+    hits = list(got.get("hits") or [])
+    withheld = int(got.get("withheld") or 0)
+    if hits:
+        rows = await db.memory_weights([hit.get("id") or "" for hit in hits], root)
+        hits, dropped = apply_policy(hits, rows)
+        withheld += dropped
+        got["injected"] = sum(1 for hit in hits if hit["tier"] in ("hard", "reference"))
+        got["recalled"] = [hit["id"] for hit in hits if hit["id"]]
+
+    coverage = note_memory(
+        dict(case.coverage or {}),
+        channel=str(got.get("channel") or "absent"),
+        owner=port.owner,
+        recalled=list(got.get("recalled") or []),
+        injected=int(got.get("injected") or 0),
+        withheld=withheld,
+        feedback="pending" if got.get("token") else "absent",
+        token=str(got.get("token") or ""),
+        note=str(got.get("note") or "")[:300],
+    )
+    await db.update_case(case.id, coverage_json=json.dumps(coverage, ensure_ascii=False))
+    case.coverage = coverage
+    return _memory_payload(port.owner, hits, withheld, got)
+
+
+def _memory_payload(owner: str, hits: list[dict], withheld: int, got: dict) -> dict:
+    """给宿主的分区注入。硬约束区 / 参考区 / 线索区，措辞由 tier 决定。"""
+    memory = {
+        "channel": str(got.get("channel") or "absent"),
+        "owner": owner,
+        "prohibitions": [hit for hit in hits if hit["tier"] == "hard"],
+        "references": [hit for hit in hits if hit["tier"] == "reference"],
+        "clues": [hit for hit in hits if hit["tier"] == "clue"],
+        "withheld": int(withheld),
+        "decisions": got.get("decisions") or [],
+        "note": str(got.get("note") or "")[:300],
+    }
+    return memory
+
+
+def _attach_memory(payload: dict, memory: dict) -> dict:
+    """把记忆分区挂到草稿上。兼容旧的 rsi_prohibitions 键，不因换端口断掉。"""
+    payload["memory"] = memory
+    if memory.get("prohibitions"):
+        payload["rsi_prohibitions"] = [
+            {"title": hit["title"], "content": hit["content"]}
+            for hit in memory["prohibitions"][:10]
+        ]
     return payload
+
+
+async def _with_memory(root: str, case, db, payload: dict) -> dict:
+    """回放草稿时补一次召回。已有引用账就不重召回，省一次外援调用。"""
+    from ..catalog.ledger import ensure
+
+    book = ensure(dict(case.coverage or {}))["memory"]
+    if book.get("recalled") or book.get("channel") in ("cli", "mcp"):
+        hits = _rehydrate(case, book)
+        return _attach_memory(payload, hits)
+    memory = await _recall_memory(root, case, db)
+    return _attach_memory(payload, memory)
+
+
+def _rehydrate(case, book: dict) -> dict:
+    """从引用账还原注入分区。账里只存 id，正文不在医院——所以这里只给结论。
+
+    这不是降级：正文每次都由 rsi 现取，医院不复刻。没有正文时
+    宿主看到的是「本轮引用过这几条」，而不是过期副本。
+    """
+    recalled = [str(item) for item in (book.get("recalled") or []) if item]
+    return {
+        "channel": str(book.get("channel") or "absent"),
+        "owner": str(book.get("owner") or "hospital"),
+        "prohibitions": [],
+        "references": [],
+        "clues": [],
+        "withheld": int(book.get("withheld") or 0),
+        "decisions": [],
+        "recalled": recalled,
+        "note": "本轮引用账已在开方时记下，正文未重复取。" if recalled else "",
+    }
 
 
 def _draft_payload(case_id: str, rx: dict, report_path: str, reading_path: str = "") -> dict:
@@ -573,6 +705,8 @@ async def prescribe(
             render_reading_report(case, clusters, items, case.requested_specialties),
             encoding="utf-8",
         )
+        # 召回在渲染之前：报告要能写「本轮引用了哪几条」，事后补不上。
+        memory = await _recall_memory(root, case, db, _memory_task(diagnoses, by_id))
         md = render_prescribe_report(case, prescription_id, rx, str(report_path))
         note = f"> 给人看的一页：`{reading_path.name}`。同一函数里的问题放在一起。\n\n"
         md = md.replace("\n---\n\n", "\n---\n\n" + note, 1)
@@ -596,7 +730,9 @@ async def prescribe(
             created_at=created,
         ))
         await db.update_case(case_id, status="prescribed", pending_gate="")
-        drafted = await _with_rsi(root, _draft_payload(case_id, rx, str(report_path), str(reading_path)))
+        drafted = _attach_memory(
+            _draft_payload(case_id, rx, str(report_path), str(reading_path)), memory,
+        )
         if admission_drops:
             drafted["admission_drops"] = admission_drops
         return drafted
@@ -627,7 +763,7 @@ async def _decide(
 
         require_receipt(user_confirmed, "user_confirmed")
     if not approve:
-        return await _with_rsi(root, _draft_payload(case.id, rx, report_path))
+        return await _with_memory(root, case, db, _draft_payload(case.id, rx, report_path))
 
     items = rx["items"]
     if decision == "reject":

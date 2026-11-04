@@ -220,6 +220,7 @@ async def _file_host_diff(db, root: str, case, answers: dict | None) -> str:
     coverage = dict(case.coverage or {})
     if ledger:
         coverage["filing"] = ledger
+        _note_filing(coverage, ledger, case)
     if specs:
         existing = await db.all_findings(case.id)
         seen = {
@@ -246,28 +247,41 @@ async def _file_host_diff(db, root: str, case, answers: dict | None) -> str:
     reports = await db.list_reports(case.id)
     scan_report = next((row for row in reports if row.stage == "scan"), None)
     report_id = scan_report.id if scan_report else new_id("rpt")
-    findings = [
-        normalize(
+    from ..safety import evidence as evidence_port
+
+    # 先核证据再落库。核对是纯字符串比对，不调模型、不猜意图。
+    cache: dict = {}
+    anchors = [
+        evidence_port.check(
+            root, spec["file_path"], spec["line_start"], spec["line_end"],
+            spec.get("evidence") or "", cache,
+        )
+        for spec in specs
+    ]
+    findings = []
+    for spec, anchor in zip(specs, anchors):
+        severity, _why = evidence_port.grade(spec.get("severity") or "major", anchor["tier"])
+        findings.append(normalize(
             RawFinding(
                 rule_id=spec.get("rule_id") or "diff.issue",
                 message=spec["message"],
                 file_path=spec["file_path"],
-                line_start=spec["line_start"],
-                line_end=spec["line_end"],
-                severity=spec.get("severity") or "major",
+                line_start=anchor["line_start"] or spec["line_start"],
+                line_end=anchor["line_end"] or spec["line_end"],
+                severity=severity,
                 evidence=spec.get("evidence") or "",
                 extra={
                     "check_id": spec.get("check_id") or "",
                     "symbol": spec.get("symbol") or "",
+                    "evidence_tier": anchor["tier"],
+                    "evidence_digest": anchor["digest"],
                 },
             ),
             "host",
             case.id,
             report_id,
             root,
-        )
-        for spec in specs
-    ]
+        ))
     stamp_findings(findings)
     await db.insert_findings(findings)
     from ..catalog.coverage import stamp_source_counts
@@ -275,9 +289,39 @@ async def _file_host_diff(db, root: str, case, answers: dict | None) -> str:
     stored = await db.all_findings(case.id)
     note = _remember_links(coverage, ledger, stored, note)
     coverage = stamp_source_counts(coverage, stored)
+    book = evidence_port.summary(anchors)
+    coverage = _note_evidence(coverage, book, anchors, case)
+    # 模型这一轮读了哪些文件，当场在缺口账上兑现。否则同一份报告会一边写
+    # 「引文已核」，一边写「文档没有模型读过」。
+    from ..catalog.host_scan import record as record_host_scan
+    from ..catalog.ledger import refresh_reading_gaps
+
+    coverage = record_host_scan(coverage, files, None, answers)
+    refresh_reading_gaps(
+        coverage, files, (coverage.get("host_scan") or {}).get("read") or [], root, case.id,
+    )
+    tail = evidence_port.limitation_line(book)
+    if tail:
+        note = f"{note} {tail}".strip()
     await db.update_case(case.id, coverage_json=json.dumps(coverage, ensure_ascii=False))
     case.coverage = coverage
     return note
+
+
+def _note_evidence(coverage: dict, book: dict, anchors: list[dict], case) -> dict:
+    """记本轮证据账。引文对不上单独记一条偏差——那是编造，不是口径问题。"""
+    from ..catalog.ledger import note_evidence, record_deviation
+
+    out = note_evidence(coverage, book)
+    bad = [row for row in anchors or [] if row.get("tier") == "ungrounded"]
+    if bad:
+        head = "；".join(f"{row['file']}:{row['line_start']} {row['detail']}" for row in bad[:3])
+        record_deviation(
+            out, "unfounded_claim",
+            stage="diagnosed", case_id=case.id, round_no=case.round,
+            detail=head, count=len(bad),
+        )
+    return out
 
 
 def _remember_links(coverage: dict, ledger: dict | None, stored, note: str) -> str:
@@ -295,7 +339,59 @@ def _remember_links(coverage: dict, ledger: dict | None, stored, note: str) -> s
     return note
 
 
-from ..api.capabilities import hosted
+def _note_filing(coverage: dict, ledger: dict, case) -> None:
+    """交卷不合契约也要留一条账。不记的话，宿主下次还会这样交。"""
+    from ..catalog.ledger import record_deviation
+
+    bad = [row for row in ledger.get("items") or [] if row.get("status") == "invalid"]
+    if not bad:
+        return
+    detail = "；".join(f"{row.get('id', '')}：{row.get('note', '')[:60]}" for row in bad)
+    record_deviation(
+        coverage, "filing_invalid",
+        stage="diagnosed", case_id=case.id, round_no=case.round,
+        detail=detail, count=len(bad),
+    )
+
+
+_CLEAR_CLAIMS = ("检查通过", "没有漏洞", "没有问题", "无问题")
+
+
+def _note_clear_claim(coverage: dict, diagnosis, members: list, case) -> None:
+    """宿主写「检查通过」类断言时记一条。这类话不能当结论用，但必须可数。"""
+    from ..catalog.ledger import record_deviation
+
+    if getattr(diagnosis, "concluded_by", "") != "host_llm":
+        return
+    text = "；".join(str(getattr(item, "message", "") or "") for item in members)
+    hit = next((word for word in _CLEAR_CLAIMS if word in text), "")
+    if not hit:
+        return
+    record_deviation(
+        coverage, "unsupported_clear",
+        stage="diagnosed", case_id=case.id, round_no=case.round,
+        detail=f"宿主结论含「{hit}」，已按待核实处理。",
+    )
+
+
+def _keep_books(coverage: dict, case, clusters: list, gate_event: dict | None) -> dict:
+    """这一轮的三本账。缺口记证据，偏差记次数，都不改判断结果。"""
+    from ..catalog.ledger import ensure, record_deviation, record_unmatched
+
+    out = ensure(dict(coverage or {}))
+    if gate_event:
+        record_deviation(
+            out, str(gate_event.get("kind") or "gate_bypass"),
+            stage="diagnosed", case_id=case.id, round_no=case.round,
+            detail=str(gate_event.get("detail") or ""),
+        )
+    for diagnosis, members in clusters:
+        record_unmatched(out, diagnosis, members, case.id)
+        _note_clear_claim(out, diagnosis, members, case)
+    return out
+
+
+from ..api.capabilities import digest_file, hosted
 
 
 @hosted
@@ -305,6 +401,7 @@ async def diagnose(
     stage_confirmed: bool = False,
     project_root: str = "",
     check_answers: dict | None = None,
+    ack: str = "",
 ) -> dict:
     """hosp_diagnose 主逻辑。模板归因。宿主判断从 assist 或 check_answers 交回。"""
     from .reception import resolve_project_root
@@ -320,9 +417,13 @@ async def diagnose(
                 target="case_id",
                 next_action="先 hosp_scan 完成检验，并确认检验报告",
             )
-        from ..api.capabilities import admit_stage
+        from ..api.capabilities import admit_stage, artifact_digest
 
-        admit_stage(stage_confirmed, case.pending_gate or "")
+        _artifact, expected = await artifact_digest(db, case)
+        gate_event = admit_stage(
+            stage_confirmed, case.pending_gate or "",
+            ack=ack, expected=expected, project_root=root,
+        )
         if case.pending_gate and not stage_confirmed:
             reports = await db.list_reports(case_id)
             scan_report = next((r for r in reports if r.stage == "scan"), None)
@@ -434,6 +535,7 @@ async def diagnose(
 
             questions = outside_overlay(root)["diagnose"]
             case.updated_at = now_ms()
+            case.coverage = _keep_books(case.coverage, case, clusters, gate_event)
             md = render_diagnose_report(
                 case, report_id, clusters, stats, use_llm, questions, filing_note,
                 budget_note=(case.coverage or {}).get("budget", {}).get("note") or "",
@@ -478,11 +580,20 @@ async def diagnose(
                 "filing_note": filing_note,
                 "host_scan": host_scan,
                 "report_path": str(report_path),
-                "handoff": handoff(case_id, "diagnosed", case.auto_advance, next_tool="hosp_prescribe"),
+                "handoff": handoff(
+                    case_id, "diagnosed", case.auto_advance, next_tool="hosp_prescribe",
+                    artifact_digest=digest_file(report_path),
+                ),
             }
     from .scanner import scan as run_scan
-    await run_scan(case_id, stage_confirmed=True, project_root=root)
-    return await diagnose(case_id, use_llm, True, root, check_answers)
+
+    # 医院自己决定先补一次检验，不是宿主在确认。所以先把门禁清掉再跑，
+    # 而不是伪造一个 stage_confirmed=true —— 那条路会被院规当成「没有回执的放行」
+    # 挡下来，而这件事里根本没有人需要被挡。
+    async with Database(root) as db:
+        await db.update_case(case_id, pending_gate="")
+    await run_scan(case_id, project_root=root)
+    return await diagnose(case_id, use_llm, False, root, check_answers)
 
 
 def _orders_payload(case) -> dict:

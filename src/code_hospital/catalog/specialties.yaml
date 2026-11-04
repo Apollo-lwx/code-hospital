@@ -9,7 +9,7 @@
   formulary: [debride, guard, split, rename, dedupe, contrast, repair]
 - id: java
   name: Java 语言科
-  formulary: [guard, split, rename, dedupe, contrast, repair]
+  formulary: [debride, guard, split, rename, dedupe, contrast, repair]
 - id: structure
   name: 结构科
   formulary: [split, dedupe, contrast]
