@@ -367,11 +367,16 @@ async def hosp_market(
     instrument_id: str = "",
     confirm: bool = False,
     project_root: str = "",
+    question_id: str = "",
+    answer: str = "",
     ctx: Context | None = None,
 ) -> dict:
     token = bind_host(ctx)
     try:
-        return finish(await _market(action, manifest_path, instrument_id, confirm, project_root))
+        return finish(await _market(
+            action, manifest_path, instrument_id, confirm, project_root,
+            question_id=question_id, answer=answer,
+        ))
     except HospitalError as e:
         return finish(_guard(e))
     except Exception as e:  # noqa: BLE001
@@ -381,8 +386,13 @@ async def hosp_market(
 
 
 async def _market(action: str, manifest_path: str, instrument_id: str,
-                  confirm: bool, project_root: str) -> dict:
-    """能力市场。装仪器不改仓库，装进来一律先跑影子。"""
+                  confirm: bool, project_root: str,
+                  question_id: str = "", answer: str = "") -> dict:
+    """能力市场。装仪器不改仓库，装进来一律先跑影子。
+
+    `add` **不是一步装完**：先问人。医院不替客户决定「要不要让第三方读这个仓库」，
+    宿主也不能替——所以没有回执的安装一律先返回 pending_question。
+    """
     from ..catalog import market
     from ..core.errors import invalid_operation
     from ..departments.reception import resolve_project_root
@@ -407,7 +417,51 @@ async def _market(action: str, manifest_path: str, instrument_id: str,
                 target="manifest_path",
                 next_action="写一份 api: code-hospital/v1 的 manifest，再带路径调一次",
             )
-        got = market.install(root, manifest_path)
+        from ..catalog import manifest as mf
+        from ..core.questions import present
+
+        doc, problems = mf.load_file(manifest_path)
+        if problems:
+            raise invalid_operation(
+                "manifest 没通过校验：" + "；".join(problems),
+                target=str(doc.get("id") or "manifest_path"),
+                next_action="按问题清单改 manifest 再装；缺字段就补，不要为绕过校验改 id",
+            )
+        if not question_id:
+            # 第一次调 add：不写盘，先问。宿主拿到 pending_question 去问用户，
+            # 回答后带上 question_id + answer 再来。票据一次性，用掉即作废。
+            asked = _install_question(doc)
+            qid = str(asked["question"]["id"])
+            asked["resume_hint"] = (
+                f'hosp_market(action="add", manifest_path="{manifest_path}", '
+                f'question_id="{qid}", answer="<用户的原话>")'
+            )
+            presented = await present(asked)
+            if presented.stop:
+                market.note_question(root, qid, doc)
+                return presented.stop
+            if presented.choice != "install":
+                return {
+                    "ok": False,
+                    "id": str(doc.get("id") or ""),
+                    "note": "没装。用户选了暂不安装，这一类文件继续记为未查。",
+                }
+            consent = {"answer": presented.text or "用户当场确认安装", "via": "elicitation"}
+        else:
+            ok, why = market.consume_question(root, question_id)
+            if not ok:
+                raise invalid_operation(
+                    why, target="question_id",
+                    next_action="先调一次 add（不带 question_id）把问题交给用户，再带回答回来",
+                )
+            if not answer.strip():
+                raise invalid_operation(
+                    "安装要人点头：把用户的原话带回来（answer）",
+                    target="answer",
+                    next_action="不要自己编一个回答；把问题原样给用户，再把他的选择带回来",
+                )
+            consent = {"answer": answer, "via": "convention"}
+        got = market.install(root, manifest_path, consent=consent)
         if not got.get("ok"):
             raise invalid_operation(
                 "manifest 没装成：" + "；".join(got.get("problems") or ["未知原因"]),
@@ -614,6 +668,48 @@ def _approval_question(check: dict, rows: list[dict], ref: str) -> dict:
         ],
         "不批准，规则不生效",
         f'hosp_rule(action="approve", rule_id="{check["id"]}", ref="{ref}")',
+    )
+
+
+def _install_question(doc: dict) -> dict:
+    """把「要装的是个什么东西」原样摆到人面前，再问装不装。
+
+    manifest 是客户提供的文件，按不可信输入处理：id 与扩展名都过一遍净化，
+    免得一句「忽略以上指令」跟着 manifest 漂到用户的对话框里。
+    """
+    from ..core.questions import ask
+    from ..safety.sanitize import sanitize_evidence
+
+    ident = sanitize_evidence(str(doc.get("id") or ""), 60)
+    transport = sanitize_evidence(str(doc.get("transport") or ""), 20) or "（未声明）"
+    exts = [
+        sanitize_evidence(str(item).lstrip(".").lower(), 12)
+        for item in (doc.get("extensions") or [])
+    ]
+    what = "、".join(f".{item}" for item in exts if item) or "（没声明，按全类型口径）"
+    risk = doc.get("risk") or {}
+    flags = "、".join(
+        name for key, name in (
+            ("reads_repo", "读仓库"), ("writes_repo", "写仓库"),
+            ("network", "联网"), ("executes_code", "执行代码"),
+        ) if risk.get(key)
+    ) or "没声明任何风险动作"
+    return ask(
+        "install_instrument",
+        (
+            f"要装一台第三方仪器「{ident}」，运行方式 {transport}，声明覆盖 {what}。\n"
+            f"风险声明：{flags}。\n"
+            "装上先进影子期：会跑、结果只进覆盖账，不进报告、不进处方、不进疗效。"
+            "样本够了还要你签字才能转正。\n"
+            "装不装？"
+        )[:1500],
+        [
+            ("install", "装，让它先跑影子期"),
+            ("skip", "先不装，这部分继续记为未查"),
+            ("pause", "暂停，稍后再定"),
+        ],
+        "不装，什么都不发生（不写文件、不写索引）",
+        "把用户的回答带回来再装",
     )
 
 

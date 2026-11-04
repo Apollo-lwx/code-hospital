@@ -277,11 +277,17 @@ action:
   with trial progress (runs / claims / corroborated) and the current verdict.
 - verify: re-validate installed manifests and check whether commands are on PATH.
   "installed" is not the same as "runnable" - this is the call that tells them apart.
-- add: install a manifest file (manifest_path). Rejected if it reuses an existing id, asks
-  for builtin transport, points a command outside PATH, or carries shell metacharacters in
-  args. A third-party manifest claiming tier=core is quietly downgraded to probation - core
-  belongs to shipped instruments only. A device that declares writes_repo installs but will
-  not run during probation (the comparison source code must stay fixed).
+- add: install a manifest file (manifest_path). **It does not install on the first call.**
+  Installing a third party means handing it your repository, so the first call asks the user
+  and returns pending_question - the description of the device, its transport, its extensions
+  and its declared risks, nothing else. Call again with question_id and answer (the user's own
+  words) to finish. Tickets are single-use and expire in 24 hours; without one the install is
+  refused. Whatever the user said is stored on the instrument record, so "who agreed to this"
+  stays answerable afterwards. Rejected if it reuses an existing id, asks for builtin transport,
+  points a command outside PATH, or carries shell metacharacters in args. A third-party manifest
+  claiming tier=core is quietly downgraded to probation - core belongs to shipped instruments
+  only. A device that declares writes_repo installs but will not run during probation (the
+  comparison source code must stay fixed).
 - review: recompute the promotion verdict for one instrument or all installed ones.
 - promote: needs instrument_id and confirm=true. Refused for retired instruments (reinstall
   and collect samples again) and for instruments still in probation without enough evidence.

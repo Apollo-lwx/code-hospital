@@ -192,7 +192,7 @@ confirms that nursing record.
 | `hosp_dispense` | Apply one approved autofix item, or skip manual; llm_patch only prepares | 可用（成药会改代码；煎药提交未开放） |
 | `hosp_discharge` | Recheck diff, quality gate, discharge summary, follow-up | 可用（不改代码；验收命令未执行） |
 | `hosp_treat` | One-shot orchestration (auto mode) | P2 |
-| `hosp_market` | Install / verify / list / review / promote / retire / restore instruments (shipped ones included) | 可用（装进来先跑影子；转正要有样本 + 人签字；退役可逆） |
+| `hosp_market` | Install / verify / list / review / promote / retire / restore instruments (shipped ones included) | 可用（装之前先问人；装进来先跑影子；转正要有样本 + 人签字；退役可逆） |
 | `hosp_rule` | Show deviation counts and enforceable checks; turn an approved one on | 可用（批准后服务端真执行，配置关不掉；没接记忆层则不批） |
 
 ### Market (能力市场)
@@ -208,6 +208,13 @@ this case concludes, so never call it mid-visit.
   do not upgrade it into a finding.
 - `verify` distinguishes "installed" from "runnable". A command missing from PATH is
   「装好了但没到岗」, not 「检查通过」. Never report the second.
+- `add` **does not install on the first call**. It returns `pending_question`
+  (kind `install_instrument`): what the device is, what it declares to cover, what it
+  declares to touch. Put that question to the user **verbatim**, then call `add` again with
+  `question_id` and `answer` (the user's own words). Do not answer it yourself, do not
+  invent a reason, do not skip the question because "the user obviously wants this" —
+  installing a third party hands it the repository. Tickets are single-use and expire in
+  24 hours. If the user says no, stop: that part of the range stays recorded as unchecked.
 - `add` refuses an id that collides with a core instrument. Do not work around it by
   renaming; a device that impersonates a shipped ruler corrupts every later diff.
 - `retire` keeps the manifest and the record. Do not delete files under

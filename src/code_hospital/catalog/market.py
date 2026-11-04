@@ -27,6 +27,10 @@ from . import manifest as mf
 MARKET_DIR = ".hospital/market"
 _INDEX = "index.json"
 _MANIFEST_DIR = "manifests"
+# 安装票据：医院问过、还没被用掉的那一次提问。用掉即删，过期作废。
+# 这不是第二本账——里面只有「问过什么、什么时候问的」，不复制任何既有状态。
+_CONSENT = "consent.json"
+TICKET_TTL = 24 * 3600 * 1000
 
 
 def market_root(project_root: str) -> Path:
@@ -129,6 +133,34 @@ def blocked_reason(doc: dict) -> str:
     return ""
 
 
+def claims(project_root: str) -> dict[str, dict]:
+    """哪些扩展名已经有仪器认领（装了或在岗）。
+
+    报告要用它把「招聘启事」和「已招到」接起来，否则读者分不清没人管还是在试用。
+    认领关系**从 manifest 声明的 extensions 推出来**，不另存一张表：
+    存了就有两份记录，装一台、退一台之后必然有一份是旧的。
+    """
+    out: dict[str, dict] = {}
+    for ident, doc in installed(project_root).items():
+        if doc.get("problems") or doc.get("tier") not in ("probation", "active"):
+            continue
+        state = (
+            "已转正" if doc.get("tier") == "active"
+            else f"影子期第 {int((doc.get('trial') or {}).get('runs') or 0)} 轮"
+        )
+        row = {"instrument": ident, "state": state, "tier": doc.get("tier")}
+        for ext in doc.get("extensions") or []:
+            key = str(ext).lstrip(".").lower()
+            if not key:
+                continue
+            # 同一类型有两台时，已转正的优先——它才是真的把这一类关掉的那台。
+            old = out.get(key)
+            if old and old["tier"] == "active":
+                continue
+            out[key] = row
+    return out
+
+
 def names(project_root: str = "") -> set[str]:
     """已占用的 id：内置 + 市场。第三方不许顶替其中任何一个。"""
     taken = set(mf.core_manifests())
@@ -140,11 +172,15 @@ def names(project_root: str = "") -> set[str]:
     return taken
 
 
-def install(project_root: str, source: str | Path) -> dict:
+def install(project_root: str, source: str | Path, consent: dict | None = None) -> dict:
     """装一份 manifest。返回 {ok, id, tier, problems, note}。
 
     失败不落盘。成功只落 manifest 原文加一条 index 记录，
     不做任何"相信它"的动作——跑不跑由 tier 与 risk 决定。
+
+    `consent` 是「人点过头」的痕迹，由调用方（MCP 层）负责取得并核对票据后传进来。
+    这里只负责把它记进 index：装了什么、谁点的头、原话是什么。
+    装了不记，事后就答不出「这台是谁同意装的」——那和没问过一样。
     """
     doc, problems = mf.load_file(source)
     if problems:
@@ -176,6 +212,12 @@ def install(project_root: str, source: str | Path) -> dict:
         "blocked": blocked_reason(doc),
         "history": [{"at": int(time.time() * 1000), "action": "install", "source": str(source)[:200]}],
     }
+    if consent:
+        index[ident]["consent"] = {
+            "answer": str(consent.get("answer") or "")[:300],
+            "via": str(consent.get("via") or ""),
+            "at": int(consent.get("at") or time.time() * 1000),
+        }
     _write_index(project_root, index)
     return {
         "ok": True,
@@ -693,6 +735,62 @@ def _history(meta: dict, entry: dict) -> list[dict]:
     return rows[-12:]
 
 
+def note_question(project_root: str, question_id: str, doc: dict) -> None:
+    """记下「问过装卸不装」，等宿主把用户的原话带回来时核销。"""
+    if not question_id:
+        return
+    now = int(time.time() * 1000)
+    data = {
+        key: row for key, row in _read_consent(project_root).items()
+        if isinstance(row, dict) and now - int(row.get("at") or 0) < TICKET_TTL
+    }
+    data[question_id] = {
+        "id": str(doc.get("id") or ""),
+        "extensions": [str(item).lstrip(".").lower() for item in doc.get("extensions") or []],
+        "at": now,
+    }
+    _write_consent(project_root, data)
+
+
+def consume_question(project_root: str, question_id: str) -> tuple[bool, str]:
+    """核销一张安装票据。一次性：用过就没了，过期就作废。
+
+    只证明「医院确实把这台设备摆到人面前问过一次」，不证明人真的看了——
+    后面这一半任何机制都做不到，所以写进文档，不假装。
+    """
+    if not question_id:
+        return False, "安装要有一次人的确认：先调 add 不带 question_id，把问题交给用户"
+    now = int(time.time() * 1000)
+    data = _read_consent(project_root)
+    row = data.pop(question_id, None)
+    if not isinstance(row, dict):
+        return False, "这个 question_id 医院没发过，或用过了。安装不能复用别人的回执"
+    fresh = now - int(row.get("at") or 0) < TICKET_TTL
+    _write_consent(project_root, data)
+    if not fresh:
+        return False, "这张回执超过 24 小时，作废了。重新问一次再装"
+    return True, ""
+
+
+def _read_consent(project_root: str) -> dict:
+    path = market_root(project_root) / _CONSENT
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_consent(project_root: str, data: dict) -> None:
+    base = market_root(project_root)
+    base.mkdir(parents=True, exist_ok=True)
+    (base / _CONSENT).write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
 def _read_index(project_root: str) -> dict:
     path = market_root(project_root) / _INDEX
     if not path.is_file():
@@ -714,13 +812,17 @@ def _write_index(project_root: str, index: dict) -> None:
 
 __all__ = [
     "MARKET_DIR",
+    "TICKET_TTL",
     "blocked_reason",
+    "claims",
+    "consume_question",
     "install",
     "installed",
     "listing",
     "live",
     "market_root",
     "names",
+    "note_question",
     "note_run",
     "plan",
     "promote",

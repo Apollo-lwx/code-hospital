@@ -366,9 +366,17 @@ def _record_instrument_gap(
 
     if not code_files:
         return []
-    suffixes = {Path(path).suffix.lstrip(".").lower() for path in code_files} - {""}
-    if not suffixes:
+    # 按扩展名分组，一个扩展名一条缺口。合并成一条会让 `_gap_id` 里的 signals
+    # 变成"本轮缺的全部扩展名"，补上一类，id 就变成另一个——那条启事再也追不住，
+    # 而且"22 个 .kt/.rb/.sh/.sql 文件"没人能凭它买一台仪器：一台仪器查不了四门语言。
+    by_ext: dict[str, list[str]] = {}
+    for path in code_files:
+        ext = Path(path).suffix.lstrip(".").lower()
+        if ext:
+            by_ext.setdefault(ext, []).append(path)
+    if not by_ext:
         return []
+    suffixes = set(by_ext)
     catalog = books_for(project_root)[2]
     covered: set[str] = set()
     for row in devices or []:
@@ -407,30 +415,32 @@ def _record_instrument_gap(
     if not missing:
         return notes
 
-    hit = [path for path in code_files if Path(path).suffix.lstrip(".").lower() in missing]
-    read_hit = [path for path in hit if path in read_set]
-    record_gap(
-        coverage,
-        "missing_instrument",
-        signals=[f"*.{item}" for item in missing],
-        files=hit[:6],
-        extensions=missing,
-        raised_by="coverage",
-        case_id=case_id,
-        note="没有在岗仪器覆盖这些扩展名。",
-        count=len(hit),
-        extra={"model_read": len(read_hit)},
-    )
-    exts = "、".join(f".{item}" for item in missing)
-    if len(read_hit) >= len(hit):
-        return notes + [
-            f"本次范围含 {exts} 文件，没有在岗仪器覆盖这些类型；模型已读其中 {len(read_hit)} 个，"
-            "结论只能担保到「读过、没有仪器复核」。"
-        ]
-    tail = f"其中 {len(read_hit)} 个模型已读，" if read_hit else ""
-    return notes + [
-        f"本次范围含 {exts} 文件，没有在岗仪器覆盖这些类型，{tail}其余记为未查。"
-    ]
+    for ext in missing:
+        files = by_ext[ext]
+        read_hit = [path for path in files if path in read_set]
+        record_gap(
+            coverage,
+            "missing_instrument",
+            signals=[f"*.{ext}"],
+            files=files[:6],
+            extensions=[ext],
+            raised_by="coverage",
+            case_id=case_id,
+            note=f"没有在岗仪器覆盖 .{ext}。",
+            count=len(files),
+            extra={"model_read": len(read_hit)},
+        )
+        if len(read_hit) >= len(files):
+            notes.append(
+                f"本次范围含 {len(files)} 个 .{ext} 文件，没有在岗仪器覆盖；"
+                f"模型已读其中 {len(read_hit)} 个，结论只能担保到「读过、没有仪器复核」。"
+            )
+            continue
+        tail = f"其中 {len(read_hit)} 个模型已读，" if read_hit else ""
+        notes.append(
+            f"本次范围含 {len(files)} 个 .{ext} 文件，没有在岗仪器覆盖，{tail}其余记为未查。"
+        )
+    return notes
 
 
 def _record_reading_gap(
@@ -676,6 +686,33 @@ def ledger_lines(coverage: dict | None, project_root: str = "") -> list[str]:
 RECRUIT_MIN_FILES = 3
 
 
+def requisitions(coverage: dict | None) -> list[dict]:
+    """够得上门槛、且只能靠装仪器关掉的那几类缺口。
+
+    一条 = 一个扩展名。**不合并**：合并之后「这条启事」的身份是「本轮缺的全部扩展名」，
+    装一台补上一类，id 就变成另一个，既追不住也接不上安装记录。
+    调用方（渲染、提问）都从这里取，免得两处各算一遍慢慢算岔。
+    """
+    found: list[dict] = []
+    for row in rows(coverage, "capability_gap"):
+        if str(row.get("status") or "open") != "open":
+            continue
+        if _closure_of(row) != "market":
+            continue
+        count = int(row.get("occurrences") or 0)
+        if count < RECRUIT_MIN_FILES:
+            continue
+        evidence = row.get("evidence") or {}
+        found.append({
+            "gap_id": str(row.get("id") or ""),
+            "extensions": [str(item).lstrip(".") for item in evidence.get("extensions") or []],
+            "files": [str(item) for item in evidence.get("files") or []],
+            "file_count": count,
+        })
+    found.sort(key=lambda item: int(item["file_count"]), reverse=True)
+    return found
+
+
 def recruitment_lines(coverage: dict | None, project_root: str = "") -> list[str]:
     """招聘启事与招聘进度。
 
@@ -687,29 +724,35 @@ def recruitment_lines(coverage: dict | None, project_root: str = "") -> list[str
 
     缺口的 `closure` 决定流向：只有 `market` 进招聘，`host_llm` 只进「没有模型读过」，
     `formulary` 进待复核。混在一起，招聘信号会被「招一台 Markdown 检查器」污染。
+
+    **已经招到的要接得上**：装了、还在影子期的仪器会在这里点名（「已招 X，第 3 轮」），
+    否则读者分不清「没人管」和「已在试用」。认领关系从 manifest 的 extensions 推出来，
+    不另存一张表——存了就有两份记录，迟早有一份是旧的。
     """
-    found = []
-    for row in rows(coverage, "capability_gap"):
-        if str(row.get("status") or "open") != "open":
-            continue
-        if _closure_of(row) != "market":
-            continue
-        if int(row.get("occurrences") or 0) < RECRUIT_MIN_FILES:
-            continue
-        found.append(row)
-    found.sort(key=lambda item: int(item.get("occurrences") or 0), reverse=True)
+    from .market import claims
+
+    found = requisitions(coverage)
+    claimed = claims(project_root) if project_root else {}
 
     lines: list[str] = []
-    for row in found[:3]:
-        evidence = row.get("evidence") or {}
-        exts = [str(item).lstrip(".") for item in evidence.get("extensions") or []]
-        count = int(row.get("occurrences") or 0)
+    for req in found[:3]:
+        exts = req["extensions"]
         what = ("、".join(f".{item}" for item in exts)) if exts else "这一类检查"
-        lines.append(
-            f"招聘启事：本次范围含 {count} 个 {what} 文件，在岗仪器都不看这类文件。"
-            "建议按能力市场装一台能查这些的仪器（`hosp_market add` 一份 manifest，先跑影子期）；"
-            "转正前这部分记为未查，不记为没有问题。"
-        )
+        count = int(req["file_count"])
+        body = f"招聘启事：本次范围含 {count} 个 {what} 文件，在岗仪器都不看这类文件。"
+        holder = next((claimed[ext] for ext in exts if ext in claimed), None)
+        if holder:
+            body += (
+                f"已招 {holder['instrument']}（{holder['state']}）。"
+                "转正前它的结论不进报告，这类文件仍记为未查。"
+            )
+        else:
+            body += (
+                f"要关掉这一类，得装一台声明覆盖 {what} 的仪器"
+                "（`hosp_market add` 一份 manifest；装上先跑影子期）。"
+                "转正前这部分记为未查，不记为没有问题。"
+            )
+        lines.append(body)
     if len(found) > 3:
         lines.append(f"另有 {len(found) - 3} 类缺口适合走市场，记在覆盖账里。")
     lines.extend(_recruit_progress(project_root))
