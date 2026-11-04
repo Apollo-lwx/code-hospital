@@ -192,7 +192,7 @@ confirms that nursing record.
 | `hosp_dispense` | Apply one approved autofix item, or skip manual; llm_patch only prepares | 可用（成药会改代码；煎药提交未开放） |
 | `hosp_discharge` | Recheck diff, quality gate, discharge summary, follow-up | 可用（不改代码；验收命令未执行） |
 | `hosp_treat` | One-shot orchestration (auto mode) | P2 |
-| `hosp_market` | Install / verify / list / review / promote / retire third-party instruments | 可用（装进来先跑影子；转正要有样本 + 人签字） |
+| `hosp_market` | Install / verify / list / review / promote / retire / restore instruments (shipped ones included) | 可用（装进来先跑影子；转正要有样本 + 人签字；退役可逆） |
 | `hosp_rule` | Show deviation counts and enforceable checks; turn an approved one on | 可用（批准后服务端真执行，配置关不掉；没接记忆层则不批） |
 
 ### Market (能力市场)

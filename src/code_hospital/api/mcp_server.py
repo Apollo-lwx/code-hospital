@@ -422,6 +422,13 @@ async def _market(action: str, manifest_path: str, instrument_id: str,
                 got.get("note") or "没有这台仪器", target="instrument_id",
             )
         return got
+    if act == "restore":
+        got = market.restore(root, instrument_id)
+        if not got.get("ok"):
+            raise invalid_operation(
+                got.get("note") or "没有这台仪器的记录", target="instrument_id",
+            )
+        return got
     if act == "review":
         ids = [instrument_id] if instrument_id else []
         return market.review(root, ids)
@@ -442,7 +449,7 @@ async def _market(action: str, manifest_path: str, instrument_id: str,
         return got
     raise invalid_operation(
         f"不认识的市场动作：{action}", target="action",
-        next_action="action 只能是 list / verify / add / retire / review / promote",
+        next_action="action 只能是 list / verify / add / retire / restore / review / promote",
     )
 
 

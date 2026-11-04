@@ -358,6 +358,7 @@ def _record_instrument_gap(
     read_set: set[str],
 ) -> list[str]:
     from .formulary import books_for
+    from .market import retired_ids
 
     if not code_files:
         return []
@@ -380,9 +381,27 @@ def _record_instrument_gap(
         if not exts:
             return []  # 没声明扩展名的仪器按全类型口径，不据此报缺口
         covered.update(exts)
-    missing = sorted(suffixes - covered)
+
+    # 退役的仪器不跑，所以它覆盖的类型也不在 covered 里。但那是客户主动不要的，
+    # 不是「缺」——记成缺口就会把它写进招聘启事，等于建议客户把刚退掉的东西装回来。
+    # 只豁免它**声明过**的扩展名：没声明扩展名的按全类型口径，退了也不许顶掉所有类型。
+    retired_exts: set[str] = set()
+    for ident in retired_ids(project_root):
+        row = catalog.get(ident) or {}
+        retired_exts.update(
+            str(item).lstrip(".").lower() for item in (row.get("extensions") or [])
+        )
+    notes: list[str] = []
+    gone_hit = sorted((suffixes - covered) & retired_exts)
+    if gone_hit:
+        gone_text = "、".join(f".{item}" for item in gone_hit)
+        notes.append(
+            f"本次范围含 {gone_text} 文件，覆盖它的仪器已按客户要求退役，这一类本轮没有仪器复核。"
+        )
+
+    missing = sorted(suffixes - covered - retired_exts)
     if not missing:
-        return []
+        return notes
 
     hit = [path for path in code_files if Path(path).suffix.lstrip(".").lower() in missing]
     read_hit = [path for path in hit if path in read_set]
@@ -400,12 +419,14 @@ def _record_instrument_gap(
     )
     exts = "、".join(f".{item}" for item in missing)
     if len(read_hit) >= len(hit):
-        return [
+        return notes + [
             f"本次范围含 {exts} 文件，没有在岗仪器覆盖这些类型；模型已读其中 {len(read_hit)} 个，"
             "结论只能担保到「读过、没有仪器复核」。"
         ]
     tail = f"其中 {len(read_hit)} 个模型已读，" if read_hit else ""
-    return [f"本次范围含 {exts} 文件，没有在岗仪器覆盖这些类型，{tail}其余记为未查。"]
+    return notes + [
+        f"本次范围含 {exts} 文件，没有在岗仪器覆盖这些类型，{tail}其余记为未查。"
+    ]
 
 
 def _record_reading_gap(

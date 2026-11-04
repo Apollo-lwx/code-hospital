@@ -455,13 +455,22 @@ def selected_instrument_ids(
     visit_kind: str = "checkup",
     project_root: str = "",
 ) -> list[str]:
-    """初检套餐。号别决定加做哪些深度尺；点名的类型尺仍留给检查单。"""
+    """初检套餐。号别决定加做哪些深度尺；点名的类型尺仍留给检查单。
+
+    退役的仪器不进套餐。这一条必须在**选之前**就生效，不能等装配层再筛：
+    落差就在覆盖账上——它跑过一轮又被划掉，账里会多一条「本轮未查」，
+    而客户明明是自己不要的。
+    """
+    from .market import retired_ids
     from .visits import panel
 
     suffixes = _file_suffixes(files)
     catalog = books_for(project_root)[2]
+    gone = retired_ids(project_root)
     chosen: list[str] = []
     for inst in catalog.values():
+        if inst["id"] in gone:
+            continue
         if inst["activation"] != "package":
             continue
         if triage == "emergency":
@@ -485,13 +494,13 @@ def selected_instrument_ids(
             inst_id for inst_id in extra
             if inst_id in catalog and _fits_files(catalog[inst_id], suffixes)
         ]
-        return focused
+        return [inst_id for inst_id in focused if inst_id not in gone]
     for inst_id in extra:
         if inst_id in chosen or inst_id not in catalog:
             continue
         if _fits_files(catalog[inst_id], suffixes):
             chosen.append(inst_id)
-    return chosen
+    return [inst_id for inst_id in chosen if inst_id not in gone]
 
 
 def scan_orders_for(requested_specialties: list[str], requested_instruments: list[str], notes: list[dict]) -> list[dict]:

@@ -254,7 +254,7 @@ evidence text. The repository itself is never modified.
 
 
 MARKET_DESC = """\
-List, verify, install, review, promote, or retire third-party instruments (能力市场).
+List, verify, install, review, promote, retire, or restore instruments (能力市场).
 Manifests declare what a device is (kind: instrument | substrate), how it runs
 (transport: external | mcp | semgrep), and what it touches (risk.reads_repo /
 writes_repo / network / executes_code).
@@ -285,7 +285,18 @@ action:
 - review: recompute the promotion verdict for one instrument or all installed ones.
 - promote: needs instrument_id and confirm=true. Refused for retired instruments (reinstall
   and collect samples again) and for instruments still in probation without enough evidence.
-- retire: stop running it, keep the manifest and the record. Nothing is deleted.
+- retire: stop running it, keep the manifest and the record. Nothing is deleted. This also
+  works on shipped (core) instruments: once retired, the extensions it declared stop counting
+  as a coverage gap, because a switch the operator turned off is not a missing device. The
+  report still says so in the limitations - "retired at the customer's request, not checked
+  this round" - rather than going quiet. An instrument that never declared extensions does
+  not excuse anything: it would otherwise excuse every file type at once.
+- restore: put a retired instrument back. It returns to whichever tier it held before
+  retirement (recorded at retire time), so a promoted instrument does not silently drop back
+  into probation. Retiring is reversible on purpose - one misclick must not cost a device
+  permanently.
 
 Manifests live in <repo>/.hospital/market/. Installing never modifies the repository itself.
+Retirement state lives in the same index, including for shipped instruments: one record, so
+"is this running" cannot be answered two different ways.
 """

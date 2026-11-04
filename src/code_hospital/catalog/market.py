@@ -39,12 +39,10 @@ def installed(project_root: str) -> dict[str, dict]:
     这里刻意不抛异常：市场坏掉不该让整个医院起不来。
     坏在哪由 verify() 说出来，装配层只按 tier 决定跑不跑。
     """
-    base = market_root(project_root) / _MANIFEST_DIR
-    if not base.is_dir():
-        return {}
     index = _read_index(project_root)
+    base = market_root(project_root) / _MANIFEST_DIR
     out: dict[str, dict] = {}
-    for file in sorted(base.glob("*.yaml")):
+    for file in sorted(base.glob("*.yaml")) if base.is_dir() else []:
         doc, problems = mf.load_file(file)
         ident = doc.get("id") or file.stem
         meta = index.get(ident) or {}
@@ -65,7 +63,40 @@ def installed(project_root: str) -> dict[str, dict]:
         doc["trial"] = meta.get("trial") if isinstance(meta.get("trial"), dict) else {}
         doc["verdict"] = meta.get("verdict") if isinstance(meta.get("verdict"), dict) else {}
         out[ident] = doc
+    # 内置仪器没有 manifest 文件，退役只登记在 index 里。不并进来，
+    # `hosp_market list` 会继续说「还没装过任何第三方仪器」，客户以为没退成。
+    builtin = mf.core_manifests() if index else {}
+    for ident, meta in index.items():
+        if ident in out or not isinstance(meta, dict):
+            continue
+        if str(meta.get("tier") or "") != "retired" or ident not in builtin:
+            continue
+        out[ident] = {
+            "id": ident,
+            "tier": "retired",
+            "origin": "builtin",
+            "kind": "instrument",
+            "problems": [],
+            "installed_at": int(meta.get("installed_at") or 0),
+            "retired_at": int(meta.get("retired_at") or 0),
+            "trial": {},
+            "verdict": {},
+        }
     return out
+
+
+def retired_ids(project_root: str) -> set[str]:
+    """已退役的 id，内置与市场一起算。
+
+    退役状态只存一处：市场索引里 `tier=retired` 的记录。内置仪器没有 manifest，
+    但也登记在同一本索引上——**不为退役另开一份文件**。两份记录迟早有一份是旧的，
+    而「这台退没退」决定它跑不跑、它的扩展名算不算缺口，读错一次就是两份错报告。
+    """
+    index = _read_index(project_root)
+    return {
+        str(ident) for ident, meta in index.items()
+        if isinstance(meta, dict) and str(meta.get("tier") or "") == "retired"
+    }
 
 
 def live(project_root: str) -> dict[str, dict]:
@@ -171,17 +202,27 @@ def retire(project_root: str, ident: str) -> dict:
 
     不删的理由和病历不销毁一样——「这台仪器曾经装过、跑过多少、为什么下架」
     是审计要回答的问题，删了文件就答不出来。
+
+    内置仪器也能退役（待确认项 1 拍板为「全部可退」）。退掉之后这台不跑，
+    但它覆盖的扩展名**不再算缺口**——缺口是「缺」，主动不要不是缺。
+    至于哪台永远不许退，是客户的产品决定，医院不替他们选，只在报告里如实说
+    「按客户要求退役，本类不再检查」。
     """
     if not ident:
         return {"ok": False, "id": "", "note": "要指定仪器 id"}
     base = market_root(project_root)
     target = base / _MANIFEST_DIR / f"{ident}.yaml"
     index = _read_index(project_root)
-    if not target.is_file() and ident not in index:
-        return {"ok": False, "id": ident, "note": f"没有装过 {ident}"}
+    builtin = ident in mf.core_manifests()
+    if not builtin and not target.is_file() and ident not in index:
+        return {"ok": False, "id": ident, "note": f"没有这台仪器：{ident}"}
     index[ident] = {
         **index.get(ident, {}),
         "tier": "retired",
+        "origin": str((index.get(ident) or {}).get("origin") or ("builtin" if builtin else "market")),
+        "tier_before": str(
+            (index.get(ident) or {}).get("tier") or ("active" if builtin else "probation")
+        ),
         "retired_at": int(time.time() * 1000),
         "history": _history(
             index.get(ident) or {},
@@ -189,7 +230,46 @@ def retire(project_root: str, ident: str) -> dict:
         ),
     }
     _write_index(project_root, index)
+    if builtin:
+        return {
+            "ok": True,
+            "id": ident,
+            "note": "已退役：这台不再参与初检，它覆盖的类型也不再记缺口。退错了用 restore 放回来。",
+        }
     return {"ok": True, "id": ident, "note": "已退役：不再运行，manifest 与账保留。"}
+
+
+def restore(project_root: str, ident: str) -> dict:
+    """把退役的仪器放回去。
+
+    退错了要有退路，否则客户第一次点错就永久少一台。回到哪一档不问参数，
+    问账：retire 时把当时的档位记在 `tier_before`，恢复就照它放回去——
+    已转正的退掉再恢复仍是转正，不会悄悄退回影子期。
+    """
+    if not ident:
+        return {"ok": False, "id": "", "note": "要指定仪器 id"}
+    index = _read_index(project_root)
+    meta = index.get(ident)
+    if not isinstance(meta, dict):
+        return {"ok": False, "id": ident, "note": f"没有这台仪器的记录：{ident}"}
+    if str(meta.get("tier") or "") != "retired":
+        return {"ok": False, "id": ident, "note": f"{ident} 不在退役状态，不用恢复"}
+    builtin = ident in mf.core_manifests()
+    tier = str(meta.get("tier_before") or ("active" if builtin else "probation"))
+    index[ident] = {
+        **meta,
+        "tier": tier,
+        "restored_at": int(time.time() * 1000),
+        "history": _history(meta, {"at": int(time.time() * 1000), "action": "restore"}),
+    }
+    index[ident].pop("tier_before", None)
+    _write_index(project_root, index)
+    return {
+        "ok": True,
+        "id": ident,
+        "tier": tier,
+        "note": f"已恢复，按退役前的档位回到 {tier}。它覆盖的类型重新纳入检查。",
+    }
 
 
 def verify(project_root: str, ids: list[str] | None = None) -> dict:
@@ -245,10 +325,18 @@ def listing(project_root: str) -> dict:
     """市场全貌：内置 core + 已装。给 hosp_market list 用。"""
     core = mf.core_manifests()
     own = installed(project_root)
+    gone = retired_ids(project_root)
     return {
         "root": str(market_root(project_root)),
         "core": [
-            {"id": doc["id"], "transport": doc.get("transport", ""), "concern": doc.get("concern", "")[:60]}
+            {
+                "id": doc["id"],
+                "transport": doc.get("transport", ""),
+                "concern": doc.get("concern", "")[:60],
+                # 退役的内置仪器仍列在这里（审计要能看见它存在过），但档位写明，
+                # 免得读列表的人以为它这次跑了。
+                "tier": "retired" if doc["id"] in gone else "core",
+            }
             for doc in core.values()
         ],
         "installed": [
@@ -285,6 +373,12 @@ def _trial_view(trial) -> dict:
 
 def _listing_note(own: dict[str, dict]) -> str:
     """按实际档位说话。装了没转正、转正了、退役了，说的不是同一句话。"""
+    native = [doc for doc in own.values() if str(doc.get("origin") or "") == "builtin"]
+    third = [doc for doc in own.values() if str(doc.get("origin") or "") != "builtin"]
+    if native and not third:
+        names = "、".join(str(doc.get("id")) for doc in native[:5])
+        more = f" 等 {len(native)} 台" if len(native) > 5 else ""
+        return f"内置仪器 {names}{more} 已按客户要求退役，不再参与初检，覆盖的类型也不再记缺口。"
     if not own:
         return "还没有装第三方仪器。core 那批是随包的，不用装。"
     counts: dict[str, int] = {}
@@ -452,6 +546,18 @@ def review(project_root: str, ids: list[str] | None = None) -> dict:
                 "line": f"没有装过 {ident}", "tier": "",
             })
             continue
+        if str(doc.get("origin") or "") == "builtin":
+            # 内置仪器是随包的，不存在「转正」这道门。退役了也一样：
+            # 要回来用 restore，不是攒样本。给它算一遍判据只会写出一行
+            # 「样本不足」，读的人会以为再跑几轮就能回来。
+            rows.append({
+                "id": ident, "tier": doc.get("tier") or "", "state": "shipped",
+                "promotable": False,
+                "line": "内置仪器，不参与转正判据；退役的用 restore 放回来。",
+                "runs": 0, "claims": 0, "corroborated": 0,
+                "checkable": 0, "basis": "",
+            })
+            continue
         verdict = probation.verdict((index.get(ident) or {}).get("trial"))
         rows.append({
             "id": ident,
@@ -469,14 +575,15 @@ def review(project_root: str, ids: list[str] | None = None) -> dict:
             "blocked": blocked_reason(doc),
         })
     ready = [row for row in rows if row["promotable"] and row["tier"] == "probation"]
-    return {
-        "instruments": rows,
-        "note": (
+    if ready:
+        note = (
             f"{len(ready)} 台够格转正，等人签字（`promote` 要带 confirm）；判据只判格，不代签。"
-            if ready else
-            "还没有够格转正的。样本、重合、误报三个数都在 instruments 里，缺哪个看 line。"
-        ),
-    }
+        )
+    elif rows and all(row.get("state") == "shipped" for row in rows):
+        note = "内置仪器不参与转正判据（退役的用 restore）。这里没有需要复核的第三方仪器。"
+    else:
+        note = "还没有够格转正的。样本、重合、误报三个数都在 instruments 里，缺哪个看 line。"
+    return {"instruments": rows, "note": note}
 
 
 def promote(project_root: str, ident: str, confirm: bool = False) -> dict:
@@ -607,6 +714,8 @@ __all__ = [
     "plan",
     "promote",
     "retire",
+    "restore",
+    "retired_ids",
     "review",
     "runnable",
     "stage",
