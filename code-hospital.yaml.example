@@ -32,6 +32,11 @@ catalog:
       - ASYNC
     min_severity: ""     # 留空全留；写成 major 则只留 critical 和 major
     ruff_select: []      # 例如 [F, E9]。空列表表示沿用本机 ruff 的默认规则集
+  # 影子期（试用中的第三方仪器）的成本闸门。只改攒样本的快慢，不改转正判据——
+  # MIN_RUNS / 重合率 / 可比对条数写死，改了跨仓库就不可比。
+  # shadow:
+  #   every_nth: 3      # 样本够了之后每几轮跑一次
+  #   max_per_scan: 3   # 每轮最多跑几台；0 = 关掉影子期（报告限制项会写明）
   # 内置事项在医院的 catalog/check_packs。号别排哪些包写在 visits.yaml。
   # 下面是被诊疗仓库自己的外援，不用改医院源码。
   # 执行方是 code、external、llm。code 只能点医院已经有的事实采集。

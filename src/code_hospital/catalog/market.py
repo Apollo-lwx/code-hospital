@@ -431,12 +431,14 @@ def plan(project_root: str) -> tuple[dict[str, dict], list[str]]:
     """这一轮实际跑哪几台。返回 (要跑的行, 没跑的理由)。
 
     两个成本闸门，都只影响「这次跑不跑」，不影响「够不够格」：
-    - 轮次节奏：样本够了改成每 `EVERY_NTH` 轮跑一次（`probation.should_run`）；
-    - 每轮上限：最多 `MAX_PER_SCAN` 台，按样本少的优先——缺样本的先跑。
-    被挡下的都要写一条账，否则「这轮没跑」会看起来像「这轮跑了没问题」。
+    - 轮次节奏：样本够了改成每 `every_nth` 轮跑一次（`probation.should_run`）；
+    - 每轮上限：最多 `max_per_scan` 台，按样本少的优先——缺样本的先跑。
+    两个数都从 `catalog.shadow` 读，默认 3 / 3。被挡下的都要写一条账，
+    否则「这轮没跑」会看起来像「这轮跑了没问题」。
     """
     from . import probation
 
+    caps = probation.limits(project_root)
     rows, notes = stage(project_root)
     index = _read_index(project_root)
     order = sorted(
@@ -445,25 +447,34 @@ def plan(project_root: str) -> tuple[dict[str, dict], list[str]]:
     chosen: dict[str, dict] = {}
     capped: list[str] = []
     touched = False
+    shadow_running = 0
     for ident in order:
         if rows[ident].get("tier") == "active":
             # 已转正的不受试用期节奏管：它不是"还在观察"，它是现任。
+            # 也不占每轮名额——名额是给影子期的，被现任占掉的话，
+            # 三台转正之后新来的试用仪器就永远轮不到，招聘闭环静默停摆。
             chosen[ident] = rows[ident]
             continue
         trial = (index.get(ident) or {}).get("trial")
-        due, why = probation.should_run(trial)
+        due, why = probation.should_run(trial, caps.every_nth)
         if not due:
             notes.append(f"{ident}：{why}")
             _bump(index, ident, "skipped")
             touched = True
             continue
-        if len(chosen) >= probation.MAX_PER_SCAN:
+        if shadow_running >= caps.max_per_scan:
             capped.append(ident)
             continue
         chosen[ident] = rows[ident]
+        shadow_running += 1
     if capped:
+        quota = (
+            "影子期已关闭（catalog.shadow.max_per_scan=0）"
+            if caps.max_per_scan == 0
+            else f"每轮最多 {caps.max_per_scan} 台"
+        )
         notes.append(
-            f"{len(capped)} 台影子期仪器本轮没跑（每轮最多 {probation.MAX_PER_SCAN} 台，"
+            f"{len(capped)} 台影子期仪器本轮没跑（{quota}，"
             f"按样本少的优先）：{'、'.join(capped)}。这是成本闸门，不是能力判断。"
         )
         for ident in capped:

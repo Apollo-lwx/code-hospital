@@ -16,16 +16,90 @@
 
 from __future__ import annotations
 
+import os
 import time
+from dataclasses import dataclass
 from pathlib import Path
+
+import yaml
 
 MIN_RUNS = 8            # 样本下限，轮
 MIN_CHECKABLE = 5       # 可比对条数下限：少于 5 条，0.6 这个门槛会退化成整数游戏
 MIN_CORROBORATION = 0.6  # 与现任同处的比例下限
 LINE_TOLERANCE = 2      # 行号容差：不同仪器常把同一处缺陷标在相邻行
-EVERY_NTH = 3           # 样本够了之后每几轮跑一次，控成本
-MAX_PER_SCAN = 3        # 每轮最多跑几台影子仪器，控成本
+EVERY_NTH = 3           # 样本够了之后每几轮跑一次，控成本（默认值，可配）
+MAX_PER_SCAN = 3        # 每轮最多跑几台影子仪器，控成本（默认值，可配）
 GIVE_UP_ROUNDS = 3      # 连续几轮没跑成才敢说"没到岗"
+
+_CONFIG = "code-hospital.yaml"
+_ENV_EVERY_NTH = "CODE_HOSPITAL_SHADOW_EVERY_NTH"
+_ENV_MAX_PER_SCAN = "CODE_HOSPITAL_SHADOW_MAX_PER_SCAN"
+
+
+@dataclass(frozen=True)
+class ShadowCaps:
+    """成本闸门的两个参数。
+
+    **只有成本可配，判据不可配。** `MIN_RUNS` / `MIN_CORROBORATION` /
+    `MIN_CHECKABLE` 改一个数，两个仓库的重合率就不可比了；而每几轮跑一次、
+    每轮跑几台，只影响攒样本的快慢，不影响攒够之后得出什么结论。
+    这条线不是洁癖：跨客户的可比性是招聘判据唯一的立足点。
+    """
+
+    every_nth: int = EVERY_NTH
+    max_per_scan: int = MAX_PER_SCAN
+
+
+def limits(project_root: str = "") -> ShadowCaps:
+    """读影子期的成本参数。环境变量优先，其次 `catalog.shadow`，都没有用默认。"""
+    every_nth, max_per_scan = _from_yaml(project_root)
+    return ShadowCaps(
+        every_nth=_positive(_from_env(_ENV_EVERY_NTH, every_nth), EVERY_NTH),
+        max_per_scan=_non_negative(_from_env(_ENV_MAX_PER_SCAN, max_per_scan), MAX_PER_SCAN),
+    )
+
+
+def _from_env(name: str, fallback):
+    if name not in os.environ:
+        return fallback
+    return os.environ.get(name)
+
+
+def _from_yaml(project_root: str):
+    path = Path(project_root) / _CONFIG if project_root else None
+    if path is None or not path.is_file():
+        return None, None
+    try:
+        doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (yaml.YAMLError, OSError):
+        return None, None
+    if not isinstance(doc, dict):
+        return None, None
+    catalog = doc.get("catalog") if isinstance(doc.get("catalog"), dict) else {}
+    shadow = catalog.get("shadow") if isinstance(catalog.get("shadow"), dict) else {}
+    return shadow.get("every_nth"), shadow.get("max_per_scan")
+
+
+def _positive(value, fallback: int) -> int:
+    """写错或非正数都落回默认。`every_nth=0` 会让取模变成恒定命中，语义不清。"""
+    number = _number(value)
+    return number if number and number > 0 else fallback
+
+
+def _non_negative(value, fallback: int) -> int:
+    """允许 0：预算是可以为零的。关了要说出来，不能静默关。"""
+    number = _number(value)
+    return number if number is not None and number >= 0 else fallback
+
+
+def _number(value):
+    if value is None or value == "" or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
 
 STATES = (
     "insufficient",     # 样本不够，等
@@ -118,19 +192,21 @@ def observe(trial, run: dict, report_id: str = "") -> dict:
     return out
 
 
-def should_run(trial) -> tuple[bool, str]:
+def should_run(trial, every_nth: int = EVERY_NTH) -> tuple[bool, str]:
     """这一轮该不该跑它。
 
-    样本不够就每轮都跑（缺的就是样本）；样本够了改成每 `EVERY_NTH` 轮跑一次
+    样本不够就每轮都跑（缺的就是样本）；样本够了改成每 `every_nth` 轮跑一次
     （还要能看见它变了没有，但不必每轮付一次进程钱）。
     抽样按轮次取模，不掷随机数：同一份仓库重跑一次要得到同一套账。
+    `every_nth` 是成本参数，可从配置来；它不改变「够不够格」的任何判据。
     """
     t = load(trial)
     rounds = t["runs"] + t["failed"]
     if rounds < MIN_RUNS:
         return True, ""
-    if rounds % EVERY_NTH:
-        return False, f"样本已够（{rounds} 轮），改为每 {EVERY_NTH} 轮跑一次以控成本"
+    step = every_nth if every_nth and every_nth > 0 else EVERY_NTH
+    if rounds % step:
+        return False, f"样本已够（{rounds} 轮），改为每 {step} 轮跑一次以控成本"
     return True, ""
 
 
@@ -341,11 +417,13 @@ __all__ = [
     "MIN_CHECKABLE",
     "MIN_RUNS",
     "STATES",
+    "ShadowCaps",
     "blank_trial",
     "checkable_count",
     "corroborated",
     "count_bad",
     "covered_extensions",
+    "limits",
     "load",
     "near",
     "observe",
