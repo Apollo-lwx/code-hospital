@@ -22,6 +22,10 @@ DEVIATION_KINDS = (
 STATUS = ("open", "nominated", "filled", "waived")
 _GAP_CAP = 40
 _DEVIATION_CAP = 30
+# 纪律账在报告里说到多细。客户可配——不同安全等级的仓库，注意力分配不一样。
+# 最粗只能到 summary：账出现就说明宿主没按约定交卷，一个字不提等于替它瞒下来。
+EXPOSURES = ("summary", "typed", "located", "full")
+_DEFAULT_EXPOSURE = "typed"
 _FILE_CAP = 6
 _CASE_CAP = 12
 
@@ -558,25 +562,113 @@ def gap_lines(coverage: dict | None, limit: int = 5) -> list[str]:
     return lines
 
 
-def deviation_lines(coverage: dict | None, limit: int = 3) -> list[str]:
-    """报告用的偏差说明。只写次数与类型，细节留在院里。"""
+def exposure_for(project_root: str = "", override: str = "") -> tuple[str, str]:
+    """读 `discipline.exposure`。返回 (档位, 要写进报告的一句提醒)。
+
+    写错了不阻止看病，但也不能悄悄按默认出——那等于用我们的默认值
+    替客户做了他没做的决定。提醒一句，让他看得见配置没生效。
+    """
+    value = str(override or "").strip()
+    if not value:
+        value = _read_exposure_config(project_root)
+    if not value:
+        return _DEFAULT_EXPOSURE, ""
+    if value in EXPOSURES:
+        return value, ""
+    return _DEFAULT_EXPOSURE, (
+        f"discipline.exposure 的取值「{value}」不可用，按 {_DEFAULT_EXPOSURE} 出"
+        f"（可写 {' / '.join(EXPOSURES)}）。没有关闭这一档："
+        "账出现就说明宿主没按约定交卷，报告里必须留一句。"
+    )
+
+
+def _read_exposure_config(project_root: str) -> str:
+    if not project_root:
+        return ""
+    from ..safety.repo_files import PROJECT_CONFIG
+
+    path = Path(project_root) / PROJECT_CONFIG
+    if not path.is_file():
+        return ""
+    try:
+        import yaml
+
+        doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return ""
+    block = doc.get("discipline")
+    if not isinstance(block, dict):
+        return ""
+    raw = block.get("exposure")
+    if raw is None:
+        return ""
+    if isinstance(raw, bool):
+        # YAML 把 on / off / yes / no 解析成布尔。原样返回词面，
+        # 让上层当「不可用」报出来——写成 off 却被静默当成没配，是最坏的一种失效。
+        return "on" if raw else "off"
+    return str(raw).strip()
+
+
+def deviation_lines(
+    coverage: dict | None,
+    limit: int = 3,
+    project_root: str = "",
+    exposure: str = "",
+) -> list[str]:
+    """报告用的偏差说明。
+
+    说到多细由 `code-hospital.yaml` 的 `discipline.exposure` 决定：
+    `summary`（一句话总数）/ `typed`（类型+阶段+次数，默认）/
+    `located`（再加病例与轮次）/ `full`（再加说明原文）。
+
+    粗细是客户的注意力分配，不是医院的判断——同一份账在不同安全等级的仓库里
+    该说多少，只有客户知道。但**最粗也只能到一句话**：账出现了就说明宿主没按
+    约定交卷，报告里一个字不提等于医院替它瞒了下来，那正是 `silent_degrade`
+    这条偏差本身要抓的事。
+    """
     found = rows(coverage, "discipline")
     if not found:
         return []
+    level, warn = exposure_for(project_root, exposure)
     ranked = sorted(found, key=lambda item: int(item.get("count") or 0), reverse=True)
-    lines = []
+    lines = [warn] if warn else []
+
+    if level == "summary":
+        total = sum(int(item.get("count") or 1) for item in ranked)
+        return lines + [f"执行偏差：本次记到 {total} 处，明细在覆盖账里。"]
+
+    if level == "full":
+        limit = max(limit, 30)
     for row in ranked[:limit]:
         plain = _DEVIATION_PLAIN.get(str(row.get("kind")), "执行偏差")
         stage = str(row.get("stage") or "")
         where = f"，在 {stage}" if stage else ""
-        lines.append(f"执行偏差：{plain}{where}，{int(row.get('count') or 1)} 次。")
+        line = f"执行偏差：{plain}{where}，{int(row.get('count') or 1)} 次"
+        if level in {"located", "full"}:
+            case_id = str(row.get("case_id") or "")
+            round_no = int(row.get("round") or 0)
+            if case_id or round_no:
+                tail = "，".join(
+                    item for item in (
+                        f"病例 {case_id}" if case_id else "",
+                        f"第 {round_no} 轮" if round_no else "",
+                    ) if item
+                )
+                line += f"（{tail}）"
+        if level == "full" and row.get("detail"):
+            line += f"；说明：{str(row['detail'])[:120]}"
+        lines.append(line + "。")
     if len(ranked) > limit:
         lines.append(f"另有 {len(ranked) - limit} 类执行偏差记在覆盖账里。")
     return lines
 
 
-def ledger_lines(coverage: dict | None) -> list[str]:
-    return gap_lines(coverage) + deviation_lines(coverage) + memory_lines(coverage)
+def ledger_lines(coverage: dict | None, project_root: str = "") -> list[str]:
+    return (
+        gap_lines(coverage)
+        + deviation_lines(coverage, project_root=project_root)
+        + memory_lines(coverage)
+    )
 
 
 # 一个缺口要累积到几处才值得发招聘启事。

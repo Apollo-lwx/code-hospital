@@ -163,6 +163,15 @@ The number of ignored files is written into the lab report's "Coverage & Limitat
 
 **What counts as a disease** lives in the same `code-hospital.yaml`. The structure ruler defaults to 80 lines per function, 500 lines per file, cyclomatic complexity 15; write `0` to turn a ruler off. Rule IDs or prefixes listed in `catalog.rules.ignore` are dropped at the initial scan. See the full example in `code-hospital.yaml.example`. The effective criteria are written into the lab report's "Coverage & Limitations".
 
+**How much of the discipline ledger to expose** is set in the same file. Execution deviations (the host moving a stage without a receipt, quoting source that does not match, etc.) default to "kind + stage + count", at most three kinds:
+
+```yaml
+discipline:
+  exposure: typed   # summary one number / typed default / located adds case and round / full adds the note text
+```
+
+There is no off switch. A deviation means the host did not keep its side of the contract; leaving it out of the report is the hospital covering for it.
+
 **Outside help** lives under `catalog` in that file. You do not edit the hospital source. An entry that reuses a builtin id does not replace the builtin. Paths must stay inside the treated repo.
 
 | Key | What you can add | Boundary |

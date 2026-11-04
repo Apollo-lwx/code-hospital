@@ -27,7 +27,8 @@ def test_static_calls_close_and_getattr_stays_open(tmp_path: Path):
     assert "未闭合链还在" in text
 
 
-def test_ambiguous_name_and_other_languages_stay_open(tmp_path: Path):
+def test_ambiguous_name_stays_open_and_other_languages_are_not_call_chains(tmp_path: Path):
+    """调用图只管 Python。Java 文件的链是「有没有人引用」，归 refs，不在这里。"""
     (tmp_path / "a.py").write_text("def main():\n    return run()\n", encoding="utf-8")
     (tmp_path / "b.py").write_text("def run():\n    return 1\n", encoding="utf-8")
     (tmp_path / "c.py").write_text("def run():\n    return 2\n", encoding="utf-8")
@@ -36,7 +37,7 @@ def test_ambiguous_name_and_other_languages_stay_open(tmp_path: Path):
     opened = "\n".join(chains["open"])
     assert "调用 run 同名不止一处" in opened
     assert "bad.py：语法解析失败" in opened
-    assert "App.java：这条链未建" in opened
+    assert "App.java" not in opened
 
 
 def test_discharge_lists_open_chains_without_a_clean_bill(tmp_path: Path):

@@ -50,25 +50,35 @@ def build_ledger(
     if not full_scan:
         kept = prior or {"source_hash": current_hash, "units": []}
         return ["补片不改写整份覆盖账。"], kept
+    from .refs import check as check_refs
+    from .refs import lines as refs_lines
     from .severe import chain_note, close_chains
 
     chains = (
         close_chains(project_root, files, seed_symbols)
         if project_root and files else {"closed": [], "open": []}
     )
+    # 调用图只管代码。文件之间的链是「有没有人引用」，单独查一遍。
+    refs = check_refs(project_root, files) if project_root and files else {}
     units = _units(visit_kind, devices, chains)
-    if not units:
-        return [], {"source_hash": current_hash, "units": [], "chains": chains}
-    same_source = bool(prior and prior.get("source_hash") == current_hash and prior.get("units"))
-    lines = ["覆盖账（查过不等于没有问题）："]
-    if same_source:
-        lines.append("源码未变，已查单元沿用上次覆盖账；未覆盖的仍然未覆盖。")
-    elif prior and prior.get("units"):
-        lines.append("源码变了，覆盖账按这次重查。")
-    for unit in units:
-        lines.append(f"{unit['title']}：{_STATUS[unit['status']]}。{unit['note']}")
-    lines.append("调用链。" + chain_note(chains))
-    return lines, {"source_hash": current_hash, "units": units, "chains": chains}
+    ledger = {"source_hash": current_hash, "units": units, "chains": chains, "refs": refs}
+    lines: list[str] = []
+    if units:
+        same_source = bool(
+            prior and prior.get("source_hash") == current_hash and prior.get("units")
+        )
+        lines.append("覆盖账（查过不等于没有问题）：")
+        if same_source:
+            lines.append("源码未变，已查单元沿用上次覆盖账；未覆盖的仍然未覆盖。")
+        elif prior and prior.get("units"):
+            lines.append("源码变了，覆盖账按这次重查。")
+        for unit in units:
+            lines.append(f"{unit['title']}：{_STATUS[unit['status']]}。{unit['note']}")
+        lines.append("调用链。" + chain_note(chains))
+    # 文件引用不挂在「检查单元」下：一门仪器都没拍成的体检也照样要查，
+    # 否则没有单元的那一轮会把「有 26 个文件没人引用」整个吞掉。
+    lines.extend(refs_lines(refs))
+    return lines, ledger
 
 
 def _units(visit_kind: str, devices: list[dict], chains: dict | None = None) -> list[dict]:

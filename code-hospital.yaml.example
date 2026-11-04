@@ -6,6 +6,15 @@ scan_ignore:
   - "gen/**"
   - "**/*_pb2.py"
 
+# 纪律账在报告里说到多细。账出现就说明宿主没按约定交卷，粗细只是客户想看到哪一层：
+#   summary  一句话总数
+#   typed    类型 + 阶段 + 次数（默认）
+#   located  再加病例与轮次
+#   full     再加说明原文，最多 30 条
+# 没有关闭这一档——一个字不提等于医院替宿主瞒下来。写 off 不生效，会按 typed 出并说明。
+# discipline:
+#   exposure: typed
+
 catalog:
   structure:
     function_lines: 80   # 0 = 函数多长都不算病。TypeScript 估算也用这个数

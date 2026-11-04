@@ -667,7 +667,10 @@ def render_scan_report(
         "## 覆盖与限制",
         "",
     ]
-    coverage = list(limitations) + _host_scan_limits(host_scan) + _deviation_notes(case.coverage)
+    coverage = (
+        list(limitations) + _host_scan_limits(host_scan)
+        + _deviation_notes(case.coverage, case.project_root)
+    )
     coverage += _recruit_notes(case.coverage, case.project_root)
     coverage += _rule_notes(case.project_root)
     parts += [f"- {ln}" for ln in coverage] if coverage else ["- 无"]
@@ -675,11 +678,14 @@ def render_scan_report(
     return "\n".join(parts)
 
 
-def _deviation_notes(coverage: dict | None) -> list[str]:
-    """执行偏差进限制项。缺口已经在限制项里，这里只补偏差。"""
+def _deviation_notes(coverage: dict | None, project_root: str = "") -> list[str]:
+    """执行偏差进限制项。缺口已经在限制项里，这里只补偏差。
+
+    说到多细看 `discipline.exposure`，由客户按仓库定。
+    """
     from ..catalog.ledger import deviation_lines
 
-    return deviation_lines(coverage)
+    return deviation_lines(coverage, project_root=project_root)
 
 
 def _recruit_notes(coverage: dict | None, project_root: str = "") -> list[str]:
@@ -707,11 +713,13 @@ def _rule_notes(project_root: str) -> list[str]:
 def _ledger_section(coverage: dict | None, project_root: str = "") -> list[str]:
     """诊断书的「未查与缺口」。没有缺口时整节不出现，不写「无」。"""
     from ..catalog.ledger import deviation_lines, gap_lines, recruitment_lines
+    from ..catalog.refs import lines as refs_lines
     from ..safety.evidence import evidence_lines
 
     lines = (
-        gap_lines(coverage) + deviation_lines(coverage)
+        gap_lines(coverage) + deviation_lines(coverage, project_root=project_root)
         + evidence_lines(coverage) + recruitment_lines(coverage, project_root)
+        + refs_lines((coverage or {}).get("refs"))
         + _rule_notes(project_root)
     )
     if not lines:

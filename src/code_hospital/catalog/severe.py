@@ -631,19 +631,21 @@ def close_chains(
     files: list[str],
     seed_symbols: list[tuple[str, str]] | None = None,
 ) -> dict:
-    """从入口、范围内改到的函数和点名的符号走出静态调用闭包。"""
+    """从入口、范围内改到的函数和点名的符号走出静态调用闭包。
+
+    只管代码。文档、配置、SQL 映射没有调用可走，它们的链是「有没有人引用」，
+    归 `catalog/refs.py`。以前在这里对每个非 Python 文件直接写一句
+    「这条链未建」——那不是检查结果，是把没查写成没有。
+    """
     root = Path(project_root)
     opened: list[str] = []
     py_files: list[str] = []
     for rel in files:
         key = rel.replace("\\", "/")
-        suffix = Path(key).suffix.lower()
-        if suffix == ".py" and (root / key).is_file():
+        if Path(key).suffix.lower() == ".py" and (root / key).is_file():
             py_files.append(key)
-        elif suffix and suffix != ".py":
-            opened.append(f"{key}：这条链未建")
     if not py_files:
-        return {"closed": [], "open": _trim_chain(opened)}
+        return {"closed": [], "open": []}
     index = _caller_index(root)
     for rel in py_files:
         if rel not in index.parsed and rel not in index.broken:
