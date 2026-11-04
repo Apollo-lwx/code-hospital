@@ -261,6 +261,26 @@ def _walk_sources(root: Path, base: Path) -> list[str]:
     return sorted(result)
 
 
+def has_python_files(project_root: str) -> bool:
+    """仓库里有没有 Python 文件（尊重三层忽略）。
+
+    零配置探测用：本机装了 ruff 不等于这台仓库该建议 `ruff check`。
+    纯 Java 仓库上它会扫 0 个文件、退出码 0，然后被写进验收白名单——
+    一条永远绿的验收命令，疗效账跟着一起失真。
+    """
+    root = Path(project_root or ".").resolve()
+    custom = load_scan_ignores(project_root)
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in _DENY_DIRS]
+        for fn in filenames:
+            if Path(fn).suffix.lower() not in {".py", ".pyi"}:
+                continue
+            rel = (Path(dirpath) / fn).relative_to(root).as_posix()
+            if not is_denied(rel, custom):
+                return True
+    return False
+
+
 def ensure_git_info_exclude(project_root: str, entry: str = ".hospital/") -> bool:
     """把 .hospital/ 追加进 .git/info/exclude（本地排除，不动 tracked .gitignore）。
 

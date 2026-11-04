@@ -20,7 +20,7 @@ from ..core.errors import invalid_operation, not_found
 from ..core.fingerprint import context_anchor as make_anchor
 from ..core.ids import new_id
 from ..core.models import Finding, ReportRecord
-from ..safety.repo_files import scope_file_list
+from ..safety.repo_files import has_python_files, scope_file_list
 from ..safety.sanitize import sanitize_evidence, sanitize_text
 from ..storage.db import Database, hospital_root, now_ms
 from ..storage.reports import render_scan_report
@@ -238,11 +238,17 @@ async def collect_findings(
 
 
 def detect_acceptance_commands(project_root: str) -> list[dict]:
-    """验收命令零配置探测（设计 §4.6 冷启动）：探测≠执行。"""
+    """验收命令零配置探测（设计 §4.6 冷启动）：探测≠执行。
+
+    只建议「在这台仓库上跑得起来」的命令。装了 ruff 但仓库一行 Python 都没有时，
+    `ruff check` 会扫 0 个文件、退出码 0——一条永远绿的验收命令，还会被写进
+    验收白名单，之后每次疗效都记成通过。假绿比没有验收更坏。
+    """
     root = Path(project_root)
     suggestions: list[dict] = []
     ruff_name = "ruff.exe" if os.name == "nt" else "ruff"
-    if shutil.which("ruff") or (Path(sys.executable).parent / ruff_name).is_file():
+    has_ruff = bool(shutil.which("ruff") or (Path(sys.executable).parent / ruff_name).is_file())
+    if has_ruff and has_python_files(project_root):
         suggestions.append({"alias": "lint", "command": "ruff check", "source": "ruff"})
     if (root / "pytest.ini").exists() or (
         (root / "pyproject.toml").exists()
