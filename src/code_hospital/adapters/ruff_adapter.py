@@ -25,6 +25,20 @@ def ruff_check_args(select: tuple[str, ...]) -> list[str]:
     return args
 
 
+# pep8-naming（N8xx）的消息固定把符号名放在第一对反引号里：
+# "Variable `visit_Foo` in class scope should not be mixedCase" → visit_Foo。
+# 正骨的守门、豁免、升档都要符号名；行文本兜底（_symbol_hint）只认 def/class，
+# 赋值形态的类属性（visit_Foo = ...）提不到，必须从这里补。
+_MESSAGE_SYMBOL = re.compile(r"`([^`]+)`")
+
+
+def _n8_symbol(code: str, message: str) -> str:
+    if not code.startswith("N8"):
+        return ""
+    hit = _MESSAGE_SYMBOL.search(message or "")
+    return hit.group(1).strip() if hit else ""
+
+
 def parse_ruff_json(payload: str) -> list[RawFinding]:
     """解析 ruff JSON 输出（纯函数，便于单测）。"""
     try:
@@ -36,14 +50,17 @@ def parse_ruff_json(payload: str) -> list[RawFinding]:
         code = row.get("code") or "syntax-error"
         loc = row.get("location") or {}
         end = row.get("end_location") or {}
+        message = row.get("message", "")
+        symbol = _n8_symbol(code, message)
         findings.append(
             RawFinding(
                 rule_id=code,
-                message=row.get("message", ""),
+                message=message,
                 file_path=(row.get("filename") or "").replace("\\", "/"),
                 line_start=int(loc.get("row") or 0),
                 line_end=int(end.get("row") or loc.get("row") or 0),
                 severity=map_severity(code),
+                extra={"symbol": symbol} if symbol else {},
             )
         )
     return findings

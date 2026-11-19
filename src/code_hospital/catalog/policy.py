@@ -3,6 +3,8 @@
 没有这份文件时用内置默认。结构尺写成 0 表示这把尺不算病。
 `catalog.rules.ignore` 按规则号或前缀丢掉发现：`F401` 只丢这一条，`FURB` 丢掉以此开头的全部。
 `min_severity` 留空表示各严重度都保留。`ruff_select` 非空时传给 `ruff --select`。
+`catalog.rename.exempt` 声明仓库的框架约定名（符号 glob，如 `visit_*`）：
+命中这些模式的改名发现不入方——不是「没问题」，是「这名不归医院管」。
 """
 
 from __future__ import annotations
@@ -45,6 +47,9 @@ class DiseasePolicy:
     ignore: tuple[str, ...] = ()
     min_severity: str = ""
     ruff_select: tuple[str, ...] = ()
+    # 正骨豁免：仓库的框架约定名（ast 的 visit_*、pytest fixture 这类）。
+    # 命中这些符号的改名发现不入方——不是「没问题」，是「这名不归医院管」。
+    rename_exempt: tuple[str, ...] = ()
     notes: tuple[str, ...] = ()
 
 
@@ -65,6 +70,7 @@ def load_policy(project_root: str) -> DiseasePolicy:
     java = catalog.get("java") or {}
     typescript = catalog.get("ts") or {}
     rules = catalog.get("rules") or {}
+    rename = catalog.get("rename") or {}
     if not isinstance(structure, dict):
         structure = {}
     if not isinstance(java, dict):
@@ -73,11 +79,15 @@ def load_policy(project_root: str) -> DiseasePolicy:
         typescript = {}
     if not isinstance(rules, dict):
         rules = {}
+    if not isinstance(rename, dict):
+        rename = {}
     notes: list[str] = []
     ignore, ignored_notes = _tokens(rules.get("ignore"))
     notes.extend(ignored_notes)
     selected, select_notes = _tokens(rules.get("ruff_select"))
     notes.extend(select_notes)
+    exempt, exempt_notes = _globs(rename.get("exempt"))
+    notes.extend(exempt_notes)
     floor = str(rules.get("min_severity") or "").strip().lower()
     if floor and floor not in _SEVERITY_RANK:
         notes.append(f"min_severity={floor} 无法识别，严重度不设下限")
@@ -93,6 +103,7 @@ def load_policy(project_root: str) -> DiseasePolicy:
         ignore=ignore,
         min_severity=floor,
         ruff_select=selected,
+        rename_exempt=exempt,
         notes=tuple(notes),
     )
 
@@ -192,6 +203,27 @@ def _tokens(raw) -> tuple[tuple[str, ...], list[str]]:
             continue
         if not _TOKEN.fullmatch(token):
             notes.append(f"规则开关 {token} 含非法字符，已跳过")
+            continue
+        kept.append(token)
+    return tuple(dict.fromkeys(kept)), notes
+
+
+def _globs(raw) -> tuple[tuple[str, ...], list[str]]:
+    # 与 _tokens 同形，但保留 glob 字符（* ? [）：豁免清单匹配的是符号名。
+    if raw is None:
+        return (), []
+    if isinstance(raw, str):
+        raw = [part.strip() for part in raw.split(",") if part.strip()]
+    if not isinstance(raw, list):
+        return (), ["正骨豁免清单不是列表，已忽略"]
+    kept: list[str] = []
+    notes: list[str] = []
+    for item in raw:
+        token = str(item).strip()
+        if not token:
+            continue
+        if token != str(item) or any(ch.isspace() for ch in token):
+            notes.append(f"正骨豁免 {item!r} 含空白，已跳过")
             continue
         kept.append(token)
     return tuple(dict.fromkeys(kept)), notes

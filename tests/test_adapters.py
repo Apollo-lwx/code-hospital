@@ -27,6 +27,25 @@ def test_ruff_parse_and_severity():
     assert map_severity("FURB122") == "nit"
 
 
+def test_ruff_n8_symbol_from_message():
+    """N8xx 的符号名从消息反引号提取（正骨守门/豁免要用）；其他规则不提。"""
+    payload = json.dumps([
+        {"code": "N815", "message": "Variable `visit_Foo` in class scope should not be mixedCase",
+         "filename": "src/a.py", "location": {"row": 5, "column": 5},
+         "end_location": {"row": 5, "column": 20}},
+        {"code": "N802", "message": "Function name `Bar` should be lowercase",
+         "filename": "src/a.py", "location": {"row": 9, "column": 1},
+         "end_location": {"row": 9, "column": 10}},
+        {"code": "F401", "message": "`os` imported but unused",
+         "filename": "src/a.py", "location": {"row": 1, "column": 1},
+         "end_location": {"row": 1, "column": 10}},
+    ])
+    findings = parse_ruff_json(payload)
+    assert findings[0].extra.get("symbol") == "visit_Foo"
+    assert findings[1].extra.get("symbol") == "Bar"
+    assert findings[2].extra.get("symbol") is None
+
+
 def test_semgrep_parse():
     payload = json.dumps({
         "results": [{

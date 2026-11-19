@@ -26,7 +26,7 @@
   name: 正骨
   method: llm_patch
   risk: medium
-  phase: 2
+  phase: 1
   hold: false
   scope: reference_closure
   acceptance_alias: test
@@ -35,7 +35,20 @@
       risk: high
   indications:
     - kind: rule
-      rule_ids: []
+      # 按改名动作分组的显式枚举，不用前缀（同前缀规则风险不同构，N999 是文件移动）。
+      # 前提：仓库在 code-hospital.yaml catalog.rules.ruff_select 显式启用 N 前缀后才会有发现。
+      rule_ids:
+        - N803   # G1 局部名字：参数名
+        - N806   # G1 局部名字：函数内变量
+        - N802   # G2 函数/方法名 snake_case
+        - N804   # G2 classmethod 首参
+        - N805   # G2 方法首参
+        - N807   # G2 伪 dunder
+        - N801   # G3 类名 CapWords
+        - N818   # G3 异常类名 error 后缀
+        - N815   # G4 类作用域变量
+        - N816   # G4 全局变量
+      # 第二批：G5 import 别名 N811–N814、N817。不接：G6 模块文件名 N999（等 LSP001）。
 - id: dedupe
   name: 去重
   method: llm_patch

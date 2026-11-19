@@ -387,6 +387,7 @@ def build_items(
     diagnoses: list, findings_by_id: dict, prescription_id: str, include_low: bool,
     requested: list[str] | None = None,
     project_root: str = "",
+    drops_out: list | None = None,
 ) -> list[dict]:
     chosen = [
         d for d in diagnoses
@@ -412,6 +413,7 @@ def build_items(
 
     drafted = []
     hint = 1
+    rename_clusters = []
     for diagnosis, members in clusters:
         head = min(members, key=lambda f: (f.line_start, f.file_path))
         matched = match_finding(
@@ -421,6 +423,10 @@ def build_items(
             project_root=project_root,
         )
         if matched.formula is None:
+            continue
+        if matched.formula.id == "rename":
+            # 正骨单独走：先守门（单文件闭包）再按规模合并，最后才轮得到煎药。
+            rename_clusters.append((diagnosis, members, head, matched))
             continue
         method = effective_method(matched.formula, acceptance_open=False)
         scope = scope_key(head)
@@ -443,6 +449,9 @@ def build_items(
             attending, scope, [],
         ))
         hint += 1
+    hint = _draft_rename(
+        rename_clusters, prescription_id, hint, attending_of, project_root, drafted, drops_out,
+    )
 
     kept: dict[tuple, dict] = {}
     for item in drafted:
@@ -458,6 +467,106 @@ def build_items(
         for extra in ("files", "symbols", "severity", "seq_hint", "attending"):
             item.pop(extra, None)
     return ordered
+
+
+def _draft_rename(
+    rename_clusters: list, prescription_id: str, hint: int, attending_of: dict,
+    project_root: str, drafted: list, drops_out: list | None,
+) -> int:
+    """正骨入方三道闸：仓库声明的命名约定（catalog.rename.exempt）先入待复核；
+    G1 局部名字直接过；其余先守门（跨文件引用 → 待复核），
+    再按规模合并（同规则同文件 ≥ RENAME_BATCH_MIN → 一味外购批量迁移），
+    最后 touches_public_api 升档。返回下一个 seq hint。"""
+    from ..catalog.policy import load_policy
+    from ..catalog.rename import (
+        G1_LOCAL_RULES,
+        RENAME_BATCH_MIN,
+        cross_file_reference,
+        exempted,
+        touches_public_api,
+    )
+
+    exempt = load_policy(project_root).rename_exempt if project_root else ()
+
+    groups: dict[tuple, list] = {}
+    for row in rename_clusters:
+        diagnosis, members, head, _matched = row
+        groups.setdefault((head.rule_id, head.file_path), []).append(row)
+
+    for (rule_id, file_path), rows in sorted(groups.items()):
+        all_members = [m for _d, members, _h, _m in rows for m in members]
+        if len(all_members) >= RENAME_BATCH_MIN:
+            # 批量迁移不是诊疗：几百处 N802 该用 codemod，一味煎药开不出来。
+            head_diag, _, head, matched = rows[0]
+            attending = attending_of.get(head_diag.id, matched.specialty_id)
+            item = _draft_item(
+                head_diag, all_members, prescription_id, hint,
+                "rename", "", "manual", matched.specialty_id, attending,
+                f"file:{file_path}#rule:{rule_id}", _member_spans(all_members),
+            )
+            item["instructions"] = (
+                f"正骨·批量迁移：{file_path} 有 {len(all_members)} 处 {rule_id}。"
+                f"同规则同文件达到 {RENAME_BATCH_MIN} 处按批量迁移处理，不开煎药——"
+                "建议用 codemod 一次性脚本迁移，逐处改名不值当。"
+            )[:500]
+            item["acceptance"] = {"alias": "", "expect": f"迁移后 {rule_id} 在本范围的发现数应为 0"}
+            item["rollback"] = "manual"
+            drafted.append(item)
+            hint += 1
+            continue
+        for diagnosis, members, head, matched in rows:
+            symbol = str(getattr(head, "symbol", "") or "")
+            if symbol and exempt and exempted(symbol, exempt):
+                if drops_out is not None:
+                    drops_out.append({
+                        "file": file_path, "line": head.line_start,
+                        "reason": (
+                            f"正骨 {rule_id}：符号 {symbol} 命中仓库声明的命名约定"
+                            "（catalog.rename.exempt），这名不归医院管，不入方"
+                        ),
+                    })
+                continue
+            if rule_id not in G1_LOCAL_RULES:
+                if not symbol:
+                    if drops_out is not None:
+                        drops_out.append({
+                            "file": file_path, "line": head.line_start,
+                            "reason": f"正骨 {rule_id}：提取不到符号名，无法证明单文件闭包，留人工核对",
+                        })
+                    continue
+                if cross_file_reference(project_root, file_path, symbol):
+                    if drops_out is not None:
+                        drops_out.append({
+                            "file": file_path, "line": head.line_start,
+                            "reason": (
+                                f"正骨 {rule_id}：符号 {symbol} 被其他文件引用，"
+                                "存在跨文件引用，等 LSP 符号级 scope（LSP001）"
+                            ),
+                        })
+                    continue
+            method = effective_method(matched.formula, acceptance_open=False)
+            attending = attending_of.get(diagnosis.id, matched.specialty_id)
+            item = _draft_item(
+                diagnosis, members, prescription_id, hint,
+                "rename", "", method, matched.specialty_id, attending,
+                scope_key(head), _member_spans(members),
+            )
+            for override in matched.formula.risk_overrides:
+                if override.get("when") == "touches_public_api" and touches_public_api(
+                    project_root, file_path, symbol
+                ):
+                    item["risk"] = str(override.get("risk") or "high")
+            drafted.append(item)
+            hint += 1
+            companion = companion_for("rename", method, matched.specialty_id, project_root)
+            if companion is not None:
+                drafted.append(_draft_item(
+                    diagnosis, members, prescription_id, hint,
+                    companion.id, "rename", companion.method, matched.specialty_id,
+                    attending, scope_key(head), [],
+                ))
+                hint += 1
+    return hint
 
 
 def _prefer_item(candidate: dict, current: dict) -> bool:
@@ -645,6 +754,7 @@ async def prescribe(
             include_low=low_confidence == "adopt",
             requested=case.requested_specialties,
             project_root=root,
+            drops_out=admission_drops,
         )
         if (case.coverage or {}).get("budget", {}).get("degraded"):
             from ..catalog.budget import downgrade_model_items
