@@ -1,6 +1,7 @@
 # 代码医院 · 内置名册（专科、处方药、检验仪器）
 
-> 状态：名册已由运行时读取。第一期已接入分流、药柜、结构尺（lizard 在岗时含圈复杂度）、检查单、`scope_lines`、java-pack、hotspot-ruler、分层尺、ESLint 成药（可修规则开清创）、jscpd 去重，以及点名后的类型尺（mypy 或 pyright）。`hosp_treat` 自动档会串起这一整条路径。正骨仍是第二期。不改病例状态机。
+> 状态：名册已由运行时读取。第一期已接入分流、药柜、结构尺（lizard 在岗时含圈复杂度）、检查单、`scope_lines`、java-pack、hotspot-ruler、分层尺、ESLint 成药（可修规则开清创）、jscpd 去重、正骨（rename，G1–G4 + 命名约定豁免），以及点名后的类型尺（mypy 或 pyright）。`hosp_treat` 自动档会串起这一整条路径。不改病例状态机。
+> 其后又落地（2026-11）：13 种号别（`catalog/visits.py`，含安全/缺陷/性能/算法/供应链/业务/重症/全科）与配套院内尺子（security-ruler、defect-ruler、perf-ruler、algo-ruler、supply-ruler、business-ruler、taint-ruler、impact-review、test-gap、python-review、java-review、ts-review、spotbugs，均登记在 `instruments.yaml`），演进路线 E0–E5 全部验收（见 `code-hospital-roadmap.md` 验收清单）。§4.5.1 的号别表以代码为准，本文件其余章节仍描述名册一期的咬合关系。
 > 上位设计见 [`code-hospital-design.md`](./code-hospital-design.md)（原则 7「能力挂流程，不乱设科室」，以及 §7 已采纳的开源零件）。本文把会诊专科、处方药、检验仪器收成三本名册，并给出同类开源项目的参考、搬迁、复用判断。
 
 ---
@@ -266,7 +267,7 @@ graph TD
 |---|---|---|---|---|---|---|
 | debride | 清创 | `rule`。ruff 精确 `F401`、`F541`、`F841`、`E501`、`I001`，以及前缀 `I`、`UP`、`W`、`C4`、`RET`、`SIM`、`PIE`、`RUF`。`critical` 不命中 | autofix | low | `line_range`。验收别名 lint。置信度 0.86 | 1 |
 | split | 拆分 | `rule`。`structure.function_lines`、`structure.file_lines`、`structure.cyclomatic` | llm_patch | medium | 函数级 `symbol`，文件行数 `file`。验收别名 test | 1 |
-| rename | 正骨 | `rule`。`rule_ids` 为空 | llm_patch | medium；`touches_public_api` 时 high | `reference_closure`。验收别名 test | 2 |
+| rename | 正骨 | `rule`。G1–G4 按动作分组枚举（`N801`–`N807`、`N815`、`N816`、`N818`，不接 `N811`–`N814`/`N817`/`N999`）。跨文件引用守门：符号被其他文件 import 的发现不入方、留待复核（等 LSP001）；同规则同文件 ≥20 处合并为一味外购批量迁移；命中 `catalog.rename.exempt` 的命名约定符号不入方、留待复核 | llm_patch（批量迁移项 manual） | medium；`touches_public_api` 时 high | `reference_closure`（一期语义：单文件闭包）。验收别名 test | 1 |
 | dedupe | 去重 | `rule`。`jscpd` 的 `clone.duplicate` | llm_patch | medium | `file`。验收别名 test | 1 |
 | guard | 补罩 | `rule`。`BLE001`、`java.null-deref`、`java.resource-leak`。`critical` 不命中，改走封存 | llm_patch | medium | 有符号用 `symbol`，否则 `line_range`。验收别名 test | 1 |
 | seal | 封存 | `severity: critical`，以及 gitleaks 的全部规则。`hold: true` | manual | high | `line_range`。不改文件。gitleaks 置信度 0.92；ruff 的 critical 为 0.70；semgrep 与 java-pack 的 critical 为 0.62 | 1 |
@@ -287,7 +288,7 @@ risk_overrides:
     risk: high
 ```
 
-`touches_public_api` 表示发现落在导出符号上（Python 模块顶层公开函数、Java 的 public 方法）。第一期正骨 `phase: 2`，不入方。
+`touches_public_api` 表示发现落在导出符号上（`__all__` 收录、或包顶层 `__init__.py` 里定义/再导出；Java 的 public 方法留待 Java 侧）。判定已在药房落地（`catalog/rename.py`）。正骨已降 `phase: 1`（2026-11-20）：框架约定名的豁免机制内置、清单外置——被诊疗仓库在 `code-hospital.yaml` 里用 `catalog.rename.exempt` 声明符号 glob（如 ast 的 `visit_*`），命中的发现不入方、进待复核并注明「命中命名约定」；ruff 适配器从 N8xx 消息反引号提取符号名供守门与豁免使用。降期前过了本仓真实观察：豁免与守门各拦住该拦的，零误开方。
 
 `scope` 只有这六个值。处方项按下表填字段。成药的 `scope_lines` 不能空：执行 `ruff check --fix --select <rule_id>` 之后，只保留落在这些行里的 diff，区间外的改动回滚。本机 `ruff check` 没有行范围参数，所以用「试修再裁剪」，不把裁剪前的结果留在工作区。没有 `scope_lines` 的成药项不执行。
 
@@ -506,6 +507,7 @@ jscpd 的复制检测、ast-grep 的结构替换，都是「有二进制就多�
 7. ESLint 成药执行器已落地：带 `fix` 的发现开清创，`eslint --fix` 后按 `scope_lines` 裁剪。去重仪器 `jscpd` 与去重药 `phase` 一起降到 1，规则 id 为 `clone.duplicate`。正骨仍是第二期。
 8. 类型尺在 `requested_instruments` 含 `type-ruler` 时补拍：优先 mypy，否则 pyright。两边都不在 PATH 时，初检写终态「类型尺未到岗」，不再开检查单。结构尺在 lizard 在岗时追加 `structure.cyclomatic`（默认超过 15）。正骨仍是第二期。
 9. `hosp_treat` 以 `auto_advance=true` 挂号，在同一次编排里完成检验、诊断（含一轮补拍）、开方、施治和出院。每一阶段通过 MCP progress 通知上报，消息是阶段名，施治时再带上当前药味 id。`timeout_ms` 用尽返回 `suspended`，`resume=true` 从当前阶段续跑。低危由宿主代理批准。高危降级为外购，不自动改代码。煎药返回 `need_patch`，宿主提交补丁后再续跑。正骨仍是第二期。
+10. 正骨降 `phase: 1`（2026-11-20）：G1–G4 十条按动作分组枚举入册，命名约定豁免走被诊疗仓库的 `catalog.rename.exempt`（机制内置、清单外置），ruff 适配器从 N8xx 消息反引号提取符号名。降期依据是本仓真实观察：豁免与守门各拦住该拦的，零误开方。
 
 ---
 
@@ -627,11 +629,11 @@ risk: medium
 risk_overrides:
   - when: touches_public_api
     risk: high
-phase: 2
+phase: 1
 hold: false
 indications:
   - kind: rule
-    rule_ids: []
+    rule_ids: [N801, N802, N803, N804, N805, N806, N807, N815, N816, N818]
 scope: reference_closure
 acceptance_alias: test
 ```

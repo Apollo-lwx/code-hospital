@@ -6,7 +6,7 @@
 
 Take your code to the hospital instead of letting AI practice "barefoot-doctor medicine" — a quick glance, immediate edits, no verification, drifting further off course. Code Hospital practices like a proper hospital built on **medical records, prescriptions, and nursing logs**: **every fix has a traceable prescription, controllable boundaries, and verifiable diffs** — local-first, with all data landing in the current repo's `.hospital/`.
 
-> Current version v0.1: registration / lab tests / diagnosis / prescribing / patent-medicine & decoction patch submission / discharge gate / case lookup are usable; re-verification and conflict resumption remain open per the [roadmap](#roadmap).
+> Current version v0.2: the full clinical loop is usable (registration / lab tests / diagnosis / prescribing / patent medicine & decoction / discharge gate / case lookup / `hosp_treat` auto mode); 13 visit kinds with a 23-instrument built-in catalog, the capability market (`hosp_market`, probation + criteria-based promotion) and institutional rules (`hosp_rule`) are live; consult referral slips (R1–R4 + `referred_from` direct referral) and rename (正骨, phase 1) have landed, and ast-grep, LSP symbol-level scope and more remain open per the [roadmap](#roadmap).
 > User-facing glossary: [`docs/code-hospital-glossary.md`](docs/code-hospital-glossary.md); design contract: [`docs/code-hospital-design.md`](docs/code-hospital-design.md); IO contracts: [`docs/code-hospital-io-contracts.md`](docs/code-hospital-io-contracts.md); algorithm & modeling design: [`docs/code-hospital-algorithms.md`](docs/code-hospital-algorithms.md). The runtime implementation lives in `code_hospital.core.algorithms` (`docs/algorithms_reference.py` is only a self-check entry point).
 
 ## Table of contents
@@ -136,10 +136,20 @@ Report artifacts land in `.hospital/reports/<case_id>/` (the lab report can be p
 
 ## Roadmap
 
-- **P0 PR outpatient clinic (current)**: read-only pipeline, lab report pasted into PRs.
-- **P1 outpatient closed loop**: diagnosis + prescription approval + patent-medicine treatment (autofix) + discharge gate + reverse-apply rollback.
-- **P2 inpatient ward**: decoction protocol (host-model patches, four validations), drift control, multi-round courses, `hosp_treat`, consult referral slips, follow-up plans.
-- **P3 integrated care**: rsi-boot integration (medication-contraindication recall, treatment-outcome experience distillation), symbol-level scope, worktree high-risk isolation.
+Landed:
+
+- **P0 PR outpatient clinic / P1 closed loop / P2 inpatient ward / P3 integrated care (core)**: read-only pipeline → diagnosis + prescription approval + patent-medicine treatment + discharge gate → decoction protocol, drift control, multi-round courses, `hosp_treat`, follow-up plans → rsi-boot integration (contraindication recall, outcome distillation).
+- **Built-in catalog & visit kinds (E0–E5)**: the three catalogs (specialties / formulas / instruments), 13 visit kinds, in-house rulers (security / defect / performance / algorithm / supply-chain / business / taint / test-gap, etc.), host checklist packs, call-chain closure, external instrument registration, efficacy posteriors. See `docs/code-hospital-roadmap.md`.
+- **Platform evolution (six steps)**: ledger, evidence tiers, memory port, capability market (`hosp_market`), hiring loop, discipline hardening (`hosp_rule`). See `docs/code-hospital-platform-evolution.md`.
+- **Consult referral slips (referrals)**: trigger rules R1–R4 landed — cross-repo imports, upstream dependencies, host-named targets, recurring root causes. When the target repo is reachable in the workspace, `hosp_register(referred_from=...)` starts treatment directly and `case_links` keeps the chain traceable both ways.
+- **rename (正骨) at phase 1**: ten G1–G4 rules enumerated by rename action; cross-file reference guard, batch-migration merge (≥20 → one manual item), public-API risk escalation. Framework-convention names are exempted via the diagnosed repo's `catalog.rename.exempt` (symbol globs; mechanism built in, list external); the ruff adapter extracts symbol names from N8xx message backticks. Real-repo observation on this repo passed before the phase drop: all 8 ast `visit_*` findings (N815) went to review-hold via the exemption, `MemoryUnavailable` (N818) via the cross-file guard — zero mis-prescriptions.
+
+Still open (see `docs/code-hospital-open-decisions.md`):
+
+- ast-grep instrument, Java autofix executor, design-department instrument: waiting for real demand;
+- LSP symbol-level scope, git worktree isolation, dose-stack rollback: high-risk enhancements, not the current path;
+- prescription efficacy aggregation: waiting for enough discharge samples;
+- remote registry: out of scope this cycle.
 
 ## Configuration
 

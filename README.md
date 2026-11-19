@@ -6,7 +6,7 @@
 
 把代码送到医院：先体检、再诊断、开处方、按方修码、护士全程盯防、复查确认才出院——每一步都有报告。AI 修代码不再是「赤脚医生模式」（看两眼就动手、改完不验证、越改越偏），而是按**病历、处方、护理记录**行医的正规医院：**有处方可查、有边界可控、有差分可证**，数据只落当前仓库的 `.hospital/`。
 
-> 当前版本 v0.1：挂号 / 检验 / 诊断 / 开方 / 成药与煎药提交 / 出院门禁 / 病例查询已可用；补验与冲突续行仍按[路线图](#路线图)开放。
+> 当前版本 v0.2：诊疗全程闭环已可用（挂号 / 检验 / 诊断 / 开方 / 成药与煎药 / 出院门禁 / 病例查询 / `hosp_treat` 自动档）；13 种号别与 23 台内置仪器名册、能力市场（`hosp_market`，影子期 + 判据转正）与院规（`hosp_rule`）已上线；会诊转诊单（R1–R4 + `referred_from` 直接转诊）与正骨（rename，phase 1）已落地，ast-grep、LSP 符号级 scope 等仍按[路线图](#路线图)开放。
 > 用户向术语手册见 [`docs/code-hospital-glossary.md`](docs/code-hospital-glossary.md)；设计契约见 [`docs/code-hospital-design.md`](docs/code-hospital-design.md)；IO 契约见 [`docs/code-hospital-io-contracts.md`](docs/code-hospital-io-contracts.md)；算法与建模设计见 [`docs/code-hospital-algorithms.md`](docs/code-hospital-algorithms.md)；架构演进方案见 [`docs/code-hospital-agent-runtime-plan.md`](docs/code-hospital-agent-runtime-plan.md)。运行时实现在 `code_hospital.core.algorithms`（`docs/algorithms_reference.py` 只是自检入口）。
 
 ## 目录
@@ -136,10 +136,20 @@ hosp serve                          # 一般由宿主拉起，不必手跑
 
 ## 路线图
 
-- **P0 PR 门诊（当前）**：只读链路，检验报告贴 PR。
-- **P1 门诊闭环**：诊断 + 处方审批 + 成药施治（autofix）+ 出院门禁 + 逆应用回滚。
-- **P2 住院部**：煎药协议（宿主模型补丁，四道校验）、漂移控制、多轮疗程、`hosp_treat`、会诊转诊单、随访计划。
-- **P3 医养结合**：rsi-boot 联动（用药禁忌召回、疗效经验蒸馏）、符号级 scope、worktree 高危隔离。
+已落地：
+
+- **P0 PR 门诊 / P1 门诊闭环 / P2 住院部 / P3 医养结合（主体）**：只读链路 → 诊断 + 处方审批 + 成药施治 + 出院门禁 → 煎药协议、漂移控制、多轮疗程、`hosp_treat`、随访计划 → rsi-boot 联动（用药禁忌召回、疗效经验蒸馏）。
+- **内置名册与号别（E0–E5）**：专科/药/仪器三本名册、13 种号别、院内尺子（安全/缺陷/性能/算法/供应链/业务/污点/测试缺口等）、宿主清单提示包、调用链闭合、外聘仪器登记、疗效后验。详见 `docs/code-hospital-roadmap.md`。
+- **平台化六步**：记账、证据层、记忆端口、能力市场（`hosp_market`）、招聘闭环、纪律固化（`hosp_rule`）。详见 `docs/code-hospital-platform-evolution.md`。
+- **会诊转诊单（referrals）**：R1–R4 触发规则落地——仓外 import、上游依赖、宿主点名、复发根因；目标仓在工作区可及时可 `hosp_register(referred_from=...)` 直接转诊，`case_links` 双向可溯。
+- **正骨（rename）phase 1**：G1–G4 十条规则按动作分组枚举；跨文件引用守门、批量迁移合并（≥20 → 外购）、公开 API 升档。「框架约定名」豁免走被诊疗仓库的 `catalog.rename.exempt`（符号 glob，机制内置、清单外置）；ruff 适配器从 N8xx 消息反引号提取符号名。已经本仓真实观察：8 处 ast `visit_*`（N815）全部按豁免入待复核，`MemoryUnavailable`（N818）按跨文件守门入待复核，零误开方后降期。
+
+仍开放（详见 `docs/code-hospital-open-decisions.md`）：
+
+- ast-grep 仪器、Java 成药执行器、设计科仪器：等真实需求信号；
+- LSP 符号级 scope、git worktree 高危隔离、剂量栈回滚：高危增强，非当前路径；
+- 处方疗效统计聚合：等出院样本量；
+- 远程 registry：本周期不做。
 
 ## 配置
 
