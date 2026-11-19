@@ -1,7 +1,7 @@
 """Code Hospital — 编排型代码诊疗 MCP。
 
-P0 范围（PR 门诊旗舰）：hosp_register / hosp_scan / hosp_case 三个只读工具，
-ruff/semgrep/gitleaks 三适配器，diff scope（staged/commit/range），PR 可贴报告。
+诊疗 8 工具（register / scan / diagnose / prescribe / dispense / discharge / treat / case）
++ 平台运维 2 工具（market / rule）；13 种号别与内置名册，能力市场影子期与院规纪律固化已上线。
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

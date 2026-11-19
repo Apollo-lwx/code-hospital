@@ -241,3 +241,37 @@ conflict(a, b) = a.scope_key == b.scope_key
 ---
 
 > 本评审为产品/设计评审参考，具体实现请结合仓库当前测试基线与团队排期确认。
+
+---
+
+## 六、落地后复核（2026-11-19）
+
+> 复核口径：名册文档是否按建议修订（文档层），以及运行时是否真实落地（代码层，以 `src/code_hospital/` 与 555 项测试基线为准）。
+> 结论：**22 条中 21 条已修复，1 条部分开放（P14 的正骨适应证，转入 open-decisions 跟踪）。**
+
+| # | 状态 | 落点 |
+|---|---|---|
+| P1 成药无法定位单行 | ✅ 已修复（文档+代码） | 名册 §4.3/§5.2/§6 增加 `scope_lines`（成药必填，试修再裁剪）；`pharmacist.py`、`db.py` 已落地 |
+| P2 聚类双索引 | ✅ 已修复 | §4.1.1 簇主键改为 `(rule_id, scope_key)`，`content_key` 只用于复发调档；§7 同步表规定与算法 A5 同批改 |
+| P3 剂型判定安全侧回退 | ✅ 已修复 | 封存适应证增加通用 `severity: critical` 档；新增续治（repair，fallback）保住出方量；§4.3.1 补「现行→名册」对照表。已知留白：非 critical 的密钥类写法（如 semgrep 硬编码密码）走续治而非封存，可接受 |
+| P4 成药/煎药冲突未定义 | ✅ 已修复（文档+代码） | `formulary_conflict` 扩为 `same_scope`/`overlap`/`parent_child` 三原因，审批前不自动删；`prescriber.py:449-490` 已实现 |
+| P5 药柜双写 | ✅ 已修复 | §4.3 表删除「药柜」列，`Specialty.formulary` 为单一真相；名册加载三条校验（§4.2 末段），§9 有对应断言 |
+| P6 fixability 口径矛盾 | ✅ 已修复 | `fixability` 只展示该簇主项 `method`；成药/煎药/外购按处方项计数（§4.3 原则 10、§5.2） |
+| P7 对照去重键不成形 | ✅ 已修复（文档+代码） | 去重键统一为 `(formula_id, scope_key, parent_formula_id)`；`prescriber.py:449` 已实现 |
+| P8 jscpd 许可证 | ✅ 已修复 | §4.6 复用表已标 MIT（以官方仓库 LICENSE 为准） |
+| P9 `#file` 键粒度上限 | ✅ 已修复 | §4.1.1 规则 4：契约键只聚合病症，处方项仍按文件切块，`cluster_max_files` 对 manual/煎药同样生效 |
+| P10 scan_orders 无留痕 | ✅ 已修复（文档+代码） | 护理记录 `event=scan_order_issued`；`diagnostician.py:618` 已落地 |
+| P11 契约优先级歧义 | ✅ 已修复 | §4.4 四级优先级表（import-linter > ArchUnit > dependency-cruiser > catalog.layers），只取第一份 |
+| P12 scope 自由字符串 | ✅ 已修复 | `scope` 六值枚举 + 「处方项字段怎么填」对照表（§4.3） |
+| P13 报告重写破坏留痕 | ✅ 已修复 | 初检 `scan-r1.md` 原文保留，补拍另写 `scan-r1-supplement.md`（§3.3 第 4 步） |
+| P14 Phase 2 空 rule_ids | 🟡 部分开放 | 机制已修复：名册加载按 `phase` 过滤，空 `rule_ids` 不会因后补而意外入方（§4.2 末段）。**仍开放**：正骨的适应证本身（`rule_ids` 为空），已转入 `code-hospital-open-decisions.md`，定义草案另出 |
+| P15 0.5 阈值回归 | ✅ 已修复 | §4.3.1 对照表即回归基线；续治与封存两条兜底使出方量不断崖 |
+| 16 Finding.tool 错位 | ✅ 已修复 | §4.6 搬迁 4 明确 normalize 按仪器 id/规则前缀改写；java-pack 已接入 |
+| 17 hotspot 的 symbol 来源 | ✅ 已修复 | 仪器名册增加 `symbol_strategy`（function_span / metavariable / line_hint） |
+| 18 throttle 验收谁判定 | ✅ 已修复 | §4.4 末段定义「没有验收命令」= 白名单空且建议未确认；探测不等于执行 |
+| 19 对照的测试文件范围 | ✅ 已修复 | `catalog.test_globs` 可配置（§4.4 配置示例） |
+| 20 点名专科 vs 点名仪器 | ✅ 已修复 | `requested_specialties` 与 `requested_instruments` 两个入口分开；类型尺只认后者（§6.1） |
+| 21 仪器表缺 limitation 列 | ✅ 已修复 | §4.4 两张仪器表均有 `limitation` 列 |
+| 22 mermaid 箭头误读 | ✅ 已修复 | §1.1 第二张图箭头已改为「学描述符形状」等动词标签 |
+
+**仍开放项的去向**：P14 的正骨适应证见 `code-hospital-open-decisions.md`「放行后仍缺规则」表；其余开放问题（ast-grep、LSP、剂量栈、worktree、转诊单等）同样以那份文档为准。本评审文档至此从「接入前快照」转为「已复核基线」，后续评审新开文档，不在本文件上续写。

@@ -17,7 +17,7 @@
 
 | 层 | 内容 | 变化频率 |
 |---|---|---|
-| 骨架 | 八工具、状态机、门禁、单一写入口、来源标记、覆盖账 | 极低，**永不市场化** |
+| 骨架 | 诊疗八工具 + 运维二工具、状态机、门禁、单一写入口、来源标记、覆盖账 | 极低，**永不市场化** |
 | 内置能力 | 度量类仪器（行数、复杂度、指纹、diff、调用关系） | 低 |
 | 能力市场 A 区 | 仪器、清单、药柜格、任务单模板，全部可装卸 | 高 |
 | 能力市场 B 区 | 基座类（记忆、存储、评测集），可替换实现，不可缺席 | 低 |
@@ -37,7 +37,7 @@
 过期淘汰都是现成的，医院只写一个适配器，并把缺的 `feedback` 回流接上。
 重复造一套记忆系统，是这个方案里最容易犯也最没必要的错。
 
-三条硬约束继续成立，本方案不碰：不持有模型凭据、不做自治审批、不新增 `hosp_*` 工具。
+三条硬约束原为：不持有模型凭据、不做自治审批、不新增 `hosp_*` 工具。前两条继续成立、本方案不碰；第三条已于 2026-11-19 拍板修订为**两层口径**：诊疗工具面冻结为 8 个（挂病例状态机，不新增），平台运维工具为 `hosp_market` / `hosp_rule` 两个（不挂病例、不进状态机，见 §2.3 与 §10）。
 
 ---
 
@@ -47,7 +47,7 @@
 
 | 归骨架（写死，不改） | 归能力（可装卸） |
 |---|---|
-| `hosp_*` 八个工具的名字与语义 | 每台仪器的实现 |
+| 八个诊疗工具与两个运维工具的名字与语义 | 每台仪器的实现 |
 | 病例状态机与 `pending_gate` | 每份清单的问题列表 |
 | 单一写入口 `hosp_dispense` + patch 先落盘 | 每种治法的默认参数 |
 | `concluded_by` 四档来源标记 | 来源之外的一切标签 |
@@ -134,16 +134,25 @@ lifecycle:
 
 ### 2.3 操作面
 
-**不加 `hosp_*` 工具。** 市场是运维动作，走 CLI：
+**诊疗工具面不加 `hosp_*` 工具。** 市场是平台运维动作，操作面是**平台运维工具 `hosp_market`**（不挂病例、不进状态机），七个 action：
 
 ```
-hosp market list                      # 看已装、在岗、试用中
-hosp market add <path|git-url>        # 装入 probation
-hosp market verify <id>               # 校验 manifest + 探测可运行
-hosp market promote <id>              # 试用转正（需样本达标）
-hosp market retire <id>               # 退役，保留历史结论
-hosp market restore <id>              # 放回来，回到退役前那一档
+hosp_market(action="list")                       # 看已装、在岗、试用中
+hosp_market(action="add", manifest_path=...)     # 装入 probation（两步人审，见下）
+hosp_market(action="verify", instrument_id=...)  # 校验 manifest + 探测可运行
+hosp_market(action="review", instrument_id=...)  # 重算转正判据（只判格，不签字）
+hosp_market(action="promote", ..., confirm=true) # 试用转正（需样本达标 + 真人签字）
+hosp_market(action="retire", instrument_id=...)  # 退役，保留历史结论
+hosp_market(action="restore", instrument_id=...) # 放回来，回到退役前那一档
 ```
+
+> **修订记录（2026-11-19 拍板）**：本节原写「市场是运维动作，走 CLI」（`hosp market ...` 子命令）。
+> 落地时改走 MCP 工具并在此追认，理由两条：①招聘闭环要在宿主会话内当堂完成——
+> 报告挂出启事、`hosp_case(include="requisitions")` 给出 install_hint、宿主带票据装仪器，
+> 若市场只在 CLI，这条链就断在报告里；②人审没有因此降级：`add` 是两步票据制
+> （pending_question → question_id + choice + answer，一次性、24h 过期，elicitation 优先），
+> 用户原话记入 consent 供审计。「装不装」的决定权仍在人手里，只是发问的通道换成了 MCP。
+> 纪律循环的操作面同理，落在 `hosp_rule`（list / approve）。
 
 退役不删历史。已产的 findings 保留 `executor_ref`，复发率照算——
 **能力会走，证据不能消失。**
@@ -1560,6 +1569,13 @@ hosp_market(action="add", manifest_path="…", question_id="q_…",
    宿主透传的情况记 `host_passthrough`，两者在报告里可区分。
 2. **疗效统计不作为可信 `source_url`。** 只有出院结论能写记忆；且出院判"有效"只给半票
    （`alpha += 0.5`），因为复发会推翻它。详见 4.8。
+
+### 已拍板（2026-11-19）
+
+1. **工具面分两层：诊疗 8 + 平台运维 2。** 原硬约束「不新增 `hosp_*` 工具」与 §2.3
+   「市场是运维动作，走 CLI」修订为：诊疗工具面冻结为 8 个；市场与院规以
+   `hosp_market` / `hosp_rule` 留在 MCP（理由见 §2.3 修订记录）。
+   契约追认落在 io-contracts §3.9/§3.10，设计契约 §6.2 同批修订。
 
 ### 待确认
 
