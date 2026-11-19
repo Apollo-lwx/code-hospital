@@ -229,6 +229,8 @@ class Finding(BaseModel):
     evidence_tier: str = ""
     # 一条模型主张的内容指纹（文件+行+原文），用于重复交卷去重与复发比对。
     evidence_digest: str = ""
+    # 宿主交卷点名的仓外转诊（R3）。仪器发现恒空；诊断环节按 R1–R4 现算的不走这里。
+    referrals: list[dict] = Field(default_factory=list)
     first_seen_round: int = 1
     last_seen_round: int = 1
     # 同指纹历史复发记录（派生字段，检验时关联，不入库；初发为 []）

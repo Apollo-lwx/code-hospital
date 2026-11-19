@@ -66,6 +66,7 @@ async def hosp_register(
     requested_instruments: list[str] | None = None,
     visit_kind: str = "checkup",
     project_root: str = "",
+    referred_from: dict | None = None,
     assist: dict | None = None,
     ctx: Context | None = None,
 ) -> dict:
@@ -83,6 +84,7 @@ async def hosp_register(
             requested_instruments=requested_instruments,
             visit_kind=visit_kind,
             project_root=project_root,
+            referred_from=referred_from,
             assist=assist,
         ))
     except HospitalError as e:
@@ -930,6 +932,9 @@ async def _case_query(
                     ),
                 })
             result["requisitions"] = rows
+        elif include == "links":
+            # 会诊转诊链（consultation）。只说明「这条链存在」，病历内容不过链。
+            result["links"] = await db.list_case_links(case_id)
         return result
 
 

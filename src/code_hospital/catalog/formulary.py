@@ -268,6 +268,10 @@ def match_finding(
         specialty_id = "general"
     if verdict in {"needs_validation", "rejected"}:
         return Match(None, specialty_id, 0.40, False)
+    # 仓外 import 是转诊单的信号，不是归位的对象：问题的主战场在另一个仓库，
+    # 开「把依赖放回分层」的药治不到它。留待复核，由诊断环节生成转诊单。
+    if rule_id == "layer.external-import":
+        return Match(None, specialty_id, 0.40, False)
     cabinet = [
         books[fid]
         for fid in specs[specialty_id]["formulary"]

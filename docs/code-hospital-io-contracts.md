@@ -168,14 +168,19 @@ graph LR
     },
     "referrals": {
       "type": "array",
+      "description": "会诊转诊单。R1 仓外 import（layer.external-import）/ R2 供应链主战场在上游 / R3 宿主交卷点名 / R4 复发≥3 且记忆层指向仓外。一条发现最多进一条单；local=true 时目标仓可直接 hosp_register 开诊",
       "items": {
         "type": "object",
-        "required": ["target_repo", "evidence", "hypothesis", "suggested_triage"],
+        "required": ["target_repo", "evidence", "hypothesis", "suggested_triage", "rule", "finding_ids", "resolved_path", "local"],
         "properties": {
           "target_repo": {"type": "string", "description": "目标仓库路径或标识"},
           "evidence": {"type": "string", "maxLength": 200},
           "hypothesis": {"type": "string", "maxLength": 300},
-          "suggested_triage": {"enum": ["emergency", "outpatient", "checkup"]}
+          "suggested_triage": {"enum": ["emergency", "outpatient", "checkup"]},
+          "rule": {"enum": ["R1", "R2", "R3", "R4"], "description": "触发规则，可倒查"},
+          "finding_ids": {"type": "array", "minItems": 1, "items": {"type": "string", "pattern": "^fnd_"}, "description": "挂载的具体发现；无发现则无单"},
+          "resolved_path": {"type": "string", "description": "可及判定结果；local=false（URL 或目录不存在）时为空串"},
+          "local": {"type": "boolean", "description": "true = 目标仓在工作区可及，可直接转诊开诊"}
         },
         "additionalProperties": false
       }
@@ -439,9 +444,14 @@ graph LR
 
 ---
 
-## 3. 工具契约（8 个）
+## 3. 工具契约（诊疗 8 + 平台运维 2）
 
-**阶段确认门禁通用约定**（设计 §4.11，推进类工具 scan/diagnose/prescribe/dispense/discharge/treat 一体适用，各工具分节不再重复展开）：
+两层工具面（2026-11-19 拍板，设计 §6.2 同批修订）：
+
+- **诊疗工具（3.1–3.8，8 个）**：挂病例状态机，带 `case_id` / `stage_confirmed` / `handoff`，受 `pending_gate` 限制。这一层**冻结**，新增诊疗能力仍按「挂进现有工具的流程与出参」落地。
+- **平台运维工具（3.9–3.10，2 个）**：`hosp_market` / `hosp_rule`。不挂病例、不进状态机、不带 `stage_confirmed`/`handoff`，不受 `pending_gate` 限制；改变的是「医院有什么能力、执行多严的纪律」，不是「这个病例走到哪一步」。留在 MCP 而不走 CLI 的理由见平台化方案 §2.3。
+
+**阶段确认门禁通用约定**（设计 §4.11，推进类工具 scan/diagnose/prescribe/dispense/discharge/treat 一体适用，各工具分节不再重复展开；平台运维工具不适用）：
 
 - 入参统一带 `stage_confirmed`（boolean，default false；`hosp_discharge` 语义为「确认出院申请」）；
 - 出参统一带 `handoff`（§2.10）；
@@ -490,6 +500,16 @@ graph LR
       "enum": ["checkup", "admission", "security", "performance", "defect", "algorithm", "types", "architecture", "test", "supply", "business", "severe", "general"],
       "default": "checkup",
       "description": "号别。checkup 是原来的体检套餐。severe 只看本次 diff 的函数内污点和改动影响，并在有 Java 时调用 spotbugs。general 跑全部分诊套餐和深度尺，并写明重症未查；没拍成的仪器不能当成正常"
+    },
+    "referred_from": {
+      "type": "object",
+      "required": ["case_id", "project_root"],
+      "properties": {
+        "case_id": {"type": "string", "description": "源病例 id，须真实存在"},
+        "project_root": {"type": "string", "description": "源病例所在仓库"}
+      },
+      "additionalProperties": false,
+      "description": "可选：拿转诊单（Diagnosis.referrals 里 local=true 的单子）直接转诊。源病例核对存在后建档，并写 case_links(relation=consultation)，两端 hosp_case(include=links) 互见。医院不自动开病例，直接转诊由宿主/用户发起"
     }
   },
   "additionalProperties": false
@@ -533,13 +553,23 @@ graph LR
       },
       "additionalProperties": false
     },
-    "handoff": {"$ref": "#def-stage-handoff", "description": "默认 stage=registered / next_tool=hosp_scan；auto_advance=false 时 awaiting_confirmation=true（挂号单待确认）"}
+    "handoff": {"$ref": "#def-stage-handoff", "description": "默认 stage=registered / next_tool=hosp_scan；auto_advance=false 时 awaiting_confirmation=true（挂号单待确认）"},
+    "referral": {
+      "type": "object",
+      "description": "仅当入参带 referred_from 时出现：{from_case, from_project_root, relation=consultation}",
+      "properties": {
+        "from_case": {"type": "string"},
+        "from_project_root": {"type": "string"},
+        "relation": {"const": "consultation"}
+      },
+      "additionalProperties": false
+    }
   },
   "additionalProperties": false
 }
 ```
 
-关键错误：`Conflict`（同仓已有活跃病例）。**问题变体**：Q1 `scope_confirm`（就诊范围无法从请求推断，不建档先问）；Q2 `duplicate_case`（撞单决策：出院旧病例 force / 取消）。
+关键错误：`Conflict`（同仓已有活跃病例）；`NotFound`（referred_from 指向的源病例或源病案室不存在）。**问题变体**：Q1 `scope_confirm`（就诊范围无法从请求推断，不建档先问）；Q2 `duplicate_case`（撞单决策：出院旧病例 force / 取消）。
 
 ### 3.2 `hosp_scan`（检验）
 
@@ -1122,6 +1152,90 @@ graph LR
 }
 ```
 
+### 3.9 `hosp_market`（能力市场 · 平台运维）
+
+装/验/审/转正/退役/恢复第三方仪器。**不挂病例状态机**：无 `case_id`，不带 `stage_confirmed`/`handoff`，不受 `pending_gate` 限制。写入面只限 `<repo>/.hospital/market/`，不改仓库源码。
+
+**入参**
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "action": {"enum": ["list", "verify", "add", "retire", "restore", "review", "promote"], "default": "list"},
+    "manifest_path": {"type": "string", "default": "", "description": "add 必填：一份 api: code-hospital/v1 的 manifest.yaml"},
+    "instrument_id": {"type": "string", "default": "", "description": "verify/review 可选过滤；retire/restore/promote 必填"},
+    "confirm": {"type": "boolean", "default": false, "description": "promote 的真人签字"},
+    "question_id": {"type": "string", "default": "", "description": "add 第二步带回的安装票据"},
+    "choice": {"enum": ["", "install", "skip", "pause"], "default": "", "description": "add 第二步带回的用户选择；决定动作的是它，不是 answer"},
+    "answer": {"type": "string", "default": "", "description": "add 第二步带回的用户原话，记入 consent 供审计"},
+    "requisition_id": {"type": "string", "default": "", "description": "可选：把本次安装记成回应某条招聘启事；值只能来自 hosp_case(include=\"requisitions\") 原样抄写"},
+    "project_root": {"type": "string", "default": ""}
+  },
+  "additionalProperties": false
+}
+```
+
+**出参**（按 action）：
+
+| action | 出参要点 |
+|---|---|
+| `list` | `{root, core[], installed[], note}`；core 含已退役内置仪器（tier=retired 如实标出）；installed 带 tier / trial（runs/claims/corroborated 等计数）/ verdict |
+| `verify` | `{root, instruments[], note}`；每台带 `manifest_ok` / `problems` / `present` / `absent` / `blocked`——「装在」与「跑得动」分开回答 |
+| `add` 第一次 | 不写盘，返回 §2.9 `pending_question`：manifest 的 id/传输方式/声明扩展名/四项风险声明（净化后），选项 install/skip/pause，附 `resume_hint` |
+| `add` 第二次 | 成功 `{ok:true, id, tier:"probation", problems:[], note}`；用户不装 `{ok:false, id, choice, note}` |
+| `retire` / `restore` | `{ok, id, tier?, note}`；退役保留 manifest 与账，restore 按 `tier_before` 回原档 |
+| `review` | `{instruments[], note}`；每台带三个数（runs / corroborated / bad 等）与一句人话 `line`；只判格，不动档位 |
+| `promote` | 成功 `{ok:true, id, tier:"active", state, note}`（note 含判据快照）；不够格或未签字返回 `InvalidOperation`（`needs_confirm` 时 nextAction 指向带 `confirm=true` 重调） |
+
+**关键语义**：
+
+- **add 是两步人审，不是一步装完**：第一次调用返回 `pending_question`；第二次必须带回 `question_id` + `choice` + `answer`。票据一次性、24 小时过期；`choice` 只认 install/skip/pause 三个词，宿主不得归纳成别的说法。consent（用户原话 + 通道）记入市场索引供审计，不进任何外发路径。
+- **装上一律影子期（probation）**：会跑，结论只进覆盖账，不进报告、处方、疗效。声明 `writes_repo` 的影子仪器不运行（比对期间源码必须保持不动）。
+- **requisition 先验后问**：带的仪器若未声明覆盖启事点名的扩展名，返回 `InvalidOperation`——不拿假前提换同意；`requisition_id` 由医院从病例覆盖账查回，不收宿主自报的扩展名。
+- **转正 = 代码判格 + 人签字**：`review` 只摆三个数；`promote` 在判据不够格、已退役、未带 `confirm=true` 三种情况下都拒绝。
+- **退役不删历史**，对内置仪器同样成立；退掉后其声明的扩展名不再记缺口（主动不要不是缺），报告限制项仍如实写明。
+
+关键错误：`InvalidOperation`（manifest 校验不过 / 票据无效或过期 / choice 缺失或不认识 / requisition 对不上 / 不够格转正 / 退役恢复状态不符）。**问题变体**：add 第一步的 `pending_question`（elicitation 优先，convention 降级）。
+
+### 3.10 `hosp_rule`（院规 · 平台运维）
+
+偏差计数 + 可执行校验清单 + 把已批准的校验翻到开。**不挂病例状态机**，永不在就诊中途调用：它改变的是医院的严格程度，不是任何病例的结论。写入面只限 `<repo>/.hospital/rules.json`（开关 + ref），不改仓库源码，也不写 `code-hospital.yaml`。
+
+**入参**
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "action": {"enum": ["list", "approve"], "default": "list"},
+    "rule_id": {"type": "string", "default": "", "description": "approve 必填：只能取 list 返回的 checks 里的 id"},
+    "ref": {"type": "string", "default": "", "description": "approve 必填：记忆层那条经验的 id，批准的依据"},
+    "ack": {"type": "string", "default": "", "description": "convention 通道的批准凭据：digest(rule_id + ref)；elicitation 当场确认后豁免"},
+    "reason": {"type": "string", "default": "", "description": "保留字段，当前不读"},
+    "confirm": {"type": "boolean", "default": false},
+    "project_root": {"type": "string", "default": ""}
+  },
+  "additionalProperties": false
+}
+```
+
+**出参**（按 action）：
+
+| action | 出参要点 |
+|---|---|
+| `list` | `{project_root, scanned_cases, total_cases, deviations[], checks[], approved[], memory{channel, task, hits[], note}, note}`；`deviations` 是按类型聚合的计数（kind/count/cases），`checks` 是封闭目录（id/effect/cost/deviates/approved），`memory.channel ∈ {mcp, cli, absent}` |
+| `approve` | 成功 `{status:"approved", rule, note}`；用户在确认中拒绝 `{status:"declined", check, note}`；未经确认的首次调用返回 §2.9 `pending_question`（elicitation 优先） |
+
+**关键语义**：
+
+- **摆事实，不判断**：偏差是数出来的，校验目录是封闭的（当前 `gate_receipt`、`location_floor` 两条）；要不要加严是记忆层的判断，医院不提议、不为「被拒绝」记账（reject 不是动作，不批就是不调用）。
+- **无记忆基座不批准**：`memory.channel=absent` 时 approve 一律 `InvalidOperation`——关不掉的校验必须能回答「凭什么」。
+- **approve 三件套**：`rule_id`（封闭目录内）+ `ref`（记忆层经验 id，空 ref 不批）+ 人确认（elicitation 当场确认，或 convention 通道带 `ack=digest(rule_id+ref)`，换一条依据凭据跟着变）。
+- **批准即生效且配置关不掉**：这正是要 `ref` 的原因。
+
+关键错误：`InvalidOperation`（动作不认识 / 无记忆基座 / rule_id 不在目录 / ref 缺失 / ack 对不上）。**问题变体**：approve 确认用的 `pending_question`。
+
 ---
 
 ## 4. wire / 存储映射约定
@@ -1390,7 +1504,7 @@ may return status="pending_question" when user input is required — never guess
 default applies if unanswered.
 ```
 
-### 6.2 工具描述全文（8 个，定死）
+### 6.2 工具描述全文（10 个，定死）
 
 **`hosp_register`**
 ```text
@@ -1519,9 +1633,113 @@ resume=true). Returns suspended with progress on timeout; resume continues from 
 stage. Reports progress via MCP progress notifications.
 ```
 
+**`hosp_market`**
+```text
+List, verify, install, review, promote, retire, or restore instruments (能力市场).
+Manifests declare what a device is (kind: instrument | substrate), how it runs
+(transport: external | mcp | semgrep), and what it touches (risk.reads_repo /
+writes_repo / network / executes_code).
+
+Everything installed starts as tier=probation (影子期): it runs on checkups and its findings
+are written into the coverage ledger as position keys only. Those findings are NOT findings —
+they never reach the report, the prescription, the efficacy ledger, or the recheck diff.
+
+Promotion is judged by code and signed by a human, in two steps:
+- review computes three numbers from the trial ledger: samples (runs), corroboration
+  (how many of its locations an incumbent also flagged - matched by POSITION, not rule id,
+  because no two vendors share rule ids), and bad locations (files or lines that do not
+  exist). It only reports the verdict; it changes no tier.
+- promote flips it to active. It refuses below the thresholds, and even when the numbers
+  pass it refuses without confirm=true. Judging eligibility is the code's job; accepting a
+  third party reading the repository is the operator's.
+
+action:
+- list: core instruments shipped with the hospital plus everything installed here,
+  with trial progress (runs / claims / corroborated) and the current verdict.
+- verify: re-validate installed manifests and check whether commands are on PATH.
+  "installed" is not the same as "runnable" - this is the call that tells them apart.
+- add: install a manifest file (manifest_path). **It does not install on the first call.**
+  Installing a third party means handing it your repository, so the first call asks the user
+  and returns pending_question - the description of the device, its transport, its extensions
+  and its declared risks, nothing else. Call again with question_id, choice and answer to
+  finish. `choice` is the structured selection (install / skip / pause) and is what actually
+  decides: answer alone is never read for meaning, because "pause" and "install" cannot be
+  told apart from prose and guessing wrong signs for the user. Tickets are single-use and
+  expire in 24 hours; without one the install is refused. Whatever the user said is stored on
+  the instrument record, so "who agreed to this" stays answerable afterwards.
+  Optional requisition_id ties the install to an open hiring requisition (see
+  hosp_case include="requisitions"). It is verified: a device that does not declare coverage
+  for the extensions that requisition named is refused, so "hired" can never mean "still
+  unchecked". Leave it out for an instrument the customer bought on their own.
+  Rejected if it reuses an existing id, asks for builtin transport,
+  points a command outside PATH, or carries shell metacharacters in args. A third-party manifest
+  claiming tier=core is quietly downgraded to probation - core belongs to shipped instruments
+  only. A device that declares writes_repo installs but will not run during probation (the
+  comparison source code must stay fixed).
+- review: recompute the promotion verdict for one instrument or all installed ones.
+- promote: needs instrument_id and confirm=true. Refused for retired instruments (reinstall
+  and collect samples again) and for instruments still in probation without enough evidence.
+- retire: stop running it, keep the manifest and the record. Nothing is deleted. This also
+  works on shipped (core) instruments: once retired, the extensions it declared stop counting
+  as a coverage gap, because a switch the operator turned off is not a missing device. The
+  report still says so in the limitations - "retired at the customer's request, not checked
+  this round" - rather than going quiet. An instrument that never declared extensions does
+  not excuse anything: it would otherwise excuse every file type at once.
+- restore: put a retired instrument back. It returns to whichever tier it held before
+  retirement (recorded at retire time), so a promoted instrument does not silently drop back
+  into probation. Retiring is reversible on purpose - one misclick must not cost a device
+  permanently.
+
+Manifests live in <repo>/.hospital/market/. Installing never modifies the repository itself.
+Retirement state lives in the same index, including for shipped instruments: one record, so
+"is this running" cannot be answered two different ways.
+```
+
+**`hosp_rule`**
+```text
+Execute institutional rules (院规): count deviations, show which checks this hospital can
+enforce, turn an approved one on. This is NOT part of a visit — it changes how strict the
+hospital is, not what any case concluded. Never call it mid-visit.
+
+Division of labour (design doc §1.1): rsi-boot is the memory layer, code-hospital is the
+execution layer. Deciding WHETHER to harden, WHICH check to add, and WHETHER last time's
+approval actually worked is judgement — it needs history, so it lives in the memory layer.
+This tool only counts, shows capability, and flips switches. It never proposes.
+
+Deviations are already on record — gate_bypass (a stage released by a boolean flag instead
+of a receipt), filing_invalid (a filing that broke the contract), unsupported_clear
+("检查通过" with nothing behind it), unfounded_claim (a quote that is not in the file),
+scope_creep, silent_degrade. list sums them; the sum is a fact, not a recommendation.
+
+The checks are a closed catalogue. Two exist today:
+- gate_receipt — a stage confirmation must come with ack=<artifact digest> unless the user
+  confirmed through the protocol inside the call.
+- location_floor — model conclusions must carry a file and a line; "检查通过" is downgraded
+  or dropped at admission.
+Approving one turns it on permanently and repository config cannot switch it off. A rule
+added because it was bypassed N times would be worth nothing if a config line could undo it.
+
+action:
+- list: deviation totals, the check catalogue (id / effect / cost / approved), and a memory
+  recall on "have we hardened this before, and did it work". Read memory.hits — that is
+  where the judgement comes from.
+- approve: requires rule_id, ref (the id of the memory entry this decision rests on), and
+  either confirm=true or an in-call confirmation. The ack binds check_id + ref; it is not a
+  generic token. NO ref means NO approval: an un-switchable constraint must be able to
+  answer "on what grounds", and that answer has to live where memory lives.
+- reject: not supported. Not approving is just not calling approve. "How many times was this
+  refused, when may we ask again" is memory-layer policy; duplicating it here would fork.
+
+When the memory channel is absent, approve is refused outright. Without history the hospital
+only treats patients; it does not evolve.
+
+Rules live in <repo>/.hospital/rules.json and hold the switch plus the ref only — never the
+evidence text. The repository itself is never modified.
+```
+
 ### 6.3 落地检查清单（实现时逐条核对）
 
-- [ ] server `instructions` 与 8 个 `description` 逐字采用上文（含隐喻对照与 UNTRUSTED 声明）
+- [ ] server `instructions` 与 10 个 `description` 逐字采用上文（含隐喻对照与 UNTRUSTED 声明）
 - [ ] 每个工具声明 `outputSchema`，`structuredContent` 严格符合本文件 §3
 - [ ] 中文隐喻（报告/文档）与英文技术字段（wire）各归其位：description 里隐喻只以「(挂号)」式对照出现，不作为参数或枚举值
 - [ ] 枚举值一律英文技术词；`outcome` 等医疗色彩枚举在 description 中有对照说明

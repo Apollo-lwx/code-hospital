@@ -282,6 +282,8 @@ async def _file_host_diff(db, root: str, case, answers: dict | None) -> str:
             report_id,
             root,
         ))
+        # 交卷里点名的仓外转诊随发现入库（R3 信号）。Finding 已有该字段，直接挂上。
+        findings[-1].referrals = list(spec.get("referrals") or [])
     stamp_findings(findings)
     await db.insert_findings(findings)
     from ..catalog.coverage import stamp_source_counts
@@ -514,6 +516,11 @@ async def diagnose(
                 cluster_findings(findings, case_id, report_id, history, root),
                 admission_rules,
             )
+            from ..catalog.referrals import attach_referrals, r4_slips
+
+            used_ids = attach_referrals(clusters, root)
+            for _diagnosis, _slip in await r4_slips(clusters, root, used_ids):
+                _diagnosis.referrals = [*_diagnosis.referrals, _slip]
             semantic = sum(1 for diagnosis, _members in clusters if diagnosis.concluded_by == "host_llm")
             if semantic or admission_drops:
                 coverage = dict(case.coverage or {})

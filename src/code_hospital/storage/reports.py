@@ -543,7 +543,12 @@ def _group_blocks(case: Case, clusters: list[tuple]) -> list[str]:
         )
         if diagnosis.referrals:
             for ref in diagnosis.referrals:
-                parts.append(f"- 会诊转诊: {ref.get('target_repo', '')} · {ref.get('hypothesis', '')}")
+                line = f"- 会诊转诊（{ref.get('rule', '')}）: {ref.get('target_repo', '')} · {ref.get('hypothesis', '')}"
+                if ref.get("local") and ref.get("resolved_path"):
+                    line += f" —— 目标在工作区可及，可直接转诊：hosp_register(project_root=\"{ref['resolved_path']}\", referred_from={{\"case_id\": \"{case.id}\", \"project_root\": \"{case.project_root}\"}})"
+                else:
+                    line += " —— 目标不在当前工作区，拿着这条去那个仓库挂号"
+                parts.append(line)
         parts.append("")
     return parts
 
@@ -1139,6 +1144,7 @@ def render_discharge_report(
     case: Case, outcome: str, gate: dict, diff: dict, follow_path: str,
     questions: list[dict] | None = None,
     chains: dict | None = None,
+    referrals: list[dict] | None = None,
 ) -> str:
     """出院小结（契约 §5.7）。"""
     rows = []
@@ -1174,6 +1180,7 @@ def render_discharge_report(
         "",
         f"- 疗程: {case.round} 轮",
         "",
+        *_referral_lines(case, referrals),
         *_memory_block(case),
         *_outside_questions(questions),
         *_chain_block(chains),
@@ -1184,6 +1191,37 @@ def render_discharge_report(
         "",
         _footer(case),
     ])
+
+
+def _referral_lines(case: Case, referrals: list[dict] | None) -> list[str]:
+    """转诊一节：同一 target_repo 的单子合并展示。没有转诊时整节不出现。"""
+    rows = [ref for ref in (referrals or []) if isinstance(ref, dict) and ref.get("target_repo")]
+    if not rows:
+        return []
+    merged: dict[str, list[dict]] = {}
+    for ref in rows:
+        merged.setdefault(str(ref["target_repo"]), []).append(ref)
+    lines = [
+        "## 转诊",
+        "",
+        "这些问题的主战场不在本仓。转诊不是失败，本院病历不受影响。",
+        "",
+    ]
+    for target, group in merged.items():
+        head = group[0]
+        rules = "、".join(sorted({str(ref.get("rule") or "") for ref in group} - {""}))
+        local = any(ref.get("local") for ref in group)
+        resolved = str(head.get("resolved_path") or "")
+        lines.append(f"- `{target}`（{rules}，{len(group)} 单）：{head.get('hypothesis', '')}")
+        if local and resolved:
+            lines.append(
+                f"  - 目标在工作区可及：`hosp_register(project_root=\"{resolved}\", "
+                f"referred_from={{\"case_id\": \"{case.id}\", \"project_root\": \"{case.project_root}\"}})`"
+            )
+        else:
+            lines.append("  - 目标不在当前工作区，拿着这条去那个仓库挂号（人的动作）")
+    lines.append("")
+    return lines
 
 
 def _memory_block(case: Case) -> list[str]:

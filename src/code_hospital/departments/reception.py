@@ -61,12 +61,17 @@ async def register(
     requested_instruments: list[str] | None = None,
     visit_kind: str = "checkup",
     project_root: str = "",
+    referred_from: dict | None = None,
 ) -> dict:
     """hosp_register 主逻辑，返回契约 §3.1 出参。
 
     auto_advance=false（默认）：挂号单产出后病例挂起（pending_gate=registered），
     用户确认后 hosp_scan(stage_confirmed=true) 才执行检验（设计 §4.11 叫号机制）；
     auto_advance=true：全权委托/绿色通道，全程不设阶段确认门禁。
+
+    referred_from={case_id, project_root}：拿转诊单直接转诊时使用。
+    源病例必须真实存在；建档成功即写 case_links(relation="consultation")，
+    两端各自的病案室各写一行，链路双向可查（会诊转诊单草案 §1）。
     """
     root = resolve_project_root(project_root)
     if scope_type not in {e.value for e in ScopeType}:
@@ -87,6 +92,10 @@ async def register(
     except ValueError as exc:
         raise bad_argument(f"visit_kind 只能是 {exc}", target="visit_kind") from exc
     await ensure_git_repo(root)
+
+    referral: dict | None = None
+    if referred_from is not None:
+        referral = await _verify_referral(referred_from)
 
     scope_obj = Scope(
         paths=list(scope.get("paths") or []),
@@ -142,6 +151,17 @@ async def register(
         except Exception as e:  # 并发兜底：部分唯一索引命中
             raise conflict(f"挂号失败（并发撞单）：{e}", next_action="稍后重试") from e
 
+        if referral is not None:
+            await db.insert_case_link(
+                case.id, referral["case_id"], "consultation",
+                note=f"转诊自 {referral['project_root']}",
+            )
+            async with Database(referral["project_root"]) as source_db:
+                await source_db.insert_case_link(
+                    referral["case_id"], case.id, "consultation",
+                    note=f"转诊至 {root}",
+                )
+
         ensure_git_info_exclude(root)
 
         from ..core.models import ReportRecord
@@ -164,7 +184,7 @@ async def register(
     from ..api.capabilities import digest_file
     from ..core.questions import handoff
 
-    return {
+    result = {
         "case_id": case.id,
         "triage_level": triage,
         "visit_kind": kind,
@@ -177,6 +197,44 @@ async def register(
             artifact_digest=digest_file(report_path),
         ),
     }
+    if referral is not None:
+        result["referral"] = {
+            "from_case": referral["case_id"],
+            "from_project_root": referral["project_root"],
+            "relation": "consultation",
+        }
+    return result
+
+
+async def _verify_referral(referred_from: dict) -> dict:
+    """转诊来源核对：源病例必须真实存在。只核对，不读病历内容（跨仓权限边界不变）。"""
+    from ..core.errors import not_found
+
+    if not isinstance(referred_from, dict):
+        raise bad_argument("referred_from 须为 {case_id, project_root}", target="referred_from")
+    source_case_id = str(referred_from.get("case_id") or "").strip()
+    source_root_raw = str(referred_from.get("project_root") or "").strip()
+    if not source_case_id or not source_root_raw:
+        raise bad_argument(
+            "referred_from 需要 case_id 与 project_root 两个字段", target="referred_from",
+        )
+    source_root = resolve_project_root(source_root_raw)
+    db_file = Database(source_root).db_path
+    if not db_file.is_file():
+        raise not_found(
+            f"源仓库没有病案室：{source_root}",
+            target="referred_from.project_root",
+            next_action="先在源仓库跑过一次 hosp_register，或核对转诊单上的 resolved_path",
+        )
+    async with Database(source_root) as source_db:
+        source_case = await source_db.get_case(source_case_id)
+    if source_case is None:
+        raise not_found(
+            f"源病例不存在：{source_case_id}",
+            target="referred_from.case_id",
+            next_action="核对转诊单上的 case_id",
+        )
+    return {"case_id": source_case_id, "project_root": source_root}
 
 
 async def _precheck_emergency(project_root: str, files: list[str]) -> int:

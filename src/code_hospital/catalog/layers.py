@@ -15,6 +15,8 @@ _CRUISER_FILES = (
 )
 _SKIP = {".git", ".hospital", "node_modules", "target", "build", ".venv", "venv"}
 _LAYER_RULE = "layer.forbidden-import"
+# 仓外依赖违反（转诊单 R1 的信号源）：import 解析到仓库根之外的兄弟仓。
+_EXTERNAL_RULE = "layer.external-import"
 
 
 def resolve_contract(project_root: str) -> dict | None:
@@ -81,18 +83,49 @@ def _imported_modules(text: str) -> list[str]:
     return found
 
 
+def _absolute_imports(text: str) -> list[str]:
+    """只取绝对 import。`from .foo import bar` 的模块名是相对本仓的，不参与仓外判定。"""
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return []
+    found = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            found.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            found.append(node.module)
+    return found
+
+
 def _scan_code_hospital(root: Path, files: list[str], layers: list[str]) -> list[dict]:
+    from .referrals import internal_tops, sibling_repo_for
+
     raws = []
+    internal = internal_tops(files)
     for rel in files:
         if Path(rel).suffix.lower() != ".py":
             continue
         source_index = _layer_index(rel, layers)
-        if source_index is None:
-            continue
         path = root / rel
         if not path.is_file():
             continue
         text = path.read_text(encoding="utf-8", errors="replace")
+        for module in _absolute_imports(text):
+            top = sibling_repo_for(module, str(root), internal)
+            if top:
+                raws.append({
+                    "rule_id": _EXTERNAL_RULE,
+                    "message": f"import 目标 {module} 落在仓外兄弟目录 {top}（主战场可能不在本仓）",
+                    "file_path": rel.replace("\\", "/"),
+                    "line_start": 1,
+                    "line_end": 1,
+                    "severity": "info",
+                    "symbol": module,
+                    "contract_id": "code-hospital",
+                })
+        if source_index is None:
+            continue
         for module in _imported_modules(text):
             target = _layer_index(module.replace(".", "/"), layers)
             if target is None or target >= source_index:

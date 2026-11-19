@@ -877,7 +877,7 @@ async def _run_catalog_instruments(root, case, report_id, files, selected, devic
             RawFinding(
                 rule_id=raw["rule_id"], message=raw["message"], file_path=raw["file_path"],
                 line_start=raw["line_start"], line_end=raw["line_end"], severity=raw["severity"],
-                extra={"contract_id": raw.get("contract_id") or ""},
+                extra={"contract_id": raw.get("contract_id") or "", "symbol": raw.get("symbol") or ""},
             ),
             "layer-ruler", case.id, report_id, root,
         ))

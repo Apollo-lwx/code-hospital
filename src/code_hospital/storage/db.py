@@ -66,7 +66,8 @@ CREATE TABLE IF NOT EXISTS findings (
     attack_class TEXT NOT NULL DEFAULT '',
     concluded_by TEXT NOT NULL DEFAULT 'instrument',
     evidence_tier TEXT NOT NULL DEFAULT '',
-    evidence_digest TEXT NOT NULL DEFAULT ''
+    evidence_digest TEXT NOT NULL DEFAULT '',
+    referrals_json TEXT NOT NULL DEFAULT '[]'
 );
 CREATE INDEX IF NOT EXISTS idx_findings_case_fp ON findings(case_id, fingerprint);
 CREATE INDEX IF NOT EXISTS idx_findings_fp ON findings(fingerprint);
@@ -169,6 +170,16 @@ CREATE TABLE IF NOT EXISTS memory_weight (
     PRIMARY KEY (memory_id, project_root)
 );
 CREATE INDEX IF NOT EXISTS idx_memory_weight_root ON memory_weight(project_root, status);
+-- 会诊转诊链（design §4.8 一期）：只记「这条链存在」，不共享病历内容。
+CREATE TABLE IF NOT EXISTS case_links (
+    id TEXT PRIMARY KEY,
+    case_id TEXT NOT NULL,
+    related_case_id TEXT NOT NULL,
+    relation TEXT NOT NULL DEFAULT 'consultation',
+    note TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_case_links_case ON case_links(case_id);
 """
 
 HOSPITAL_DIR = ".hospital"
@@ -267,6 +278,10 @@ class Database:
                 await self.conn.execute(
                     f"ALTER TABLE findings ADD COLUMN {name} TEXT NOT NULL DEFAULT ''"
                 )
+        if "referrals_json" not in finding_cols:
+            await self.conn.execute(
+                "ALTER TABLE findings ADD COLUMN referrals_json TEXT NOT NULL DEFAULT '[]'"
+            )
         await self.conn.execute(
             "UPDATE findings SET concluded_by='host_llm'"
             " WHERE tool='host' OR rule_id='diff.issue'"
@@ -470,8 +485,8 @@ class Database:
             " file_path, line_start, line_end, symbol, message, evidence, fingerprint,"
             " content_key, context_anchor, status, origin, first_seen_round, last_seen_round,"
             " contract_id, check_id, fixable, verdict, unresolved, attack_class, concluded_by,"
-            " evidence_tier, evidence_digest)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " evidence_tier, evidence_digest, referrals_json)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             [
                 (
                     f.id, f.case_id, f.report_id, f.tool, f.rule_id, f.severity,
@@ -480,6 +495,7 @@ class Database:
                     f.first_seen_round, f.last_seen_round, f.contract_id, f.check_id, int(f.fixable),
                     f.verdict, f.unresolved, f.attack_class, f.concluded_by,
                     f.evidence_tier, f.evidence_digest,
+                    json.dumps(getattr(f, "referrals", None) or [], ensure_ascii=False),
                 )
                 for f in findings
             ],
@@ -489,7 +505,11 @@ class Database:
     @staticmethod
     def _row_to_finding(row: aiosqlite.Row) -> Finding:
         keys = set(row.keys())
-        return Finding(**{k: row[k] for k in Finding.model_fields if k in keys})
+        finding = Finding(**{k: row[k] for k in Finding.model_fields if k in keys})
+        if "referrals_json" in keys:
+            loaded = json.loads(row["referrals_json"] or "[]")
+            finding.referrals = loaded if isinstance(loaded, list) else []
+        return finding
 
     async def find_fingerprint_history(
         self,
@@ -848,6 +868,34 @@ class Database:
         )
         await self.conn.commit()
         return log_id
+
+    # ---------- case_links（会诊转诊链） ----------
+
+    async def insert_case_link(
+        self, case_id: str, related_case_id: str, relation: str = "consultation", note: str = "",
+    ) -> None:
+        """同向同关系的链只写一次。跨库两端各写各的库，这里只管本库这一行。"""
+        cur = await self.conn.execute(
+            "SELECT 1 FROM case_links WHERE case_id=? AND related_case_id=? AND relation=?",
+            (case_id, related_case_id, relation),
+        )
+        if await cur.fetchone():
+            return
+        await self.conn.execute(
+            "INSERT INTO case_links (id, case_id, related_case_id, relation, note, created_at)"
+            " VALUES (?,?,?,?,?,?)",
+            (new_id("lnk"), case_id, related_case_id, relation, note[:300], now_ms()),
+        )
+        await self.conn.commit()
+
+    async def list_case_links(self, case_id: str) -> list[dict]:
+        """双向可查：本病例指出的，和指回本病例的，都在同一份清单里。"""
+        cur = await self.conn.execute(
+            "SELECT * FROM case_links WHERE case_id=? OR related_case_id=?"
+            " ORDER BY created_at ASC",
+            (case_id, case_id),
+        )
+        return [dict(row) for row in await cur.fetchall()]
 
     # ---------- memory_weight（记忆权重账，唯一跨病例的账） ----------
 

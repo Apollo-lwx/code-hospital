@@ -473,9 +473,12 @@ async def _close(db, root, case, buckets, current, public, gate, outcome, report
     from ..catalog.outside import overlay as outside_overlay
 
     questions = outside_overlay(root)["discharge"]
+    diagnoses = await db.list_diagnoses(case.id)
+    referrals = [ref for d in diagnoses for ref in (d.referrals or [])]
     summary_path.write_text(
         render_discharge_report(
             case, outcome, gate, public, str(follow_path), questions, chains,
+            referrals=referrals,
         ),
         encoding="utf-8",
     )

@@ -88,7 +88,11 @@ pending_question (scope_confirm) instead of guessing. By default (auto_advance=f
 the case is then parked at a stage-confirmation gate: present the registration artifact
 to the user, and only call hosp_scan with stage_confirmed=true after they confirm
 (handoff tells you how). Pass auto_advance=true only when the user delegates the whole
-flow up front (e.g. CI smoke runs).
+flow up front (e.g. CI smoke runs). Optional referred_from={case_id, project_root} accepts a
+referral slip from another repository's diagnosis (转诊单): the source case is verified to
+exist, and a consultation link is written into both hospitals' case_links so the two cases
+can see each other via hosp_case(include="links"). The hospital never opens that second case
+by itself — direct referral is always initiated by the host or the user.
 """
 
 SCAN_DESC = """\
@@ -213,6 +217,9 @@ include="requisitions" returns the open capability gaps that are worth hiring fo
 (gap_id, extensions, file_count, sample files, claimed_by). Carry a gap_id verbatim into
 hosp_market(action="add", requisition_id=...) to record that an install answers that
 requisition. Do not invent a gap_id.
+
+include="links" returns the consultation links of this case (case_links). A link only
+states that the referral chain exists — case content never crosses it.
 """
 
 
