@@ -39,9 +39,10 @@ def test_rename_rules_enumerated_and_active():
     formula = formulary.formulas()["rename"]
     names = {row for ind in formula.indications for row in (ind.get("rule_ids") or [])}
     assert {"N801", "N802", "N803", "N804", "N805", "N806", "N807", "N815", "N816", "N818"} <= names
-    # G5/G6 不在一期
+    # G5 import 别名（第二批）已入册
+    assert {"N811", "N812", "N813", "N814", "N817"} <= names
+    # G6 模块文件名不在范围内
     assert "N999" not in names
-    assert not {"N811", "N812", "N813", "N814", "N817"} & names
     # phase 已降到 1：真实仓观察通过后转正，直接可匹配
     assert formula.phase == 1
     matched = match_finding("ruff", "N802", "minor")
@@ -184,6 +185,59 @@ def test_below_threshold_stays_llm_patch(tmp_path: Path):
     rename_items = [it for it in items if it["formula_id"] == "rename"]
     assert rename_items
     assert all(it["method"] == "llm_patch" for it in rename_items)
+
+
+# ---------- G5 import 别名（第二批）----------
+
+
+def test_g5_alias_prescribed_without_guard(tmp_path: Path):
+    """别名是导入文件内的局部绑定：不做跨文件守门，直接入方。"""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.py").write_text("import os as OS\n", encoding="utf-8")
+    # 另一个文件恰好有同名符号的 from-import——别名不该因此被守
+    (tmp_path / "src" / "b.py").write_text("from a import OS\n", encoding="utf-8")
+    members = [_finding("N812", "src/a.py", 1, "OS")]
+    items, drops = _build(tmp_path, members)
+    rename_items = [it for it in items if it["formula_id"] == "rename"]
+    assert len(rename_items) == 1
+    assert rename_items[0]["method"] == "llm_patch"
+    assert drops == []
+
+
+def test_g5_alias_in_init_drops_out(tmp_path: Path):
+    """__init__.py 里的别名是包的重导出名：入待复核，写明 LSP001。"""
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text(
+        "from collections import OrderedDict as OD\n", encoding="utf-8",
+    )
+    members = [_finding("N817", "pkg/__init__.py", 1, "OD")]
+    items, drops = _build(tmp_path, members)
+    assert [it for it in items if it["formula_id"] == "rename"] == []
+    assert len(drops) == 1
+    assert "重导出" in drops[0]["reason"]
+    assert "LSP001" in drops[0]["reason"]
+
+
+def test_g5_alias_without_symbol_drops_out(tmp_path: Path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.py").write_text("import os as OS\n", encoding="utf-8")
+    members = [_finding("N812", "src/a.py", 1, "")]
+    items, drops = _build(tmp_path, members)
+    assert [it for it in items if it["formula_id"] == "rename"] == []
+    assert len(drops) == 1
+    assert "提取不到别名" in drops[0]["reason"]
+
+
+def test_g5_alias_public_api_escalates(tmp_path: Path):
+    """非 __init__ 模块的 __all__ 收了别名（* 号导出），风险照升 high。"""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.py").write_text(
+        '__all__ = ["OS"]\n\nimport os as OS\n', encoding="utf-8",
+    )
+    members = [_finding("N812", "src/a.py", 3, "OS")]
+    items, _drops = _build(tmp_path, members)
+    rename_items = [it for it in items if it["formula_id"] == "rename"]
+    assert rename_items[0]["risk"] == "high"
 
 
 # ---------- 命名约定豁免（catalog.rename.exempt）----------

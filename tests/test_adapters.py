@@ -46,6 +46,23 @@ def test_ruff_n8_symbol_from_message():
     assert findings[2].extra.get("symbol") is None
 
 
+def test_ruff_g5_alias_takes_second_token():
+    """G5 别名规则：第一对反引号是被导入的原名，第二对才是要改的别名。"""
+    payload = json.dumps([
+        {"code": "N812", "message": "Lowercase `os` imported as non-lowercase `OS`",
+         "filename": "a.py", "location": {"row": 1, "column": 8},
+         "end_location": {"row": 1, "column": 10}},
+        {"code": "N811", "message": "Constant `ASCII` imported as non-constant `ascii`",
+         "filename": "a.py", "location": {"row": 2, "column": 16},
+         "end_location": {"row": 2, "column": 21}},
+        {"code": "N817", "message": "CamelCase `OrderedDict` imported as acronym `OD`",
+         "filename": "a.py", "location": {"row": 3, "column": 25},
+         "end_location": {"row": 3, "column": 27}},
+    ])
+    findings = parse_ruff_json(payload)
+    assert [f.extra.get("symbol") for f in findings] == ["OS", "ascii", "OD"]
+
+
 def test_semgrep_parse():
     payload = json.dumps({
         "results": [{

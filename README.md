@@ -142,7 +142,7 @@ hosp serve                          # 一般由宿主拉起，不必手跑
 - **内置名册与号别（E0–E5）**：专科/药/仪器三本名册、13 种号别、院内尺子（安全/缺陷/性能/算法/供应链/业务/污点/测试缺口等）、宿主清单提示包、调用链闭合、外聘仪器登记、疗效后验。详见 `docs/code-hospital-roadmap.md`。
 - **平台化六步**：记账、证据层、记忆端口、能力市场（`hosp_market`）、招聘闭环、纪律固化（`hosp_rule`）。详见 `docs/code-hospital-platform-evolution.md`。
 - **会诊转诊单（referrals）**：R1–R4 触发规则落地——仓外 import、上游依赖、宿主点名、复发根因；目标仓在工作区可及时可 `hosp_register(referred_from=...)` 直接转诊，`case_links` 双向可溯。
-- **正骨（rename）phase 1**：G1–G4 十条规则按动作分组枚举；跨文件引用守门、批量迁移合并（≥20 → 外购）、公开 API 升档。「框架约定名」豁免走被诊疗仓库的 `catalog.rename.exempt`（符号 glob，机制内置、清单外置）；ruff 适配器从 N8xx 消息反引号提取符号名。已经本仓真实观察：8 处 ast `visit_*`（N815）全部按豁免入待复核，`MemoryUnavailable`（N818）按跨文件守门入待复核，零误开方后降期。
+- **正骨（rename）phase 1**：G1–G5 十五条规则按动作分组枚举（G5 import 别名 2026-11-20 入册：别名局部绑定不守门，`__init__.py` 重导出除外）；跨文件引用守门、批量迁移合并（≥20 → 外购）、公开 API 升档。「框架约定名」豁免走被诊疗仓库的 `catalog.rename.exempt`（符号 glob，机制内置、清单外置）；ruff 适配器从 N8xx 消息反引号提取符号名。已经本仓真实观察：8 处 ast `visit_*`（N815）全部按豁免入待复核，`MemoryUnavailable`（N818）按跨文件守门入待复核，tests/ 的 N812 别名一条正常入方，零误开方。
 
 仍开放（详见 `docs/code-hospital-open-decisions.md`）：
 

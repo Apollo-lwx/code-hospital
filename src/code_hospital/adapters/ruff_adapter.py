@@ -29,14 +29,22 @@ def ruff_check_args(select: tuple[str, ...]) -> list[str]:
 # "Variable `visit_Foo` in class scope should not be mixedCase" → visit_Foo。
 # 正骨的守门、豁免、升档都要符号名；行文本兜底（_symbol_hint）只认 def/class，
 # 赋值形态的类属性（visit_Foo = ...）提不到，必须从这里补。
+# 例外是 G5 别名规则（N811–N814、N817）：消息形如
+# "Lowercase `os` imported as non-lowercase `OS`"——第一个反引号是被导入的原名，
+# 第二个才是要改的别名（文件内的局部绑定），取第二个。
 _MESSAGE_SYMBOL = re.compile(r"`([^`]+)`")
+_ALIAS_SECOND_TOKEN = frozenset({"N811", "N812", "N813", "N814", "N817"})
 
 
 def _n8_symbol(code: str, message: str) -> str:
     if not code.startswith("N8"):
         return ""
-    hit = _MESSAGE_SYMBOL.search(message or "")
-    return hit.group(1).strip() if hit else ""
+    tokens = _MESSAGE_SYMBOL.findall(message or "")
+    if not tokens:
+        return ""
+    if code in _ALIAS_SECOND_TOKEN and len(tokens) >= 2:
+        return tokens[-1].strip()
+    return tokens[0].strip()
 
 
 def parse_ruff_json(payload: str) -> list[RawFinding]:

@@ -267,7 +267,7 @@ graph TD
 |---|---|---|---|---|---|---|
 | debride | 清创 | `rule`。ruff 精确 `F401`、`F541`、`F841`、`E501`、`I001`，以及前缀 `I`、`UP`、`W`、`C4`、`RET`、`SIM`、`PIE`、`RUF`。`critical` 不命中 | autofix | low | `line_range`。验收别名 lint。置信度 0.86 | 1 |
 | split | 拆分 | `rule`。`structure.function_lines`、`structure.file_lines`、`structure.cyclomatic` | llm_patch | medium | 函数级 `symbol`，文件行数 `file`。验收别名 test | 1 |
-| rename | 正骨 | `rule`。G1–G4 按动作分组枚举（`N801`–`N807`、`N815`、`N816`、`N818`，不接 `N811`–`N814`/`N817`/`N999`）。跨文件引用守门：符号被其他文件 import 的发现不入方、留待复核（等 LSP001）；同规则同文件 ≥20 处合并为一味外购批量迁移；命中 `catalog.rename.exempt` 的命名约定符号不入方、留待复核 | llm_patch（批量迁移项 manual） | medium；`touches_public_api` 时 high | `reference_closure`（一期语义：单文件闭包）。验收别名 test | 1 |
+| rename | 正骨 | `rule`。G1–G5 按动作分组枚举（`N801`–`N807`、`N815`、`N816`、`N818` + 别名 `N811`–`N814`、`N817`，不接 `N999`）。跨文件引用守门：符号被其他文件 import 的发现不入方、留待复核（等 LSP001）；import 别名是本文件局部绑定不守门（`__init__.py` 重导出除外，入待复核）；同规则同文件 ≥20 处合并为一味外购批量迁移；命中 `catalog.rename.exempt` 的命名约定符号不入方、留待复核 | llm_patch（批量迁移项 manual） | medium；`touches_public_api` 时 high | `reference_closure`（一期语义：单文件闭包）。验收别名 test | 1 |
 | dedupe | 去重 | `rule`。`jscpd` 的 `clone.duplicate` | llm_patch | medium | `file`。验收别名 test | 1 |
 | guard | 补罩 | `rule`。`BLE001`、`java.null-deref`、`java.resource-leak`。`critical` 不命中，改走封存 | llm_patch | medium | 有符号用 `symbol`，否则 `line_range`。验收别名 test | 1 |
 | seal | 封存 | `severity: critical`，以及 gitleaks 的全部规则。`hold: true` | manual | high | `line_range`。不改文件。gitleaks 置信度 0.92；ruff 的 critical 为 0.70；semgrep 与 java-pack 的 critical 为 0.62 | 1 |
@@ -508,6 +508,7 @@ jscpd 的复制检测、ast-grep 的结构替换，都是「有二进制就多�
 8. 类型尺在 `requested_instruments` 含 `type-ruler` 时补拍：优先 mypy，否则 pyright。两边都不在 PATH 时，初检写终态「类型尺未到岗」，不再开检查单。结构尺在 lizard 在岗时追加 `structure.cyclomatic`（默认超过 15）。正骨仍是第二期。
 9. `hosp_treat` 以 `auto_advance=true` 挂号，在同一次编排里完成检验、诊断（含一轮补拍）、开方、施治和出院。每一阶段通过 MCP progress 通知上报，消息是阶段名，施治时再带上当前药味 id。`timeout_ms` 用尽返回 `suspended`，`resume=true` 从当前阶段续跑。低危由宿主代理批准。高危降级为外购，不自动改代码。煎药返回 `need_patch`，宿主提交补丁后再续跑。正骨仍是第二期。
 10. 正骨降 `phase: 1`（2026-11-20）：G1–G4 十条按动作分组枚举入册，命名约定豁免走被诊疗仓库的 `catalog.rename.exempt`（机制内置、清单外置），ruff 适配器从 N8xx 消息反引号提取符号名。降期依据是本仓真实观察：豁免与守门各拦住该拦的，零误开方。
+11. 正骨第二批 G5 import 别名（`N811`–`N814`、`N817`）入册（2026-11-20）：别名是本文件局部绑定不做跨文件守门，`__init__.py` 重导出入待复核；符号名取消息第二对反引号。
 
 ---
 

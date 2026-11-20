@@ -474,12 +474,14 @@ def _draft_rename(
     project_root: str, drafted: list, drops_out: list | None,
 ) -> int:
     """正骨入方三道闸：仓库声明的命名约定（catalog.rename.exempt）先入待复核；
-    G1 局部名字直接过；其余先守门（跨文件引用 → 待复核），
+    G1 局部名字直接过；G5 import 别名是本文件局部绑定直接过（__init__.py 重导出除外，
+    入待复核写明 LSP001）；其余先守门（跨文件引用 → 待复核），
     再按规模合并（同规则同文件 ≥ RENAME_BATCH_MIN → 一味外购批量迁移），
     最后 touches_public_api 升档。返回下一个 seq hint。"""
     from ..catalog.policy import load_policy
     from ..catalog.rename import (
         G1_LOCAL_RULES,
+        G5_ALIAS_RULES,
         RENAME_BATCH_MIN,
         cross_file_reference,
         exempted,
@@ -526,7 +528,27 @@ def _draft_rename(
                         ),
                     })
                 continue
-            if rule_id not in G1_LOCAL_RULES:
+            if rule_id in G5_ALIAS_RULES:
+                # 别名是本文件的局部绑定，天然单文件闭包；唯一例外是 __init__.py
+                # 的重导出——改别名会断包外的 from pkg import 别名，文本守门推不出包名。
+                if not symbol:
+                    if drops_out is not None:
+                        drops_out.append({
+                            "file": file_path, "line": head.line_start,
+                            "reason": f"正骨 {rule_id}：提取不到别名，无法定位改名对象，留人工核对",
+                        })
+                    continue
+                if Path(file_path).name == "__init__.py":
+                    if drops_out is not None:
+                        drops_out.append({
+                            "file": file_path, "line": head.line_start,
+                            "reason": (
+                                f"正骨 {rule_id}：别名 {symbol} 在 __init__.py 里是包的重导出名，"
+                                "改名影响包外引用，等 LSP 符号级 scope（LSP001）"
+                            ),
+                        })
+                    continue
+            elif rule_id not in G1_LOCAL_RULES:
                 if not symbol:
                     if drops_out is not None:
                         drops_out.append({
