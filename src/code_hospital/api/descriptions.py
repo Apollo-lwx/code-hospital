@@ -227,6 +227,15 @@ requisition. Do not invent a gap_id.
 
 include="links" returns the consultation links of this case (case_links). A link only
 states that the referral chain exists — case content never crosses it.
+
+include="chain" walks the consultation chain from this case across hospitals,
+read-only, and returns every case card on the chain (nodes with
+title/status/triage_level/visit_kind and depth, plus the edges actually walked).
+Endpoints whose hospital is gone (repo moved, records deleted) are still listed with
+reachable=false and the reason. Only case cards cross hospitals — findings, patches
+and reports never do; pull those from each repo's own hosp_case. The
+attending-physician role (what to treat first, in what order to revisit) stays on
+your side; this is just the chain query.
 """
 
 

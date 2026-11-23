@@ -380,3 +380,146 @@ async def test_r1_end_to_end_diagnosis(tmp_path: Path):
     report = Path(res["report_path"]).read_text(encoding="utf-8")
     assert "会诊转诊" in report
     assert "referred_from" in report
+
+
+# ---------- 会诊链聚合视图：hosp_case(include="chain")（design §4.8 二期·轻编排） ----------
+
+
+async def test_chain_walks_across_three_hospitals(tmp_path: Path):
+    from code_hospital.storage.chain import consultation_chain
+
+    repo_a = _mk_repo(tmp_path / "a")
+    repo_b = _mk_repo(tmp_path / "b")
+    repo_c = _mk_repo(tmp_path / "c")
+    case_a = await reception.register(
+        title="甲仓病例", scope_type="staged", scope={},
+        auto_advance=True, project_root=repo_a,
+    )
+    case_b = await reception.register(
+        title="乙仓病例", scope_type="staged", scope={},
+        auto_advance=True, project_root=repo_b,
+        referred_from={"case_id": case_a["case_id"], "project_root": repo_a},
+    )
+    case_c = await reception.register(
+        title="丙仓病例", scope_type="staged", scope={},
+        auto_advance=True, project_root=repo_c,
+        referred_from={"case_id": case_b["case_id"], "project_root": repo_b},
+    )
+
+    chain = await consultation_chain(case_a["case_id"], repo_a)
+    by_id = {n["case_id"]: n for n in chain["nodes"]}
+    assert set(by_id) == {case_a["case_id"], case_b["case_id"], case_c["case_id"]}
+    assert by_id[case_a["case_id"]]["depth"] == 0
+    assert by_id[case_a["case_id"]]["is_seed"] is True
+    assert by_id[case_b["case_id"]]["depth"] == 1
+    assert by_id[case_c["case_id"]]["depth"] == 2
+    assert all(n["reachable"] for n in chain["nodes"])
+    assert by_id[case_c["case_id"]]["title"] == "丙仓病例"
+    # 卡片只带元数据，病历内容不过链
+    assert "findings" not in by_id[case_c["case_id"]]
+    assert len(chain["edges"]) == 2
+    assert chain["truncated"] is False
+
+
+async def test_chain_cycle_safe_and_edges_deduped(tmp_path: Path):
+    from code_hospital.storage.chain import consultation_chain
+
+    repo_a = _mk_repo(tmp_path / "a")
+    repo_b = _mk_repo(tmp_path / "b")
+    case_a1 = await reception.register(
+        title="首诊", scope_type="staged", scope={},
+        auto_advance=True, project_root=repo_a,
+    )
+    case_b = await reception.register(
+        title="转诊出去", scope_type="staged", scope={},
+        auto_advance=True, project_root=repo_b,
+        referred_from={"case_id": case_a1["case_id"], "project_root": repo_a},
+    )
+    case_a2 = await reception.register(
+        title="又转回来", scope_type="staged", scope={},
+        auto_advance=True, project_root=repo_a, force=True,
+        referred_from={"case_id": case_b["case_id"], "project_root": repo_b},
+    )
+
+    chain = await consultation_chain(case_a1["case_id"], repo_a)
+    ids = [n["case_id"] for n in chain["nodes"]]
+    # A→B→A 成环也不绕圈：每个病例只出现一次，同一次转诊两端各写的一行只算一条边
+    assert sorted(ids) == sorted([case_a1["case_id"], case_b["case_id"], case_a2["case_id"]])
+    assert len(chain["edges"]) == 2
+
+
+async def test_chain_unreachable_peer_still_listed_without_side_effect(tmp_path: Path):
+    from code_hospital.storage.chain import consultation_chain
+
+    repo_a = _mk_repo(tmp_path / "a")
+    repo_b = _mk_repo(tmp_path / "b")
+    case_a = await reception.register(
+        title="源病例", scope_type="staged", scope={},
+        auto_advance=True, project_root=repo_a,
+    )
+    case_b = await reception.register(
+        title="要搬走的", scope_type="staged", scope={},
+        auto_advance=True, project_root=repo_b,
+        referred_from={"case_id": case_a["case_id"], "project_root": repo_a},
+    )
+    shutil.rmtree(Path(repo_b) / ".hospital")
+
+    chain = await consultation_chain(case_a["case_id"], repo_a)
+    by_id = {n["case_id"]: n for n in chain["nodes"]}
+    assert by_id[case_b["case_id"]]["reachable"] is False
+    assert "病案室不存在" in by_id[case_b["case_id"]]["reason"]
+    assert len(chain["edges"]) == 1  # 链还在，端点状态如实上报
+    # 只读走查绝不能在对端仓库重建病案室
+    assert not (Path(repo_b) / ".hospital").exists()
+
+
+async def test_chain_orphan_peer_without_root(tmp_path: Path):
+    from code_hospital.storage.chain import consultation_chain
+
+    repo = _mk_repo(tmp_path / "a")
+    case = await reception.register(
+        title="源病例", scope_type="staged", scope={},
+        auto_advance=True, project_root=repo,
+    )
+    async with Database(repo) as db:
+        await db.insert_case_link(case["case_id"], "case-幽灵", "consultation", note="")
+
+    chain = await consultation_chain(case["case_id"], repo)
+    ghost = next(n for n in chain["nodes"] if n["case_id"] == "case-幽灵")
+    assert ghost["reachable"] is False
+    assert "对端仓库根" in ghost["reason"]
+
+
+async def test_chain_single_case_without_links(tmp_path: Path):
+    from code_hospital.storage.chain import consultation_chain
+
+    repo = _mk_repo(tmp_path / "solo")
+    case = await reception.register(
+        title="没转过诊", scope_type="staged", scope={},
+        auto_advance=True, project_root=repo,
+    )
+    chain = await consultation_chain(case["case_id"], repo)
+    assert [n["case_id"] for n in chain["nodes"]] == [case["case_id"]]
+    assert chain["nodes"][0]["reachable"] is True
+    assert chain["edges"] == []
+
+
+async def test_case_query_include_chain(tmp_path: Path):
+    from code_hospital.api.mcp_server import _case_query
+
+    source = _mk_repo(tmp_path / "source")
+    target = _mk_repo(tmp_path / "target")
+    first = await reception.register(
+        title="源病例", scope_type="staged", scope={},
+        auto_advance=True, project_root=source,
+    )
+    second = await reception.register(
+        title="转诊接收", scope_type="staged", scope={},
+        auto_advance=True, project_root=target,
+        referred_from={"case_id": first["case_id"], "project_root": source},
+    )
+    result = await _case_query(second["case_id"], "", "chain", "", 1, 50, "", target)
+    chain = result["chain"]
+    assert {n["case_id"] for n in chain["nodes"]} == {first["case_id"], second["case_id"]}
+    assert chain["seed"] == second["case_id"]
+    assert "病历内容" in chain["note"]

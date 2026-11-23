@@ -401,7 +401,7 @@ hosp_dispense(prescription_id, item_id, mode="submit_patch",
 跨服务治疗的本质困难是单仓假设被打破（整个数模与互斥都建在单 project_root 上），全量联合会诊是 v1.0 级重构。分三期降级：
 
 - **一期（P2）· 转诊单**：坐诊师发现症状指向仓库外时，诊断书产出 `referrals: [{target_repo, evidence, hypothesis, suggested_triage, rule, finding_ids, resolved_path, local}]`（R1–R4 四条机械触发规则，见转诊单草案）；`local=true`（目标仓在工作区可及）时，宿主 Agent 拿转诊单去目标 repo `hosp_register(referred_from=...)` 开第二个 case（受一仓一病例约束，天然并行），建档即写 `case_links(relation="consultation")` 双向可查；`local=false` 的单子只出纸面。医院不自动开病例。**不需要新科室、不改状态机**，只是诊断书多一种输出。
-- **二期 · 轻编排**：`hosp_case` 提供跨 case 聚合视图（同一会诊链上的病例）；主治医师角色在**宿主 Agent 侧**实现（沿用「宿主当院长」先例），code-hospital 只供链路查询，不内置跨仓编排。
+- **二期 · 轻编排（已落地 v1.10）**：`hosp_case(include="chain")` 提供跨 case 聚合视图——沿 consultation 链跨院只读走查，返回同一会诊链上的全部病例卡片（病历内容不过链，调档边界不变）；主治医师角色在**宿主 Agent 侧**实现（沿用「宿主当院长」先例），code-hospital 只供链路查询，不内置跨仓编排。
 - **三期（远期，不写入承诺）**：真正的联合会诊（多仓 scope、跨仓差分）。契约层在 case 之上预留「就诊网络（encounter network）」概念命名空间，避免三期扩容改契约；一期不实现。
 
 **出院随访（「免疫科」能力）**：
@@ -832,7 +832,7 @@ erDiagram
 | `hosp_prescribe` | 开方 + 审批（含改签审批） | `case_id`、`approve?=false`、`approver?="host_agent"`、`user_confirmed?=false` | `prescription_id`、处方项、`risk_level`、`confirmation_prompt` | `readOnlyHint=true`（写病历） |
 | `hosp_dispense` | **施治 + 内嵌护理核查**（唯一改码工具） | `prescription_id`、`item_id?=下一味`、`mode?="apply"\|"submit_patch"\|"verify_only"\|"resolve_conflict"`、`patch_token?`、`snapshot_hash?`、`patch?`、`resolution?`、`dry_run?=false` | 成药：`dose`+护理结论；煎药：`need_patch`+`patch_token`+`snapshot_hash`+`patch_context`（含 SEARCH 候选）；补验：核查结论；冲突：`blocked_on`+`nextAction` | `destructiveHint=true`、非幂等 |
 | `hosp_discharge` | **复诊差分（两级瀑布：先再入院后门禁）+ 门禁会签 + 出院判定 + 随访计划** | `case_id`、`overrides?`、`waive?=false`、`waiver_user_confirmed?=false`、`waive_reason?`、`distill_to_rsi?=false` | `readmitted`（无 gate）或 `gate`（verdict+checks+waiver）+`outcome`、差分明细、小结路径、`follow_up` | **`readOnlyHint=false`**（不改源码，但内嵌复诊必然执行白名单验收命令，描述首行声明执行面） |
-| `hosp_case` | 病例/报告/处方/findings/服药/护理/关联查询 | `case_id?`、`status?`、`include?`（reports/findings/prescriptions/doses/nursing_logs/links）、`report_id?`、`$page/$size/$orderBy` | 病例（带各阶段计数）及所请明细；`include=links` 给会诊链 | `readOnlyHint=true` |
+| `hosp_case` | 病例/报告/处方/findings/服药/护理/关联查询 | `case_id?`、`status?`、`include?`（reports/findings/prescriptions/doses/nursing_logs/links/chain）、`report_id?`、`$page/$size/$orderBy` | 病例（带各阶段计数）及所请明细；`include=links` 给会诊链，`include=chain` 给链上全部病例卡片的聚合视图 | `readOnlyHint=true` |
 | `hosp_treat` | 一键全程（自动档编排） | 同 `hosp_register` + `auto_approve_low_risk?=true`、`stop_on_drift?=true`、`resume?=false` | 全程报告链 + 出院小结；遇煎药暂停返回 `need_patch` | `destructiveHint=true`、非幂等 |
 
 平台运维工具（第二层，不挂病例状态机）：
@@ -844,7 +844,7 @@ erDiagram
 
 设计说明：
 
-- **工具数两层口径（2026-11-19 拍板）**：诊疗层守住 8 个——出院门禁、病案调档、会诊转诊、出院随访全部以「挂进现有工具的流程与出参」落地（门禁在 discharge 出参、调档在 diagnose 出参、转诊在诊断书、随访在 discharge 出参、会诊链在 `hosp_case(include=links)`）。平台运维层为 `hosp_market` / `hosp_rule` 两个，不挂病例、不设阶段门禁；平台化方案原「市场走 CLI」的拍板已修订（见该方案 §2.3 与 §10）。
+- **工具数两层口径（2026-11-19 拍板）**：诊疗层守住 8 个——出院门禁、病案调档、会诊转诊、出院随访全部以「挂进现有工具的流程与出参」落地（门禁在 discharge 出参、调档在 diagnose 出参、转诊在诊断书、随访在 discharge 出参、会诊链在 `hosp_case(include=links)`、链聚合视图在 `include=chain`）。平台运维层为 `hosp_market` / `hosp_rule` 两个，不挂病例、不设阶段门禁；平台化方案原「市场走 CLI」的拍板已修订（见该方案 §2.3 与 §10）。
 - `hosp_treat` 是「工作流工具」，其余七个是「细粒度 API 覆盖」，符合 mcp-builder「全量覆盖 + 高层工作流并存」的建议。
 - 煎药项在自动档的衔接：`hosp_treat` 暂停返回 `need_patch` → 宿主提交 patch → `hosp_treat(resume=true)` 续跑。
 
@@ -906,13 +906,19 @@ graph LR
 | **P0 PR 门诊（旗舰）** | 工程骨架（仿 rsi-boot）+ `hosp_register/scan/case` + ruff/semgrep/gitleaks 三适配器 + **diff scope（staged/commit/range）** + PR 可贴的 Markdown 检验报告 + `.git/info/exclude` 隔离 + 挂号轻量预检分诊 + 病例查重（duplicate_cases） | 对一个 staged diff 完成「送医→检验→报告直接贴进 PR」；重复送医能查出历史病例 |
 | **P1 门诊闭环** | `hosp_diagnose/prescribe/dispense/discharge` + 成药剂型 + 审批闸门（human_in_loop）+ **出院门禁三档会签 + waive** + **改签审批策略** + 一仓一病例互斥 + patch 逆应用回滚 + new 细分差分 + 内容禁止项校验 + **验收环境预检**（白名单/env 隔离/上限）+ 初诊调档（history_refs）+ case_links | 真实仓库完成闭环；门禁能拦下「治好手上病、身上添新病」；改签绕不过人审；投毒测试文件跑不进验收 |
 | **P2 住院部** | 两步煎药协议（need_patch/submit_patch + SEARCH 候选）+ scope guard 漂移拦截 + 多轮疗程 + `hosp_treat` 自动档（**progress 进度通知 + 最长阻塞超时返回 `suspended` 快照、复用 resume 续跑**）+ **会诊转诊单** + **随访计划产出** | 漂移用例被拦截逆应用；煎药全流程走通；treat 长任务进度可见、超时不断档；转诊单能串起两个仓的 case；出院小结附可复制 CI 片段 |
-| **P3 医养结合** | rsi-boot 联动（用药禁忌召回、疗效蒸馏）+ 符号级 scope（**LSP 基座一二期已落地**：references 销账 + lsp_rename 机械改名；G6 文件移动留「移动剂型」专项；算法层升级留三期）+ git worktree 高危隔离 + 跨 case 聚合视图（会诊链轻编排） | 禁止项命中拦截；出院经验可被 rsi_recall 召回；`hosp_case` 能看到一条会诊链上的全部病例 |
+| **P3 医养结合** | rsi-boot 联动（用药禁忌召回、疗效蒸馏）+ 符号级 scope（**LSP 基座一二期已落地**：references 销账 + lsp_rename 机械改名；G6 文件移动留「移动剂型」专项；算法层升级留三期）+ git worktree 高危隔离 + 跨 case 聚合视图（**已落地 v1.10**：`hosp_case(include="chain")` 会诊链轻编排） | 禁止项命中拦截；出院经验可被 rsi_recall 召回；`hosp_case` 能看到一条会诊链上的全部病例 |
 
 > 远期（不写入承诺）：跨仓联合会诊（多仓 scope/跨仓差分）。契约层已在 case 之上预留「就诊网络（encounter network）」概念命名空间。
 
 ---
 
 ## 附录：修订记录
+
+### v1.9 → v1.10（会诊链聚合视图，1 条，含影响面）
+
+| # | 评审意见 | 合入位置 | 影响面 |
+|---|---|---|---|
+| 1 | 联合诊断二期·轻编排落地：`hosp_case(include="chain")` 沿 consultation 链跨院只读 BFS，返回链上全部病例卡片（title/status/triage_level/visit_kind + depth）与实际走过的边。边界守住一期口径：链上只带病例卡片元数据，病历内容（findings/patches/reports）不过链，调档仍须到对应仓库自己 hosp_case；主治医师角色（先治哪个、按什么顺序复诊）留在宿主 Agent 侧，医院只供链路查询。防线：环安全（visited 去重）、同一转诊两端各写的一行按无序对去重、不可达端点（病案室没了/病例行缺失/对端根没记上）照样列出 reachable=false 写明原因且能绕过的断点越过继续、走查上限 nodes 50 / edges 200（truncated 标记）、只读零副作用（先查 db 文件再开库，不在对端仓库重建病案室） | §4.8；契约 §3.7；`storage/chain.py`（新）；`hosp_case` 增 include 值 | 非 breaking（新增 include 值，既有值语义不变） |
 
 ### v1.8 → v1.9（告知级事项 + 规则处置矩阵，2 条，含影响面）
 

@@ -1048,7 +1048,7 @@ graph LR
 ### 3.7 `hosp_case`（病例查询）
 
 **入参**：`{case_id?, status?, include?=summary, report_id?, $page?, $size?, $orderBy?}`
-`include ∈ {summary, reports, findings, prescriptions, doses, nursing_logs, links}`（summary 免费，其余按明细返回）。
+`include ∈ {summary, reports, findings, prescriptions, doses, nursing_logs, links, chain}`（summary 免费，其余按明细返回）。
 
 **出参 A（列表）**：`Page<CaseSummary>`，CaseSummary：
 
@@ -1092,6 +1092,27 @@ graph LR
   "links": [
     {"id": "lnk_", "case_id": "case_", "related_case_id": "case_", "relation": "consultation", "note": "", "created_at": 0}
   ]
+}
+```
+
+`include=chain` 返回会诊链聚合视图（design §4.8 二期）：沿 consultation 链跨院只读走查，nodes 只带病例卡片元数据（病历内容不过链，调档到对应仓库自己 hosp_case）；不可达端点 reachable=false 写明原因；truncated=true 表示撞上走查上限（nodes 50 / edges 200）：
+
+```json
+{
+  "chain": {
+    "seed": "case_",
+    "relation": "consultation",
+    "nodes": [
+      {"case_id": "case_", "project_root": "", "depth": 0, "is_seed": true, "reachable": true,
+       "title": "", "status": "", "triage_level": "", "visit_kind": "", "created_at": 0, "updated_at": 0}
+    ],
+    "edges": [
+      {"case_id": "case_", "related_case_id": "case_", "relation": "consultation",
+       "from_root": "", "to_root": "", "note": "", "created_at": 0}
+    ],
+    "truncated": false,
+    "note": "链上只有病例卡片元数据；病历内容不过链。先治哪个、按什么顺序复诊由宿主决定。"
+  }
 }
 ```
 

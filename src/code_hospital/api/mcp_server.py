@@ -939,6 +939,12 @@ async def _case_query(
         elif include == "links":
             # 会诊转诊链（consultation）。只说明「这条链存在」，病历内容不过链。
             result["links"] = await db.list_case_links(case_id)
+        elif include == "chain":
+            # 会诊链聚合视图（design §4.8 二期·轻编排）：沿 consultation 链
+            # 跨院走查，链上只带病例卡片，病历内容不过链（调档边界不变）。
+            from ..storage.chain import consultation_chain
+
+            result["chain"] = await consultation_chain(case_id, root)
         return result
 
 
