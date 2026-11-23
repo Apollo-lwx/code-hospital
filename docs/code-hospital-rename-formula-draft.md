@@ -44,6 +44,14 @@
 > `hosp_prescribe(approve=true, include_advisory=["rxit-..."])` 点名翻 pending，
 > 翻转发生在风险/策略核算之前，点名的项照样过自己的风险闸。药房对已批准处方里的
 > advisory 项给出专属报错（指路 include_advisory），处方报告单列「告知建议」节。
+> 修订（2026-11-23 四期）：**告知级语义泛化为全院的规则处置矩阵**——正骨代码里的
+> 硬编码 advisory 改为 `catalog.dispositions` 表驱动：内置默认表只收无争议的规范类
+> （ruff `N8*`、ESLint `naming-convention`），仓库用 `code-hospital.yaml` 的
+> `catalog.rules.dispositions` 按规则配置 class（convention/rule）、auto_fix
+> （never/confirm/auto）、confirm（explicit/approve/none）、severity（等级覆盖，
+> critical 联动高危强制真人、压过正骨风险上限）。用户配置 > 内置默认 > 未命中维持现状；
+> 规范类默认 never+explicit，用户可放宽到 auto/none——自己的仓自己说了算，
+> 放宽时风险写进药味说明提前告知。测试：tests/test_dispositions.py。
 
 ---
 
@@ -109,11 +117,13 @@
 
 - **剂型 `llm_patch`（煎药）不变**；批量迁移项为 `manual`。没有可靠的机械改名
   执行器进入成药路径；ruff 不修命名，rope 这类重构库引入即破「主链路离线」原则。
-- **状态 `advisory`（2026-11-23 三修订）**：正骨全组开方即落告知建议——告知用户
+- **状态 `advisory`（2026-11-23 三修订，四期泛化）**：正骨全组开方即落告知建议——告知用户
   「这里名字不合规」，但**做不做用户决定**，医院不自动施治。`_risk_level` /
   `_policy` / 确认文案只看 pending 项；药房只抓 pending 项；出院只拦 pending 项。
   用户的决定通道是 `hosp_prescribe` 的 `include_advisory`（点名药味 id 翻 pending，
-  翻转先于风险核算，点名的项照样过自己的风险闸）。
+  翻转先于风险核算，点名的项照样过自己的风险闸）。四期起该行为不再硬编码，
+  由处置矩阵默认表（`N8*` → convention / never / explicit）驱动，仓库可用
+  `catalog.rules.dispositions` 放宽或收紧（含把规范类拉成必须修）。
 - **风险**：上限 `medium`，不升档（2026-11-23 二修订）——命名不合规是告知级事项，
   不进 user_required、不阻断流程。`touches_public_api`（导出符号、被 `__all__` 收录、
   或出现在包顶层 `__init__.py` 的再导出）不再升 `high`，改为在 instructions 写明

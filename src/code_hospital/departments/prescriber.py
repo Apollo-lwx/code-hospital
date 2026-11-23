@@ -420,6 +420,10 @@ def build_items(
         for diagnosis_id in condition["diagnosis_ids"]:
             attending_of[diagnosis_id] = condition["attending_specialty_id"]
 
+    # 处置矩阵（catalog.dispositions）：规范/规则分流在开方时逐味落到 status/risk。
+    from ..catalog.policy import load_policy
+
+    user_rows = load_policy(project_root).dispositions if project_root else ()
     drafted = []
     hint = 1
     rename_clusters = []
@@ -445,6 +449,7 @@ def build_items(
             diagnosis, members, prescription_id, hint,
             matched.formula.id, method, matched.specialty_id, attending, scope, spans,
         ):
+            _apply_disposition(item, head.rule_id, user_rows)
             drafted.append(item)
             hint += 1
         companion = companion_for(
@@ -452,11 +457,18 @@ def build_items(
         )
         if companion is None:
             continue
-        drafted.append(_draft_item(
+        shadow_item = _draft_item(
             diagnosis, members, prescription_id, hint,
             companion.id, matched.formula.id, companion.method, matched.specialty_id,
             attending, scope, [],
-        ))
+        )
+        # 伴随药跟主药同进退：主药被处置矩阵挂起（advisory），对照同样挂起。
+        primary = next(
+            (it for it in reversed(drafted) if it["diagnosis_id"] == diagnosis.id), None,
+        )
+        if primary is not None and primary["status"] == "advisory":
+            shadow_item["status"] = "advisory"
+        drafted.append(shadow_item)
         hint += 1
     hint = _draft_rename(
         rename_clusters, prescription_id, hint, attending_of, project_root, drafted, drops_out,
@@ -526,6 +538,32 @@ def _rename_risk_cap(item: dict, project_root: str, file_path: str, symbol: str)
         item["risk"] = "medium"
 
 
+def _apply_disposition(item: dict, rule_id: str, user_rows) -> None:
+    """规则处置矩阵（catalog.dispositions）：规范与规则分流，谁说了算、自动到什么程度。
+
+    用户配置 > 内置默认表 > 未命中维持现状。规范类（命名/风格）默认只告知
+    （落 advisory，include_advisory 点名才施治）；用户放宽规范类时风险提前告知，
+    写进 instructions；用户显式拉高的等级联动风险下限（critical→高危强制真人）。
+    """
+    from ..catalog.dispositions import resolve
+
+    disposition = resolve(rule_id, user_rows)
+    if disposition is None:
+        return
+    if disposition.advisory:
+        # 告知级事项不随处方执行：医生可以觉得名字不合规，做不做用户决定。
+        item["status"] = "advisory"
+    floor = disposition.risk_floor
+    if floor and _RISK_RANK[item["risk"]] < _RISK_RANK[floor]:
+        item["risk"] = floor
+    if disposition.relaxed_convention:
+        item["instructions"] = (
+            f"{item['instructions']} 注意：规范类规则 {disposition.match} 已由仓库配置放宽"
+            f"（auto_fix={disposition.resolved_auto_fix}、confirm={disposition.resolved_confirm}），"
+            "规范类改动（如命名）可能影响 API 兼容性，请知悉。"
+        )[:500]
+
+
 def _draft_rename_rows(
     rename_clusters: list, prescription_id: str, hint: int, attending_of: dict,
     project_root: str, drafted: list, drops_out: list | None, pool,
@@ -545,7 +583,9 @@ def _draft_rename_rows(
         touches_public_api,
     )
 
-    exempt = load_policy(project_root).rename_exempt if project_root else ()
+    exempt_policy = load_policy(project_root) if project_root else None
+    exempt = exempt_policy.rename_exempt if exempt_policy else ()
+    user_rows = exempt_policy.dispositions if exempt_policy else ()
 
     groups: dict[tuple, list] = {}
     for row in rename_clusters:
@@ -563,8 +603,6 @@ def _draft_rename_rows(
                 "rename", "", "manual", matched.specialty_id, attending,
                 f"file:{file_path}#rule:{rule_id}", _member_spans(all_members),
             )
-            # 告知级事项默认不随处方执行：医生觉得名字不合规可以告知，做不做用户决定。
-            item["status"] = "advisory"
             item["instructions"] = (
                 f"正骨·批量迁移：{file_path} 有 {len(all_members)} 处 {rule_id}。"
                 f"同规则同文件达到 {RENAME_BATCH_MIN} 处按批量迁移处理，不开煎药——"
@@ -573,6 +611,10 @@ def _draft_rename_rows(
             item["acceptance"] = {"alias": "", "expect": f"迁移后 {rule_id} 在本范围的发现数应为 0"}
             item["rollback"] = "manual"
             _rename_risk_cap(item, project_root, file_path, "")
+            # 处置矩阵放最后（默认表 N8* → 告知建议；用户配置可放宽）：
+            # 命名不合规默认只告知，不随处方执行，做不做用户决定；
+            # 用户显式拉高的等级压过正骨风险上限（配置优先于默认 cap）。
+            _apply_disposition(item, rule_id, user_rows)
             drafted.append(item)
             hint += 1
             continue
@@ -644,9 +686,6 @@ def _draft_rename_rows(
                 "rename", "", method, matched.specialty_id, attending,
                 scope_key(head), _member_spans(members),
             )
-            # 告知级事项默认不随处方执行：医生觉得名字不合规可以告知，做不做用户决定
-            #（批准时 include_advisory 点名翻 pending 才进施治）。
-            item["status"] = "advisory"
             # lsp_rename 的定位信息：符号 + 定义行（scope_lines 取 members 序，不保证是定义点）。
             item["rename_line"] = head.line_start
             if lsp_refs:
@@ -661,6 +700,10 @@ def _draft_rename_rows(
                     'mode="lsp_rename" 让医院机械改名。'
                 )[:500]
             _rename_risk_cap(item, project_root, file_path, symbol)
+            # 处置矩阵放最后（默认表 N8* → 告知建议；用户配置可放宽）：
+            # 告知级事项默认不随处方执行，include_advisory 点名翻 pending 才进施治；
+            # 用户显式拉高的等级压过正骨风险上限（配置优先于默认 cap）。
+            _apply_disposition(item, head.rule_id, user_rows)
             drafted.append(item)
             hint += 1
             companion = companion_for("rename", method, matched.specialty_id, project_root)
@@ -670,8 +713,9 @@ def _draft_rename_rows(
                     companion.id, "rename", companion.method, matched.specialty_id,
                     attending, scope_key(head), [],
                 )
-                # 伴随药跟主药同进退：主药是告知建议，对照验收也先挂起。
-                shadow["status"] = "advisory"
+                # 伴随药跟主药同进退：主药是告知建议，对照验收也先挂起；
+                # 主药被用户配置放宽为 pending 时，对照同样放行。
+                shadow["status"] = item["status"]
                 drafted.append(shadow)
                 hint += 1
     return hint

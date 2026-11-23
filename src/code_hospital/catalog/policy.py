@@ -50,6 +50,9 @@ class DiseasePolicy:
     # 正骨豁免：仓库的框架约定名（ast 的 visit_*、pytest fixture 这类）。
     # 命中这些符号的改名发现不入方——不是「没问题」，是「这名不归医院管」。
     rename_exempt: tuple[str, ...] = ()
+    # 规则处置矩阵（catalog.rules.dispositions）：规范/规则分流与自动化上限，
+    # 用户配置优先于 catalog.dispositions 的内置默认表，未命中维持现状。
+    dispositions: tuple = ()
     notes: tuple[str, ...] = ()
 
 
@@ -88,6 +91,10 @@ def load_policy(project_root: str) -> DiseasePolicy:
     notes.extend(select_notes)
     exempt, exempt_notes = _globs(rename.get("exempt"))
     notes.extend(exempt_notes)
+    from .dispositions import parse_dispositions
+
+    dispositions, disposition_notes = parse_dispositions(rules.get("dispositions"))
+    notes.extend(disposition_notes)
     floor = str(rules.get("min_severity") or "").strip().lower()
     if floor and floor not in _SEVERITY_RANK:
         notes.append(f"min_severity={floor} 无法识别，严重度不设下限")
@@ -104,6 +111,7 @@ def load_policy(project_root: str) -> DiseasePolicy:
         min_severity=floor,
         ruff_select=selected,
         rename_exempt=exempt,
+        dispositions=dispositions,
         notes=tuple(notes),
     )
 

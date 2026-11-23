@@ -41,6 +41,20 @@ catalog:
       - ASYNC
     min_severity: ""     # 留空全留；写成 major 则只留 critical 和 major
     ruff_select: []      # 例如 [F, E9]。空列表表示沿用本机 ruff 的默认规则集
+    # 规则处置矩阵：规范（命名/风格，不造成功能错误）与规则（缺陷/安全，明确必须修）分流。
+    # 用户配置 > 内置默认表 > 未命中维持现状。内置默认只收无争议的规范类（ruff N8* 等）。
+    #   match:     精确规则 id（N802）或 * 结尾的前缀（N8*）
+    #   class:     convention 规范 | rule 规则（默认 rule，维持现状）
+    #   auto_fix:  never 只告知不执行（advisory，include_advisory 点名才治）
+    #              | confirm 批准后执行（默认）| auto 低危可直接执行
+    #   confirm:   explicit 逐项点名 | approve 随处方批准（默认）| none 免确认
+    #   severity:  等级覆盖（可选）。critical 联动风险到高危 → 必须真人审批
+    # 规范类默认 never + explicit：医生可以觉得名字不合规，不能强制人改名。
+    # 放宽规范类（auto / none）是你自己的仓你自己说了算，医院会在药味说明里写明风险提示。
+    # dispositions:
+    #   - {match: "N8*", class: convention}                          # 显式写出内置默认也行
+    #   - {match: "java.empty-catch", class: rule, severity: critical}  # 必须修，强制真人
+    #   - {match: "F841", class: rule, auto_fix: auto}                  # 授权低危自动修
   rename:
     # 正骨的「框架约定名」豁免：符号 glob，命中的改名发现不入方、进待复核。
     # 例：ast 的 visit_*、框架要求的回调名。机制内置、清单外置——医院不定哪些是约定名，仓库自己声明。
