@@ -230,6 +230,7 @@ async def hosp_dispense(
     follow_autofix: bool = False,
     project_root: str = "",
     new_name: str = "",
+    isolation: bool | None = None,
     assist: dict | None = None,
     ctx: Context | None = None,
 ) -> dict:
@@ -247,6 +248,7 @@ async def hosp_dispense(
             stage_confirmed=stage_confirmed,
             ack=ack,
             follow_autofix=follow_autofix,
+            isolation=isolation,
             project_root=project_root,
             new_name=new_name,
             assist=assist,

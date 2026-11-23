@@ -28,8 +28,8 @@
 | 剂量栈回滚 | 验收失败仍只恢复这一味自己的快照，不按后味先退的栈回滚 |
 | 处方疗效统计 | 要有足够出院样本才有聚合意义 |
 | MCP elicitation | 人审通道仍是约定级 `convention` |
-| git worktree | 仍是高危可选增强，不是当前施治路径；专项草案已出（2026-11-23）：code-hospital-worktree-draft.md，拍板后实施 |
-
 ## 已落地（从本表移出）
+
+- **git worktree 高危隔离（2026-11-23 一期）**：高危药味进 `.hospital/worktrees/` 隔离间预演，验收过后 drift 检查合回主仓并复验；隔离间内任何失败主仓零接触。`safety.worktree`（never/high/always，默认 high）+ `hosp_dispense(isolation=...)` 入参覆盖；依赖目录 junction/symlink 接入清单可配。草案 code-hospital-worktree-draft.md（定稿），测试 tests/test_worktree.py。
 
 - **转诊单（2026-11-19）**：R1 仓外 import（分层尺发 `layer.external-import`，架构科待复核不开归位药）/ R2 供应链发现点名依赖 / R3 宿主交卷自带 / R4 复发 ≥3 且记忆层指向仓外。单子带 `rule`/`finding_ids`/`resolved_path`/`local`；`local=true` 可 `hosp_register(referred_from=...)` 直接转诊，建档写 `case_links(consultation)` 双向可查；出院小结单列「转诊」一节。契约见 io-contracts §2.2/§3.1/§3.7。

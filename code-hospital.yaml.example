@@ -70,6 +70,16 @@ catalog:
   # shadow:
   #   every_nth: 3      # 样本够了之后每几轮跑一次
   #   max_per_scan: 3   # 每轮最多跑几台；0 = 关掉影子期（报告限制项会写明）
+
+# git worktree 高危隔离（worktree 草案一期）：高危药味先进隔离间预演，
+# 验收过后 drift 检查合回主仓并复验；隔离间内任何失败主仓零接触。
+#   never  直写主仓（旧行为）| high 只有高危药味进隔离间（默认）| always 全量隔离
+# hosp_dispense 的 isolation 入参可以当次覆盖这里的配置。
+# worktree_link_dirs：验收前把主仓这些依赖目录以 junction/symlink 接进隔离间
+# （worktree 只检出被跟踪文件，不接的话 .venv/node_modules 不存在，验收跑不了）。
+# safety:
+#   worktree: high
+#   worktree_link_dirs: [.venv, venv, node_modules]
   # 内置事项在医院的 catalog/check_packs。号别排哪些包写在 visits.yaml。
   # 下面是被诊疗仓库自己的外援，不用改医院源码。
   # 执行方是 code、external、llm。code 只能点医院已经有的事实采集。

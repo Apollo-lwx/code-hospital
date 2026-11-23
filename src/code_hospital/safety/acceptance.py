@@ -146,11 +146,14 @@ async def run_alias(
     alias: str,
     scope_paths: list[str] | None = None,
     rule_id: str = "",
+    cwd: str = "",
 ) -> dict:
     """执行一个已确认别名。未入白名单或含元字符时不启动进程。
 
     别名 lint 会带上本味 scope_paths。命令是 ruff 且给出规则号时再加 --select。
     出院门禁不传范围，仍按白名单整段执行。
+    cwd 缺省等于 root；隔离模式显式传隔离间路径——白名单/超时仍从主仓读，
+    只有进程落点在隔离间（worktree 草案 §4）。
     """
     command = load_commands(root).get(alias, "")
     if not command:
@@ -164,7 +167,7 @@ async def run_alias(
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv,
-            cwd=root,
+            cwd=cwd or root,
             env=scrub_env(),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,

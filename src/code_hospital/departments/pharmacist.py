@@ -192,10 +192,13 @@ async def dispense(
     follow_autofix: bool = False,
     project_root: str = "",
     new_name: str = "",
+    isolation: bool | None = None,
     assist: dict | None = None,
 ) -> dict:
     """hosp_dispense。默认一味一停；follow_autofix 时连续做完后续成药。
     lsp_rename：正骨味的机械改名（LSP 生成 patch，走同一条校验管线）。
+    isolation：git worktree 高危隔离当次覆盖——None 走仓级配置
+    safety.worktree（never/high/always，默认 high，worktree 草案一期）。
     assist 是诊断侧的交卷契约，药房不消费——收下保持 MCP 调用面一致
     （83f76fb 起 hosp_dispense 就传这个参数，药房没接，MCP 路径一直是断的）。"""
     from .reception import resolve_project_root
@@ -298,10 +301,10 @@ async def dispense(
                 break
             if mode == "submit_patch":
                 return await _submit_patch(
-                    db, root, case, rx, item, patch_token, snapshot_hash, patch, dry_run,
+                    db, root, case, rx, item, patch_token, snapshot_hash, patch, dry_run, isolation,
                 )
             if mode == "lsp_rename":
-                return await _lsp_rename(db, root, case, rx, item, new_name, dry_run)
+                return await _lsp_rename(db, root, case, rx, item, new_name, dry_run, isolation)
             blocked = await _admission_block(db, case, item)
             if blocked:
                 last = await _skip_admission(db, case, rx, item, blocked)
@@ -314,7 +317,7 @@ async def dispense(
             elif item["method"] != "autofix":
                 raise invalid_operation(f"未知剂型 {item['method']}", target="item_id")
             else:
-                last = await _apply_autofix(db, root, case, rx, item, dry_run)
+                last = await _apply_autofix(db, root, case, rx, item, dry_run, isolation)
             after_seq = int(item["seq"])
             status = last.get("status")
             if status == "applied":
@@ -426,7 +429,7 @@ def _fail_check(result, left: int) -> None:
     raise HospitalError(code, result.message[:500], result.stage, result.next_action[:300])
 
 
-async def _submit_patch(db, root, case, rx, item, token: str, snapshot_hash: str, patch: str, dry_run: bool) -> dict:
+async def _submit_patch(db, root, case, rx, item, token: str, snapshot_hash: str, patch: str, dry_run: bool, isolation: bool | None = None) -> dict:
     if item["method"] != "llm_patch":
         raise invalid_operation("只有煎药可以提交补丁", target="mode")
     stored = item.get("patch_token") or ""
@@ -438,10 +441,13 @@ async def _submit_patch(db, root, case, rx, item, token: str, snapshot_hash: str
     current = _read(Path(root) / target)
     if snapshot_hash != _sha(current):
         raise conflict("文件与取药时的快照不一致，请重新取药", target="snapshot_hash", next_action="mode=apply 重新取药")
-    return await _apply_patch_pipeline(db, root, case, rx, item, patch, dry_run, executor="llm_patch")
+    workspace = _maybe_isolate(root, item, isolation, dry_run)
+    return await _run_isolated(root, item, workspace, _apply_patch_pipeline(
+        db, root, case, rx, item, patch, dry_run, executor="llm_patch", workspace=workspace,
+    ))
 
 
-async def _lsp_rename(db, root, case, rx, item, new_name: str, dry_run: bool) -> dict:
+async def _lsp_rename(db, root, case, rx, item, new_name: str, dry_run: bool, isolation: bool | None = None) -> dict:
     """LSP 机械改名：医院自己生成 patch（lsp-scope 草案二期），之后与煎药同管——
     同样的四道校验、同样的验收、同样的剂量记录。LSP 是更准的取数，煎与验还是医院的。"""
     if item["formula_id"] != "rename" or item["method"] != "llm_patch":
@@ -467,17 +473,49 @@ async def _lsp_rename(db, root, case, rx, item, new_name: str, dry_run: bool) ->
             f"LSP 基座机械改名没跑成：{detail}",
             target="mode", next_action="退回煎药流程：mode=apply 取药后 submit_patch",
         )
-    return await _apply_patch_pipeline(db, root, case, rx, item, diff, dry_run, executor="lsp_rename")
+    workspace = _maybe_isolate(root, item, isolation, dry_run)
+    return await _run_isolated(root, item, workspace, _apply_patch_pipeline(
+        db, root, case, rx, item, diff, dry_run, executor="lsp_rename", workspace=workspace,
+    ))
 
 
-async def _apply_patch_pipeline(db, root, case, rx, item, patch: str, dry_run: bool, executor: str) -> dict:
+def _maybe_isolate(root: str, item: dict, isolation: bool | None, dry_run: bool) -> str | None:
+    """高危隔离（worktree 草案一期）：dry_run 不建间；要不要隔离看 入参 > 配置。
+    建间失败直接抛——宁可这味不治也不悄悄降级直写主仓，降级是用户的决定。"""
+    if dry_run:
+        return None
+    from ..safety import worktree as _wt
+
+    if not _wt.wants_isolation(root, item, isolation):
+        return None
+    scope = item.get("scope_paths") or ([item["target_file"]] if item.get("target_file") else [])
+    return _wt.prepare(root, item["id"], list(scope))
+
+
+async def _run_isolated(root: str, item: dict, workspace: str | None, coro) -> dict:
+    """隔离执行套：异常与非挂起结局拆间（幂等）；blocked（合回漂移/冲突）保留现场。"""
+    from ..safety import worktree as _wt
+
+    try:
+        payload = await coro
+    except Exception:
+        if workspace:
+            _wt.remove(root, item["id"])
+        raise
+    if workspace and payload.get("status") != "blocked":
+        _wt.remove(root, item["id"])
+    return payload
+
+
+async def _apply_patch_pipeline(db, root, case, rx, item, patch: str, dry_run: bool, executor: str, workspace: str | None = None) -> dict:
     """patch 从解析到落盘的同一条管：四道校验 → 应用 → 验收 → 剂量记录。
-    煎药（模型写 patch）与机械改名（LSP 生成 patch）共用。"""
+    煎药（模型写 patch）与机械改名（LSP 生成 patch）共用。
+    workspace 非空 = 隔离模式：落盘与验收在隔离间，过后合回主仓并复验。"""
     scope = item["scope_paths"] or ([item["target_file"]] if item["target_file"] else [])
     safe = _safe_paths(root, scope)
     if any(".hospital" in p.split("/") for p in scope):
         raise forbidden("处方范围含 .hospital/，拒绝施治", target="scope_paths")
-    base = Path(root)
+    base = Path(workspace or root)
     before = {normalize_path(rel): _read(base / rel) for rel in safe}
     try:
         hunks = parse_patch(patch, default_path=normalize_path(item["target_file"]))
@@ -549,9 +587,15 @@ async def _apply_patch_pipeline(db, root, case, rx, item, patch: str, dry_run: b
             "diff": diff[:4000],
             "handoff": _handoff(case.id, item["id"], item["id"], True),
         }
-    rejected = await _reject_if_acceptance_failed(db, root, case, rx, item, before, nursing)
+    rejected = await _reject_if_acceptance_failed(db, root, case, rx, item, before, nursing, workspace=workspace)
     if rejected is not None:
         return rejected
+    if workspace is not None:
+        settled = await _settle_isolated(
+            db, root, workspace, case, rx, item, before, after, executor, nursing,
+        )
+        if settled is not None:
+            return settled
     _write_snapshot(root, case.id, item["id"], case.round, before)
     await db.insert_dose(dose)
     await db.update_prescription_item(item["id"], status="applied", patch_token="", token_expires_at=0)
@@ -674,7 +718,17 @@ def _autofix_engine(item: dict) -> str:
     return "ruff"
 
 
-async def _apply_autofix(db, root: str, case, rx, item: dict, dry_run: bool) -> dict:
+async def _apply_autofix(db, root: str, case, rx, item: dict, dry_run: bool, isolation: bool | None = None) -> dict:
+    """成药施治入口：高危隔离时整段在隔离间跑（worktree 草案一期），
+    异常与非挂起结局拆间，blocked 保留现场——与煎药同一套 _run_isolated。"""
+    workspace = _maybe_isolate(root, item, isolation, dry_run)
+    return await _run_isolated(
+        root, item, workspace,
+        _autofix_inner(db, root, case, rx, item, dry_run, workspace),
+    )
+
+
+async def _autofix_inner(db, root: str, case, rx, item: dict, dry_run: bool, workspace: str | None) -> dict:
     paths = _safe_paths(root, item["scope_paths"] or ([item["target_file"]] if item["target_file"] else []))
     if any(".hospital" in p.split("/") for p in item["scope_paths"]):
         raise forbidden("处方范围含 .hospital/，拒绝施治", target="scope_paths")
@@ -706,13 +760,13 @@ async def _apply_autofix(db, root: str, case, rx, item: dict, dry_run: bool) -> 
         command += paths
         executor = "ruff --fix"
 
-    base = Path(root)
+    base = Path(workspace or root)
     spans = item.get("scope_lines") or []
     if not spans:
         return await _fail(db, case, rx, item, "成药缺少 scope_lines，未执行", executor)
     before = {rel: _read(base / rel) for rel in paths}
     try:
-        await _run(command, cwd=root, timeout=60)
+        await _run(command, cwd=str(base), timeout=60)
     except (AdapterError, OSError) as exc:
         for rel, text in before.items():
             (base / rel).write_text(text, encoding="utf-8")
@@ -797,9 +851,15 @@ async def _apply_autofix(db, root: str, case, rx, item: dict, dry_run: bool) -> 
         "created_at": now_ms(),
     }
     if not dry_run:
-        rejected = await _reject_if_acceptance_failed(db, root, case, rx, item, before, nursing)
+        rejected = await _reject_if_acceptance_failed(db, root, case, rx, item, before, nursing, workspace=workspace)
         if rejected is not None:
             return rejected
+        if workspace is not None:
+            settled = await _settle_isolated(
+                db, root, workspace, case, rx, item, before, kept, executor, nursing,
+            )
+            if settled is not None:
+                return settled
         _write_snapshot(root, case.id, item["id"], case.round, before)
         await db.insert_dose(dose)
         await db.update_prescription_item(item["id"], status="applied")
@@ -1273,7 +1333,7 @@ def _nursing(verdict: str, scope_check: str, drift_files: list[str]) -> dict:
     }
 
 
-async def _reject_if_acceptance_failed(db, root, case, rx, item, before: dict, nursing: dict) -> dict | None:
+async def _reject_if_acceptance_failed(db, root, case, rx, item, before: dict, nursing: dict, workspace: str | None = None) -> dict | None:
     alias = (item.get("acceptance") or {}).get("alias") or ""
     if not alias:
         return None
@@ -1282,6 +1342,7 @@ async def _reject_if_acceptance_failed(db, root, case, rx, item, before: dict, n
         alias,
         scope_paths=list(item.get("scope_paths") or []),
         rule_id=_rule_id_from_item(item),
+        cwd=workspace or "",
     )
     nursing["env_precheck"] = "pass"
     nursing["acceptance"] = result["verdict"]
@@ -1289,16 +1350,68 @@ async def _reject_if_acceptance_failed(db, root, case, rx, item, before: dict, n
         nursing["verdict"] = "warn"
     if result["verdict"] != "fail":
         return None
-    base = Path(root)
+    base = Path(workspace or root)
     for rel, text in before.items():
         dest = base / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(text, encoding="utf-8")
+    message = f"验收未通过，本味已回到快照：{result['detail']}"
+    if workspace:
+        message = f"隔离间验收未通过，主仓未受影响：{result['detail']}"
     return await _fail(
         db, case, rx, item,
-        f"验收未通过，本味已回到快照：{result['detail']}",
+        message,
         executor="acceptance",
         acceptance="fail",
+    )
+
+
+async def _settle_isolated(db, root, workspace, case, rx, item, before: dict, after: dict, executor: str, nursing: dict) -> dict | None:
+    """合回（worktree 草案 §3 拍的文件复制）：drift 检查 → 复制 → 字节级比对 → 主仓复验。
+    返回 None = 合回成功，继续走快照/剂量；否则是挂起（漂移，现场保留）或失败 payload。"""
+    main = Path(root)
+    touched = [rel for rel, new in after.items() if new != before.get(rel)]
+    drifted = [rel for rel in touched if _read(main / rel) != before[rel]]
+    if drifted:
+        shown = "、".join(drifted[:3]) + (" 等" if len(drifted) > 3 else "")
+        return await _rollback_conflict(
+            db, root, case, rx, item, executor, drifted,
+            f"合回漂移：隔离间预演期间主仓本味文件被改动（{shown}）。"
+            f"隔离间现场保留在 {workspace}，人工核对后可 resolve_conflict 续行",
+            before,
+        )
+    for rel in touched:
+        dest = main / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(after[rel], encoding="utf-8")
+    mismatch = [rel for rel in touched if _read(main / rel) != after[rel]]
+    if mismatch:
+        for rel in touched:
+            (main / rel).write_text(before[rel], encoding="utf-8")
+        return await _fail(
+            db, case, rx, item,
+            f"合回字节级比对失败（{'、'.join(mismatch[:3])}），主仓已恢复", executor,
+        )
+    # 主仓复验（worktree 草案 §3：环境不完全等同，高危药方验收跑两遍）
+    alias = (item.get("acceptance") or {}).get("alias") or ""
+    if not alias:
+        return None
+    result = await run_alias(
+        root, alias,
+        scope_paths=list(item.get("scope_paths") or []),
+        rule_id=_rule_id_from_item(item),
+    )
+    nursing["acceptance"] = _fold([nursing.get("acceptance", "skipped"), result["verdict"]])
+    if result["verdict"] == "warn" and nursing.get("verdict") == "pass":
+        nursing["verdict"] = "warn"
+    if result["verdict"] != "fail":
+        return None
+    for rel in touched:
+        (main / rel).write_text(before[rel], encoding="utf-8")
+    return await _fail(
+        db, case, rx, item,
+        f"主仓复验未通过，已回到合回前：{result['detail']}",
+        executor="acceptance", acceptance="fail",
     )
 
 

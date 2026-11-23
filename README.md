@@ -147,7 +147,7 @@ hosp serve                          # 一般由宿主拉起，不必手跑
 仍开放（详见 `docs/code-hospital-open-decisions.md`）：
 
 - ast-grep 仪器、Java 成药执行器、设计科仪器：等真实需求信号；
-- LSP 符号级 scope、git worktree 高危隔离、剂量栈回滚：高危增强，非当前路径；
+- LSP 符号级 scope 与 git worktree 高危隔离已落地（v1.7/v1.8、v1.11）；剂量栈回滚：高危增强，非当前路径；
 - 处方疗效统计聚合：等出院样本量；
 - 远程 registry：本周期不做。
 

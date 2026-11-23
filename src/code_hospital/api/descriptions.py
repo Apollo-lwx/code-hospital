@@ -178,6 +178,13 @@ scope_paths; when the command is ruff and the instructions name a rule, it also
 passes --select for that rule. Other files still failing lint do not roll this
 dose back. test and other aliases stay whole-command. Discharge acceptance stays
 repo-wide. Use only after the prescription status is approved.
+High-risk items are treated inside an isolated git worktree by default
+(safety.worktree=high in code-hospital.yaml; never turns it off, always isolates
+everything, and the per-call isolation=true/false overrides): the dose is applied and
+accepted in the worktree first, merged back only after a byte-level drift check, and
+re-verified on the main tree. A failure inside the worktree leaves the main
+working tree byte-identical; a merge-back drift conflict keeps the worktree for
+manual inspection and follows resolve_conflict as usual.
 Default is one autofix item per call. follow_autofix=true keeps applying later
 autofix items in the same call, and stops at llm_patch, a failure, or 40 items.
 That call returns batch counts and clears a waiting dose gate. Do not call once

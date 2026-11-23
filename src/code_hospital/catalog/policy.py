@@ -33,6 +33,10 @@ DEFAULT_PARAMETERS = 5
 DEFAULT_BRANCHES = 10
 DEFAULT_JAVA_LINE_LENGTH = 120
 DEFAULT_TS_LINE_LENGTH = 200
+# git worktree 高危隔离（worktree 草案一期）：高危药味默认进隔离间预演。
+WORKTREE_MODES = ("never", "high", "always")
+DEFAULT_WORKTREE_MODE = "high"
+DEFAULT_WORKTREE_LINK_DIRS = (".venv", "venv", "node_modules")
 
 
 @dataclass(frozen=True)
@@ -53,6 +57,11 @@ class DiseasePolicy:
     # 规则处置矩阵（catalog.rules.dispositions）：规范/规则分流与自动化上限，
     # 用户配置优先于 catalog.dispositions 的内置默认表，未命中维持现状。
     dispositions: tuple = ()
+    # 隔离间：never 直写主仓（现状）；high 高危药味进隔离间（默认）；
+    # always 全量隔离。hosp_dispense 的 isolation 入参当次覆盖。
+    worktree: str = DEFAULT_WORKTREE_MODE
+    # 验收环境布置：把主仓这些依赖目录以 junction/symlink 接进隔离间。
+    worktree_link_dirs: tuple[str, ...] = DEFAULT_WORKTREE_LINK_DIRS
     notes: tuple[str, ...] = ()
 
 
@@ -74,6 +83,7 @@ def load_policy(project_root: str) -> DiseasePolicy:
     typescript = catalog.get("ts") or {}
     rules = catalog.get("rules") or {}
     rename = catalog.get("rename") or {}
+    safety = doc.get("safety") or {}
     if not isinstance(structure, dict):
         structure = {}
     if not isinstance(java, dict):
@@ -84,6 +94,8 @@ def load_policy(project_root: str) -> DiseasePolicy:
         rules = {}
     if not isinstance(rename, dict):
         rename = {}
+    if not isinstance(safety, dict):
+        safety = {}
     notes: list[str] = []
     ignore, ignored_notes = _tokens(rules.get("ignore"))
     notes.extend(ignored_notes)
@@ -99,6 +111,12 @@ def load_policy(project_root: str) -> DiseasePolicy:
     if floor and floor not in _SEVERITY_RANK:
         notes.append(f"min_severity={floor} 无法识别，严重度不设下限")
         floor = ""
+    worktree_mode = str(safety.get("worktree") or DEFAULT_WORKTREE_MODE).strip().lower()
+    if worktree_mode not in WORKTREE_MODES:
+        notes.append(f"safety.worktree={worktree_mode} 无法识别，按 {DEFAULT_WORKTREE_MODE} 处理")
+        worktree_mode = DEFAULT_WORKTREE_MODE
+    link_dirs, link_notes = _link_dirs(safety.get("worktree_link_dirs"))
+    notes.extend(link_notes)
     return DiseasePolicy(
         function_lines=_limit(structure.get("function_lines"), DEFAULT_FUNCTION_LINES),
         file_lines=_limit(structure.get("file_lines"), DEFAULT_FILE_LINES),
@@ -112,6 +130,8 @@ def load_policy(project_root: str) -> DiseasePolicy:
         ruff_select=selected,
         rename_exempt=exempt,
         dispositions=dispositions,
+        worktree=worktree_mode,
+        worktree_link_dirs=link_dirs,
         notes=tuple(notes),
     )
 
@@ -239,3 +259,23 @@ def _globs(raw) -> tuple[tuple[str, ...], list[str]]:
 
 def _ignored(rule_id: str, ignore: tuple[str, ...]) -> bool:
     return any(rule_id == item or rule_id.startswith(item) for item in ignore)
+
+
+def _link_dirs(raw) -> tuple[tuple[str, ...], list[str]]:
+    """隔离间依赖目录清单：相对目录名，拒绝绝对路径与上跳。None 用内置默认。"""
+    if raw is None:
+        return DEFAULT_WORKTREE_LINK_DIRS, []
+    if not isinstance(raw, list):
+        return DEFAULT_WORKTREE_LINK_DIRS, ["safety.worktree_link_dirs 不是列表，用内置默认"]
+    kept: list[str] = []
+    notes: list[str] = []
+    for item in raw:
+        token = str(item).strip().replace("\\", "/").strip("/")
+        if not token:
+            continue
+        parts = token.split("/")
+        if ".." in parts or ":" in token or token.startswith("~"):
+            notes.append(f"依赖目录 {item!r} 必须是仓内相对路径，已跳过")
+            continue
+        kept.append(token)
+    return tuple(dict.fromkeys(kept)), notes

@@ -459,6 +459,14 @@ async def _settle_memory(db, root, case, outcome: str, recur: dict | None) -> di
 async def _close(db, root, case, buckets, current, public, gate, outcome, report_id, rx, distill: bool, chains: dict | None, recur: dict | None = None) -> dict:
     await _persist_diff(db, case, buckets, current)
     await _settle_memory(db, root, case, outcome, recur)
+    # 隔离间清扫（worktree 草案一期）：出院/转院时拆掉本仓全部隔离间。
+    # 尽力而为——拆不掉不拦出院，残留下次建间/出院时再清。
+    from ..safety import worktree as _worktree
+
+    try:
+        _worktree.cleanup_all(root)
+    except Exception:  # noqa: BLE001
+        pass
     status = "referred" if outcome == "referred" else "discharged"
     discharge_id = new_id("dis")
     folder = hospital_root(root) / "reports" / case.id

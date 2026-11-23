@@ -906,13 +906,19 @@ graph LR
 | **P0 PR 门诊（旗舰）** | 工程骨架（仿 rsi-boot）+ `hosp_register/scan/case` + ruff/semgrep/gitleaks 三适配器 + **diff scope（staged/commit/range）** + PR 可贴的 Markdown 检验报告 + `.git/info/exclude` 隔离 + 挂号轻量预检分诊 + 病例查重（duplicate_cases） | 对一个 staged diff 完成「送医→检验→报告直接贴进 PR」；重复送医能查出历史病例 |
 | **P1 门诊闭环** | `hosp_diagnose/prescribe/dispense/discharge` + 成药剂型 + 审批闸门（human_in_loop）+ **出院门禁三档会签 + waive** + **改签审批策略** + 一仓一病例互斥 + patch 逆应用回滚 + new 细分差分 + 内容禁止项校验 + **验收环境预检**（白名单/env 隔离/上限）+ 初诊调档（history_refs）+ case_links | 真实仓库完成闭环；门禁能拦下「治好手上病、身上添新病」；改签绕不过人审；投毒测试文件跑不进验收 |
 | **P2 住院部** | 两步煎药协议（need_patch/submit_patch + SEARCH 候选）+ scope guard 漂移拦截 + 多轮疗程 + `hosp_treat` 自动档（**progress 进度通知 + 最长阻塞超时返回 `suspended` 快照、复用 resume 续跑**）+ **会诊转诊单** + **随访计划产出** | 漂移用例被拦截逆应用；煎药全流程走通；treat 长任务进度可见、超时不断档；转诊单能串起两个仓的 case；出院小结附可复制 CI 片段 |
-| **P3 医养结合** | rsi-boot 联动（用药禁忌召回、疗效蒸馏）+ 符号级 scope（**LSP 基座一二期已落地**：references 销账 + lsp_rename 机械改名；G6 文件移动留「移动剂型」专项（草案已出：code-hospital-move-formula-draft.md）；算法层升级留三期）+ git worktree 高危隔离（草案已出：code-hospital-worktree-draft.md）+ 跨 case 聚合视图（**已落地 v1.10**：`hosp_case(include="chain")` 会诊链轻编排） | 禁止项命中拦截；出院经验可被 rsi_recall 召回；`hosp_case` 能看到一条会诊链上的全部病例 |
+| **P3 医养结合** | rsi-boot 联动（用药禁忌召回、疗效蒸馏）+ 符号级 scope（**LSP 基座一二期已落地**：references 销账 + lsp_rename 机械改名；G6 文件移动留「移动剂型」专项（草案已出：code-hospital-move-formula-draft.md）；算法层升级留三期）+ git worktree 高危隔离（**已落地 v1.11**：默认 high，配置可自定义）+ 跨 case 聚合视图（**已落地 v1.10**：`hosp_case(include="chain")` 会诊链轻编排） | 禁止项命中拦截；出院经验可被 rsi_recall 召回；`hosp_case` 能看到一条会诊链上的全部病例 |
 
 > 远期（不写入承诺）：跨仓联合会诊（多仓 scope/跨仓差分）。契约层已在 case 之上预留「就诊网络（encounter network）」概念命名空间。
 
 ---
 
 ## 附录：修订记录
+
+### v1.10 → v1.11（git worktree 高危隔离一期，1 条，含影响面）
+
+| # | 评审意见 | 合入位置 | 影响面 |
+|---|---|---|---|
+| 1 | worktree 草案拍板落地（用户：触发配置用户可自定义，默认 high）：高危药味（risk=high）先进隔离间 `.hospital/worktrees/<item_id>/` 预演——detached 检出 HEAD + 本味 scope 文件与主仓工作区对齐（未提交改动带进隔离间）+ 依赖目录 junction/symlink 接入；落盘与验收在隔离间，过后按草案 (c) 文件复制合回：主仓逐字节 drift 检查 → 复制 → 字节级比对 → 主仓复验，任一失败主仓零接触或快照恢复；合回漂移挂起走 resolve_conflict 且隔离间现场保留。触发三维：`hosp_dispense(isolation=...)` 入参 > `code-hospital.yaml` 的 `safety.worktree`（never/high/always，默认 high）> 内置默认；`safety.worktree_link_dirs` 可配接入清单。铁律：医院对主仓 git 操作只有 worktree add/remove/prune，不碰历史与分支；建间失败宁可这味不治也不悄悄降级；出院/转院清扫全部隔离间。顺带补契约两处存量缺漏（mode 枚举补 lsp_rename、入参补 new_name） | worktree 草案（定稿）；`safety/worktree.py`（新）；药房三条落盘路径接 `_run_isolated`；`catalog/policy.py`；`acceptance.run_alias` 增 cwd；出院 `_close` 清扫；契约 §3.5；`code-hospital.yaml.example` | **行为新增**（默认 high 时高危药味改在隔离间施治，成功后结果与直写一致；never 与现状逐字节一致）；新增配置面 + dispense 入参 |
 
 ### v1.9 → v1.10（会诊链聚合视图，1 条，含影响面）
 

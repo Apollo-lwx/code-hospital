@@ -851,13 +851,15 @@ graph LR
   "properties": {
     "prescription_id": {"type": "string", "pattern": "^rx_"},
     "item_id": {"type": "string", "default": "", "description": "默认下一味 pending"},
-    "mode": {"enum": ["apply", "submit_patch", "verify_only", "resolve_conflict"], "default": "apply"},
+    "mode": {"enum": ["apply", "submit_patch", "lsp_rename", "verify_only", "resolve_conflict"], "default": "apply"},
     "patch_token": {"type": "string", "default": "", "description": "submit_patch 必填"},
     "snapshot_hash": {"type": "string", "default": "", "description": "submit_patch 必填，prepare 时下发原样回传"},
     "patch": {"type": "string", "default": "", "description": "submit_patch 必填，SEARCH/REPLACE 块或 unified diff"},
+    "new_name": {"type": "string", "default": "", "description": "lsp_rename 必填，合法的新符号名"},
     "resolution": {"enum": ["manual_resolved", "retry", "skip_item", ""], "default": "", "description": "resolve_conflict 必填"},
     "dry_run": {"type": "boolean", "default": false},
-    "follow_autofix": {"type": "boolean", "default": false, "description": "true 时同一次调用连续做完后续成药，遇到煎药、失败或 40 味上限停下。默认 false，仍一味一停"}
+    "follow_autofix": {"type": "boolean", "default": false, "description": "true 时同一次调用连续做完后续成药，遇到煎药、失败或 40 味上限停下。默认 false，仍一味一停"},
+    "isolation": {"type": ["boolean", "null"], "default": null, "description": "git worktree 高危隔离当次覆盖：null 走仓级配置 safety.worktree（never/high/always，默认 high——risk=high 药味进隔离间预演，验收过后 drift 检查合回主仓并复验；隔离间内任何失败主仓零接触）"}
   },
   "additionalProperties": false
 }
