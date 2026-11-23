@@ -86,6 +86,15 @@ DEFAULT_DISPOSITIONS: tuple[Disposition, ...] = (
     Disposition("java.line-length", cls="convention"),
     Disposition("ts.line-length", cls="convention"),
     Disposition("E501", cls="convention"),
+    # 结构健康度量（拆分全族，2026-11-23 归属评估后收入）：超阈值不造成功能错误，
+    # 且拆函数没有机械判据——修法是语义重构，自动拆等于替用户重写代码。
+    # cyclomatic 保留 major 严重度（报告照显档），只是分流到告知级。
+    Disposition("structure.function_lines", cls="convention"),
+    Disposition("structure.file_lines", cls="convention"),
+    Disposition("structure.cyclomatic", cls="convention"),
+    Disposition("ts.function-lines", cls="convention"),
+    Disposition("python.branch-count", cls="convention"),
+    Disposition("python.too-many-params", cls="convention"),
 )
 
 

@@ -66,6 +66,12 @@ def test_default_table_only_covers_conventions():
     assert resolve("java.line-length").advisory is True
     assert resolve("ts.line-length").advisory is True
     assert resolve("E501").advisory is True
+    # 结构健康度量（拆分全族）：超阈值不是缺陷，拆函数没有机械判据
+    for rule in (
+        "structure.function_lines", "structure.file_lines", "structure.cyclomatic",
+        "ts.function-lines", "python.branch-count", "python.too-many-params",
+    ):
+        assert resolve(rule).advisory is True, rule
     assert resolve("F821") is None
     assert resolve("F841") is None
 
@@ -94,6 +100,32 @@ def test_default_table_drives_line_length_advisory(tmp_path: Path):
     )
     assert items[0]["formula_id"] == "debride"
     assert items[0]["status"] == "advisory"
+
+
+def test_default_table_drives_split_family_advisory(tmp_path: Path):
+    """结构健康度量（拆分类）默认只告知：主药与对照药都挂起。"""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.py").write_text("def f():\n    pass\n", encoding="utf-8")
+    finding = Finding(
+        id="fnd-fl", case_id="case-x", report_id="rpt-x",
+        tool="structure-ruler", rule_id="structure.function_lines", severity="nit",
+        file_path="src/a.py", line_start=1, line_end=120,
+        symbol="f", message="函数 f 有 120 行，超过 80", fingerprint="fp-fl",
+    )
+    diagnosis = Diagnosis(
+        id="dia-fl", case_id="case-x", report_id="rpt-x",
+        fingerprint="fp-fl", category="structure.function_lines",
+        root_cause="", severity="nit", confidence=0.8,
+        fixability="llm_patch", member_ids=["fnd-fl"],
+        specialty_id="structure", formulary_matched=True,
+    )
+    items = build_items(
+        [diagnosis], {"fnd-fl": finding}, "rx-t",
+        include_low=False, project_root=str(tmp_path),
+        drops_out=[], rename_pool=_AbsentPool(),
+    )
+    statuses = {item["formula_id"]: item["status"] for item in items}
+    assert statuses == {"split": "advisory", "contrast": "advisory"}
 
 
 def test_policy_loads_dispositions_with_notes(tmp_path: Path):

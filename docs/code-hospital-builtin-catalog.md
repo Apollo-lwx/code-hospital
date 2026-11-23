@@ -346,7 +346,7 @@ risk_overrides:
 
 结构尺的默认阈值：函数 80 行、文件 500 行、圈复杂度 15（仅 lizard 在岗时）。函数行数和文件行数的发现是 `severity=nit`（风格建议）。圈复杂度仍是 `severity=major`。函数级与圈复杂度的 `rule_id` 为 `structure.function_lines`、`structure.cyclomatic`，并带上函数名和函数全行区间。文件级的 `rule_id` 为 `structure.file_lines`，`symbol` 留空，`scope_key` 用 `#file`。
 
-仓库用 `code-hospital.yaml` 覆盖阈值。写成 `0` 表示这把尺不算病。`catalog.rules.ignore` 按规则号或前缀丢掉发现，`min_severity` 只留不低于该档的发现，`ruff_select` 传给 ruff。`catalog.rules.dispositions` 是**规则处置矩阵**（2026-11-23）：规范（命名/风格，不造成功能错误）与规则（缺陷/安全，明确必须修）分流——规范类默认只告知（药味落 `advisory`，不随处方执行，`include_advisory` 点名才施治），规则类维持现状走批准闸；每条可配 `class` / `auto_fix`（never/confirm/auto）/ `confirm`（explicit/approve/none）/ `severity`（等级覆盖，critical 联动风险到高危、强制真人审批）。用户配置优先于内置默认表（只收无争议的规范类：ruff `N8*` 命名族、ESLint `naming-convention`、行长规则 `java.line-length` / `ts.line-length` / `E501`），未命中维持现状；放宽规范类时风险写进药味说明提前告知。示例见仓库根目录 `code-hospital.yaml.example`。分层契约只采用优先级最高的一份，不把多份契约的违例叠在一起：
+仓库用 `code-hospital.yaml` 覆盖阈值。写成 `0` 表示这把尺不算病。`catalog.rules.ignore` 按规则号或前缀丢掉发现，`min_severity` 只留不低于该档的发现，`ruff_select` 传给 ruff。`catalog.rules.dispositions` 是**规则处置矩阵**（2026-11-23）：规范（命名/风格，不造成功能错误）与规则（缺陷/安全，明确必须修）分流——规范类默认只告知（药味落 `advisory`，不随处方执行，`include_advisory` 点名才施治），规则类维持现状走批准闸；每条可配 `class` / `auto_fix`（never/confirm/auto）/ `confirm`（explicit/approve/none）/ `severity`（等级覆盖，critical 联动风险到高危、强制真人审批）。用户配置优先于内置默认表（只收无争议的规范类：ruff `N8*` 命名族、ESLint `naming-convention`、行长规则 `java.line-length` / `ts.line-length` / `E501`、结构健康度量 `structure.function_lines` / `structure.file_lines` / `structure.cyclomatic` / `ts.function-lines` / `python.branch-count` / `python.too-many-params`——超阈值不造成功能错误且修法没有机械判据），未命中维持现状；放宽规范类时风险写进药味说明提前告知。示例见仓库根目录 `code-hospital.yaml.example`。分层契约只采用优先级最高的一份，不把多份契约的违例叠在一起：
 
 | 顺序 | 契约 | 没有则 |
 |---|---|---|
