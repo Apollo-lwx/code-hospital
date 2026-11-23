@@ -502,6 +502,22 @@ def _draft_rename(
             own.close()
 
 
+def _rename_risk_cap(item: dict, project_root: str, file_path: str, symbol: str) -> None:
+    """正骨风险上限 medium：命名不合规是告知级（nit）事项，不升档、不阻断流程——
+    医生可以觉得名字不合规，不能强制人改名。触及公开 API 不升 high，
+    仓外调用方不可见的风险写进 instructions 提示，由施治方自行评估。
+    """
+    from ..catalog.rename import touches_public_api
+
+    if symbol and touches_public_api(project_root, file_path, symbol):
+        item["instructions"] = (
+            f"{item['instructions']} 注意：{symbol} 是公开 API（__all__ 收录或包顶层定义），"
+            "仓外调用方不可见，改名后请自行评估影响。"
+        )[:500]
+    if item["risk"] == "high":
+        item["risk"] = "medium"
+
+
 def _draft_rename_rows(
     rename_clusters: list, prescription_id: str, hint: int, attending_of: dict,
     project_root: str, drafted: list, drops_out: list | None, pool,
@@ -546,6 +562,7 @@ def _draft_rename_rows(
             )[:500]
             item["acceptance"] = {"alias": "", "expect": f"迁移后 {rule_id} 在本范围的发现数应为 0"}
             item["rollback"] = "manual"
+            _rename_risk_cap(item, project_root, file_path, "")
             drafted.append(item)
             hint += 1
             continue
@@ -630,11 +647,7 @@ def _draft_rename_rows(
                     f"（{sample}），改名须同步全部引用文件；可用 hosp_dispense "
                     'mode="lsp_rename" 让医院机械改名。'
                 )[:500]
-            for override in matched.formula.risk_overrides:
-                if override.get("when") == "touches_public_api" and touches_public_api(
-                    project_root, file_path, symbol
-                ):
-                    item["risk"] = str(override.get("risk") or "high")
+            _rename_risk_cap(item, project_root, file_path, symbol)
             drafted.append(item)
             hint += 1
             companion = companion_for("rename", method, matched.specialty_id, project_root)

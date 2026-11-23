@@ -3,7 +3,8 @@
 > 状态：**已落地，phase 已降 1（2026-11-20）；G5 import 别名第二批同日落地**。
 > G1–G4 十条 + G5 五条规则按动作分组枚举入册；
 > 跨文件守门（入待复核写明 LSP001）、批量迁移合并（同规则同文件 ≥20 → 一味 manual 外购）、
-> `touches_public_api` 升 high、命名约定豁免均已实现。测试：tests/test_rename.py（19 例）。
+> 命名约定豁免均已实现；`touches_public_api` 初版升 high，二期修订改为不升档
+> （告知级事项不阻断流程，风险写进 instructions）。测试：tests/test_rename.py。
 >
 > **命名约定豁免（2026-11-20 落地）**：「框架约定名」的豁免**机制内置、数据外置**：
 > 由被诊疗仓库的 `code-hospital.yaml` 用 `catalog.rename.exempt` 声明（符号 glob，如
@@ -30,6 +31,10 @@
 > `__init__.py` 重导出守门在 LSP 到岗时改为 references 销账（无跨文件引用照常入方、
 > 有引用写明证据），缺席时回退文本守门行为不变。见 code-hospital-lsp-scope-draft.md。
 > G6（N999）等二期 rename。
+> 修订（2026-11-23 二期）：`touches_public_api` 升 high 改为**不升档**——命名不合规是
+> 告知级（nit）事项，正骨全组风险上限 medium、不进 user_required、不阻断流程：
+> 医生可以觉得名字不合规，不能强制人改名。仓外调用方不可见的风险改写进
+> instructions 提示（「该符号是公开 API，改名后请自行评估影响」）。
 
 ---
 
@@ -95,9 +100,11 @@
 
 - **剂型 `llm_patch`（煎药）不变**；批量迁移项为 `manual`。没有可靠的机械改名
   执行器进入成药路径；ruff 不修命名，rope 这类重构库引入即破「主链路离线」原则。
-- **风险**：`medium`；`touches_public_api`（导出符号、被 `__all__` 收录、
-  或出现在包顶层 `__init__.py` 的再导出）升 `high`，沿用名册既有 `risk_overrides`。
-  G6（文件移动）真接上时天然 `high`。
+- **风险**：上限 `medium`，不升档（2026-11-23 二修订）——命名不合规是告知级事项，
+  不进 user_required、不阻断流程。`touches_public_api`（导出符号、被 `__all__` 收录、
+  或出现在包顶层 `__init__.py` 的再导出）不再升 `high`，改为在 instructions 写明
+  「该符号是公开 API，仓外调用方不可见，改名后请自行评估影响」。
+  G6（文件移动）真接上时另行评估。
 - **伴随药**：对照（`contrast`）——改名后跑验收别名 `test`。
 
 ## 5. 名册改动（拍板后的最小集）
@@ -106,10 +113,7 @@
 id: rename
 name: 正骨
 method: llm_patch
-risk: medium
-risk_overrides:
-  - when: touches_public_api
-    risk: high
+risk: medium                 # 上限即 medium，不挂 risk_overrides（2026-11-23 二修订）
 phase: 1                     # 从 2 降到 1
 hold: false
 indications:
@@ -140,7 +144,7 @@ acceptance_alias: test
 | 组外不接 | `N999`（G6 模块文件名）的发现不入方，待复核并写明等 LSP |
 | G5 别名局部 | import 别名不做跨文件守门直接入方；`__init__.py` 里的别名（重导出名）入待复核写明 LSP001 |
 | 跨文件守门 | 符号被其他文件 import 的发现标待复核、不入方，诊断书写明原因 |
-| 公开 API 升档 | `__all__` 收录符号的正骨项 `risk=high`，必须真人确认 |
+| 公开 API 不升档 | `__all__` 收录符号的正骨项保持 `risk=medium`（不进 user_required），instructions 写明仓外风险提示 |
 | 单文件原子 | 一次施治的 diff 只触碰一个文件（符号定义 + 本文件引用） |
 | 批量不煎药 | 同规则同文件 ≥ 阈值的簇合成一味 `manual` 批量迁移项，不出煎药 |
 | 命名约定豁免 | 符号命中 `catalog.rename.exempt` 的发现不入方，待复核注明「命中命名约定」 |

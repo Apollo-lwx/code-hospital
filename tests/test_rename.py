@@ -1,4 +1,4 @@
-"""正骨（rename）：G1–G4 入名册、跨文件守门、批量迁移合并、touches_public_api 升档、命名约定豁免。"""
+"""正骨（rename）：G1–G4 入名册、跨文件守门、批量迁移合并、公开 API 提示不升档、命名约定豁免。"""
 
 from pathlib import Path
 
@@ -214,7 +214,8 @@ def test_single_file_rename_prescribed_when_clean(tmp_path: Path):
     assert any(it["formula_id"] == "contrast" for it in items)
 
 
-def test_public_api_escalates_risk(tmp_path: Path):
+def test_public_api_annotates_without_escalating(tmp_path: Path):
+    """触及公开 API 不升档：正骨是告知级事项，风险上限 medium，仓外风险写进提示。"""
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "a.py").write_text(
         '__all__ = ["Foo"]\n\ndef Foo():\n    return 1\n', encoding="utf-8",
@@ -222,7 +223,8 @@ def test_public_api_escalates_risk(tmp_path: Path):
     members = [_finding("N802", "src/a.py", 3, "Foo")]
     items, _drops = _build(tmp_path, members)
     rename_items = [it for it in items if it["formula_id"] == "rename"]
-    assert rename_items[0]["risk"] == "high"
+    assert rename_items[0]["risk"] == "medium"
+    assert "公开 API" in rename_items[0]["instructions"]
 
 
 def test_batch_merge_over_threshold(tmp_path: Path):
@@ -245,7 +247,8 @@ def test_batch_merge_over_threshold(tmp_path: Path):
     assert len(rename_items) == 1
     batch = rename_items[0]
     assert batch["method"] == "manual"
-    assert batch["risk"] == "high"
+    # 批量迁移是外购建议：manual 一般升 high，但正骨是告知级事项，上限 medium 不阻断
+    assert batch["risk"] == "medium"
     assert "批量迁移" in batch["instructions"]
     assert "发现数应为 0" in batch["acceptance"]["expect"]
     assert not any(it["formula_id"] == "contrast" for it in items)
@@ -307,8 +310,8 @@ def test_g5_alias_without_symbol_drops_out(tmp_path: Path):
     assert "提取不到别名" in drops[0]["reason"]
 
 
-def test_g5_alias_public_api_escalates(tmp_path: Path):
-    """非 __init__ 模块的 __all__ 收了别名（* 号导出），风险照升 high。"""
+def test_g5_alias_public_api_annotates(tmp_path: Path):
+    """非 __init__ 模块的 __all__ 收了别名（* 号导出）：不升档，提示写明公开 API。"""
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "a.py").write_text(
         '__all__ = ["OS"]\n\nimport os as OS\n', encoding="utf-8",
@@ -316,7 +319,8 @@ def test_g5_alias_public_api_escalates(tmp_path: Path):
     members = [_finding("N812", "src/a.py", 3, "OS")]
     items, _drops = _build(tmp_path, members)
     rename_items = [it for it in items if it["formula_id"] == "rename"]
-    assert rename_items[0]["risk"] == "high"
+    assert rename_items[0]["risk"] == "medium"
+    assert "公开 API" in rename_items[0]["instructions"]
 
 
 # ---------- 命名约定豁免（catalog.rename.exempt）----------

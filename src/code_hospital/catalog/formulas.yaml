@@ -30,9 +30,9 @@
   hold: false
   scope: reference_closure
   acceptance_alias: test
-  risk_overrides:
-    - when: touches_public_api
-      risk: high
+  # 不挂 risk_overrides：命名不合规是告知级（nit）事项，风险上限 medium、
+  # 不进 user_required——医生可以觉得名字不合规，不能强制人改名。
+  # 触及公开 API 的仓外风险由开方侧写进 instructions 提示，不升档。
   indications:
     - kind: rule
       # 按改名动作分组的显式枚举，不用前缀（同前缀规则风险不同构，N999 是文件移动）。
