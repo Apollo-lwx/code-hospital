@@ -19,6 +19,8 @@
   args: ["--stdio"]
   startup_timeout_s: 45
   request_timeout_s: 20
+# 重型可选：jdtls 本体约 500MB 且自身需 JDK 21+ 运行（1.63 起要 25；分析 1.8+ 项目不受影响）。
+# 缺席零成本（自动降级文本守门），Java 命名规范强，文本守门误报率低，不装也够用。
 - id: java
   extensions: [.java]
   language_id: java

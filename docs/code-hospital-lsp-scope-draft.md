@@ -13,7 +13,12 @@
 > （定义 + memory_port.py + test_memory_port.py），+13/-13，工作区零改动。
 > TS 观察（同日，typescript-language-server 对 doms/frontend_dbaudit_aigate）：
 > `resolveDbTypeIconKey` references 命中 2 个文件（index.ts 重导出 + 测试），与事实相符。
-> Java 观察暂缓：观察机无 JDK/jdtls，注册行保留，设备到岗即可用。
+> Java 不实测（2026-11-23 定论）：jdtls 过重——本体约 500MB，且自身运行需 JDK 21+
+>（1.63 起要 25；分析 1.8+ 项目不受影响）。轻量替代盘点无一生产品质：
+> georgewfraser/java-language-server 半停更、多模块 Maven 不可信；Apache NetBeans LS
+> 同重量级。Java 命名规范强、文本守门误报率低，references 边际收益三语言里最低。
+> 注册行保留标注「重型可选」，缺席零成本；远期观察 JDK 23+ 孵化的自带 langserver
+> 模块（成熟后「JDK 即仪器」零安装）。
 >
 > 顺带修复两个存量缺陷：① `hosp_dispense` 的 MCP 路径一直带 `assist` 参数而药房
 > 签名没有（83f76fb 起该路径必 TypeError）——药房收下不消费；② `_parse_unified`
@@ -68,7 +73,7 @@ src/code_hospital/lsp/
 |---|---|---|---|---|
 | python | .py | `pyright-langserver --stdio` | pyproject.toml / setup.py | |
 | typescript | .ts/.tsx/.js/.jsx | `typescript-language-server --stdio` | package.json / tsconfig.json | |
-| java | .java | `jdtls` | pom.xml / build.gradle | 重设备：预热超时单独放宽 |
+| java | .java | `jdtls` | pom.xml / build.gradle | 重型可选：本体约 500MB、自身需 JDK 21+ 运行，缺席零成本 |
 
 用户自定义走被诊仓库 `code-hospital.yaml` 的 `catalog.lsp.languages` 段
 （与 `catalog.rename.exempt` 同一「机制内置、数据外置」先例）；命令名只认
