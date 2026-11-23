@@ -52,6 +52,34 @@ class SecretAdapter(ScannerAdapter):
         )]
 
 
+class RenameAdapter(ScannerAdapter):
+    name = "ruff"
+    binary = "git"
+    extensions = frozenset({".py"})
+
+    async def scan(self, repo_root, files, timeout_ms):
+        return [RawFinding(
+            rule_id="N802", message="Function name `BadName` should be lowercase",
+            file_path="src/named.py", line_start=1, line_end=1, severity="minor",
+        )]
+
+
+class _AbsentPool:
+    """LSP 缺席的确定性桩：守门一律回退文本扫描（同 test_rename.py 的约定）。"""
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def cross_file_refs(self, file_path, line, symbol):
+        return None
+
+    def notes(self):
+        return []
+
+    def close(self):
+        pass
+
+
 @pytest.fixture()
 def git_repo(tmp_path: Path) -> str:
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
@@ -236,3 +264,90 @@ async def test_prescribe_requires_diagnosis(git_repo):
     with pytest.raises(HospitalError) as exc:
         await prescriber.prescribe(case_id=reg["case_id"], project_root=git_repo)
     assert exc.value.code == "InvalidOperation"
+
+
+# ---------- 正骨告知建议项（advisory）：只告知不自动施治 ----------
+
+async def _rename_draft(git_repo: str, monkeypatch) -> tuple[str, dict]:
+    """造一张只含正骨味的处方草稿。LSP 一律缺席，守门回退文本扫描。"""
+    monkeypatch.setattr("code_hospital.lsp.pool.Pool", _AbsentPool)
+    (Path(git_repo) / "src" / "named.py").write_text(
+        "def BadName():\n    return 1\n", encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=git_repo, check=True)
+    case_id = await _ready(git_repo, RenameAdapter)
+    draft = await prescriber.prescribe(
+        case_id=case_id, acceptance_decision="skip", project_root=git_repo,
+    )
+    if draft.get("status") == "pending_question":
+        draft = await prescriber.prescribe(
+            case_id=case_id, low_confidence="adopt", acceptance_decision="skip",
+            project_root=git_repo,
+        )
+    assert draft["status"] == "draft"
+    return case_id, draft
+
+
+async def test_advisory_items_do_not_block_approval(git_repo, monkeypatch):
+    """眼睫毛原则：命名问题告知用户，但不抬风险、不拦批准、药房不抓。"""
+    case_id, draft = await _rename_draft(git_repo, monkeypatch)
+    statuses = {it["formula_id"]: it["status"] for it in draft["items"]}
+    assert statuses == {"rename": "advisory", "contrast": "advisory"}
+    # advisory 不进风险核算：全告知的处方是低危，宿主代理可批
+    assert draft["risk_level"] == "low"
+    assert draft["approval_policy"]["host_agent_ok"] is True
+    assert draft["approval_policy"]["user_required_items"] == []
+    assert "include_advisory" in draft["confirmation_prompt"]
+
+    approved = await prescriber.prescribe(
+        case_id=case_id, approve=True, approver="host_agent", project_root=git_repo,
+    )
+    assert approved["status"] == "approved"
+
+    # 批准后没有 pending 药味——告知建议项不随处方执行
+    from code_hospital.departments import pharmacist
+
+    with pytest.raises(HospitalError) as exc:
+        await pharmacist.dispense(
+            prescription_id=draft["prescription_id"], project_root=git_repo,
+        )
+    assert "没有待执行的药味" in str(exc.value)
+
+
+async def test_include_advisory_flips_named_items(git_repo, monkeypatch):
+    """用户点名哪项治，哪项才翻 pending；点名的项照样过自己的风险闸。"""
+    case_id, draft = await _rename_draft(git_repo, monkeypatch)
+    rename_item = next(it for it in draft["items"] if it["formula_id"] == "rename")
+    approved = await prescriber.prescribe(
+        case_id=case_id, approve=True, approver="host_agent",
+        include_advisory=[rename_item["id"]], project_root=git_repo,
+    )
+    assert approved["status"] == "approved"
+    async with Database(git_repo) as db:
+        rx = await db.latest_prescription(case_id)
+    by_id = {it["id"]: it for it in rx["items"]}
+    assert by_id[rename_item["id"]]["status"] == "pending"
+    # 没点名的对照药仍是告知建议
+    contrast = next(it for it in rx["items"] if it["formula_id"] == "contrast")
+    assert contrast["status"] == "advisory"
+    # 翻转发生在风险核算之前：llm_patch 进 pending，整方风险升 medium
+    assert rx["risk_level"] == "medium"
+
+
+async def test_include_advisory_rejects_unknown_id(git_repo, monkeypatch):
+    case_id, draft = await _rename_draft(git_repo, monkeypatch)
+    with pytest.raises(HospitalError) as exc:
+        await prescriber.prescribe(
+            case_id=case_id, approve=True, approver="host_agent",
+            include_advisory=["rxit-nope"], project_root=git_repo,
+        )
+    assert exc.value.code == "BadArgument"
+
+
+async def test_include_advisory_requires_approve(git_repo, monkeypatch):
+    case_id, _draft = await _rename_draft(git_repo, monkeypatch)
+    with pytest.raises(HospitalError) as exc:
+        await prescriber.prescribe(
+            case_id=case_id, include_advisory=["rxit-x"], project_root=git_repo,
+        )
+    assert exc.value.code == "BadArgument"

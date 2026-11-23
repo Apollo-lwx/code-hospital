@@ -150,6 +150,10 @@ block recalled before prescribing: prohibitions (hard constraints), references
 many entries were withheld by weight. Memory never replaces the checkup — it says what
 was learned, not what this round covered. A missing memory backend leaves the draft
 unchanged and the coverage ledger records why.
+Advisory items (status=advisory, e.g. naming/正骨 suggestions) are informational only:
+they never execute with the prescription and do not affect its risk level. To treat one,
+approve with include_advisory=["rxit-..."] naming the item ids — flipped items pass
+their own risk gate like any pending item.
 """
 
 DISPENSE_DESC = """\

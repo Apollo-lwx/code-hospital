@@ -273,6 +273,12 @@ async def dispense(
                 item = next((it for it in rx["items"] if it["id"] == specified), None)
                 if item is None:
                     raise not_found(f"药味不存在：{specified}", target="item_id")
+                if item["status"] == "advisory":
+                    raise invalid_operation(
+                        f"药味 {item['id']} 是告知建议项，批准时未点名不执行",
+                        target="item_id",
+                        next_action="要治这项：新一轮 hosp_prescribe 批准时用 include_advisory 点名该药味 id",
+                    )
                 if item["status"] != "pending":
                     raise invalid_operation(f"药味状态为 {item['status']}，不能再次抓药", target="item_id")
                 specified = ""

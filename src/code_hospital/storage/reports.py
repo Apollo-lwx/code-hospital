@@ -1108,9 +1108,14 @@ def render_prescribe_report(case: Case, prescription_id: str, rx: dict, report_p
         "|---|---|---|---|---|---|",
     ]
     manuals = []
+    advisory = []
     if not items:
         parts.append("| — | 无 | — | — | 无需用药 | — |")
     for it in items:
+        if it.get("status") == "advisory":
+            # 告知建议不随处方执行，不进处理清单，单列一节。
+            advisory.append(it)
+            continue
         mark = "⚠ " if it["risk"] == "high" else ""
         expect = it["acceptance"].get("expect", "").replace("|", "\\|")
         scope = ", ".join(_file_link(case.project_root, p) for p in it["scope_paths"]) or "—"
@@ -1126,6 +1131,16 @@ def render_prescribe_report(case: Case, prescription_id: str, rx: dict, report_p
         parts += ["## 需要你自己改", ""]
         for it in manuals:
             parts.append(f"- {_item_place(case.project_root, it)}：{it['instructions'][:180]}")
+        parts.append("")
+    if advisory:
+        parts += [
+            "## 告知建议（不随处方执行，做不做你决定）",
+            "",
+            "要治哪项，批准处方时用 include_advisory 点名药味 id。",
+            "",
+        ]
+        for it in advisory:
+            parts.append(f"- `{it['id']}` {_item_place(case.project_root, it)}：{it['instructions'][:180]}")
         parts.append("")
     parts.append(_footer(case))
     _ = report_path

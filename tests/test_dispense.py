@@ -96,6 +96,34 @@ class LogicAdapter(ScannerAdapter):
         )]
 
 
+class RenameAdapter(ScannerAdapter):
+    name = "ruff"
+    binary = "git"
+    extensions = frozenset({".py"})
+
+    async def scan(self, repo_root, files, timeout_ms):
+        return [RawFinding(
+            rule_id="N802", message="Function name `BadName` should be lowercase",
+            file_path="src/named.py", line_start=1, line_end=1, severity="minor",
+        )]
+
+
+class _AbsentPool:
+    """LSP 缺席的确定性桩：守门一律回退文本扫描（同 test_rename.py 的约定）。"""
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def cross_file_refs(self, file_path, line, symbol):
+        return None
+
+    def notes(self):
+        return []
+
+    def close(self):
+        pass
+
+
 @pytest.fixture()
 def git_repo(tmp_path: Path) -> str:
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
@@ -368,6 +396,48 @@ async def test_retry_settles_outside_edit(git_repo, monkeypatch):
     assert "x = 1" not in text
     assert "# outside-scope-marker" not in text
     assert "return 2" in text
+
+
+async def test_advisory_item_cannot_be_dispensed(git_repo, monkeypatch):
+    """告知建议项批准时未点名：药房拒抓，指路 include_advisory。"""
+    monkeypatch.setattr("code_hospital.lsp.pool.Pool", _AbsentPool)
+    (Path(git_repo) / "src" / "named.py").write_text(
+        "def BadName():\n    return 1\n", encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=git_repo, check=True)
+    _use(RenameAdapter)
+    reg = await reception.register(
+        title="告知", scope_type="staged", scope={},
+        auto_advance=False, project_root=git_repo,
+    )
+    case_id = reg["case_id"]
+    await scanner.scan(case_id=case_id, stage_confirmed=True, project_root=git_repo)
+    await diagnostician.diagnose(case_id=case_id, stage_confirmed=True, project_root=git_repo)
+    draft = await prescriber.prescribe(
+        case_id=case_id, stage_confirmed=True, acceptance_decision="skip",
+        project_root=git_repo,
+    )
+    if draft.get("status") == "pending_question":
+        draft = await prescriber.prescribe(
+            case_id=case_id, stage_confirmed=True, low_confidence="adopt",
+            acceptance_decision="skip", project_root=git_repo,
+        )
+    assert draft["status"] == "draft"
+    advisory = next(it for it in draft["items"] if it["status"] == "advisory")
+    approved = await prescriber.prescribe(
+        case_id=case_id, approve=True, approver="host_agent", project_root=git_repo,
+    )
+    assert approved["status"] == "approved"
+    with pytest.raises(HospitalError) as exc:
+        await pharmacist.dispense(
+            prescription_id=draft["prescription_id"], item_id=advisory["id"],
+            mode="lsp_rename", new_name="bad_name", project_root=git_repo,
+        )
+    assert exc.value.code == "InvalidOperation"
+    assert "告知建议项" in str(exc.value)
+    assert "include_advisory" in str(exc.value.next_action)
+    # 拒抓不改代码
+    assert "BadName" in (Path(git_repo) / "src" / "named.py").read_text(encoding="utf-8")
 
 
 async def test_verify_only_reports_without_writing(git_repo):

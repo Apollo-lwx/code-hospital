@@ -220,7 +220,7 @@ graph LR
     "scope_symbols": {"type": "array", "items": {"type": "string"}},
     "risk": {"enum": ["low", "medium", "high"]},
     "touches_manifest": {"type": "boolean", "description": "true 时强制 risk=high"},
-    "status": {"enum": ["pending", "applied", "failed", "skipped", "void"]},
+    "status": {"enum": ["pending", "advisory", "applied", "failed", "skipped", "void"], "description": "advisory=告知建议（如正骨命名项）：不随处方执行，hosp_prescribe 批准时用 include_advisory 点名翻 pending 才进施治"},
     "amended_from": {"type": "string", "description": "改签来源（被 void 的旧项 id），非改签为 \"\""},
     "formula_id": {"type": "string", "description": "药名册 id，如 debride | seal | repair"},
     "parent_formula_id": {"type": "string", "description": "对照药指向的主药；主药为空串"},
@@ -785,7 +785,8 @@ graph LR
     "stage_confirmed": {"type": "boolean", "default": false, "description": "用户确认诊断书后置 true，才允许起草处方"},
     "low_confidence": {"enum": ["", "adopt", "exclude", "defer"], "default": "", "description": "待复核诊断：空=先问；adopt 入方；exclude 排除；defer 暂停"},
     "acceptance_decision": {"enum": ["", "skip", "pause", "confirm"], "default": "", "description": "confirm 把探测到的别名写入 code-hospital.yaml；skip 把命令验收记 skipped；pause 暂停开方"},
-    "decision": {"enum": ["", "reject", "downgrade"], "default": "", "description": "approve=true 时的裁决：reject 拒绝整张；downgrade 高危降级为外购后批准其余"}
+    "decision": {"enum": ["", "reject", "downgrade"], "default": "", "description": "approve=true 时的裁决：reject 拒绝整张；downgrade 高危降级为外购后批准其余"},
+    "include_advisory": {"type": "array", "items": {"type": "string"}, "description": "approve=true 时点名的告知建议项（status=advisory，如正骨命名项）药味 id；点名的项翻 pending 并重新参与风险核算，未点名不执行。须与 approve=true 同用，id 不属于本处方 advisory 项时报 BadArgument"}
   },
   "additionalProperties": false
 }
@@ -837,7 +838,7 @@ graph LR
 }
 ```
 
-关键错误：`InvalidOperation`（未诊断开方）、`Forbidden`（高危项无真人确认）。**问题变体**：Q3 `low_confidence_diagnosis`（存在 confidence<0.5 的待复核诊断：确认采用 / 排除 / 补充上下文，未确认前该诊断不入处方）；Q4 `high_risk_approval`（高危项真人审批）；Q5 `acceptance_whitelist`（处方项需命令验收但白名单为空，附 `suggested_acceptance_commands` 逐条确认落配置，未落配置则验收记 `skipped`）。
+关键错误：`InvalidOperation`（未诊断开方）、`Forbidden`（高危项无真人确认）、`BadArgument`（`include_advisory` 未配 approve=true，或点名的 id 不是本处方的告知建议项）。**问题变体**：Q3 `low_confidence_diagnosis`（存在 confidence<0.5 的待复核诊断：确认采用 / 排除 / 补充上下文，未确认前该诊断不入处方）；Q4 `high_risk_approval`（高危项真人审批）；Q5 `acceptance_whitelist`（处方项需命令验收但白名单为空，附 `suggested_acceptance_commands` 逐条确认落配置，未落配置则验收记 `skipped`）。**告知建议项**（2026-11-23）：命名类（正骨）药味落 `status=advisory`——只告知不随处方执行，不计入风险核算与 `user_required_items`，批准时用 `include_advisory` 点名才翻 pending 进施治。
 
 ### 3.5 `hosp_dispense`（施治 · 唯一改码工具）
 

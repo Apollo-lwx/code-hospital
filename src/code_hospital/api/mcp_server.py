@@ -184,6 +184,7 @@ async def hosp_prescribe(
     acceptance_decision: str = "",
     decision: str = "",
     project_root: str = "",
+    include_advisory: list[str] | None = None,
     assist: dict | None = None,
     ctx: Context | None = None,
 ) -> dict:
@@ -199,6 +200,7 @@ async def hosp_prescribe(
             acceptance_decision=acceptance_decision,
             decision=decision,
             project_root=project_root,
+            include_advisory=include_advisory,
             assist=assist,
         ))
     except HospitalError as e:

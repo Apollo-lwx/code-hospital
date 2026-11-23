@@ -4,7 +4,9 @@
 > G1–G4 十条 + G5 五条规则按动作分组枚举入册；
 > 跨文件守门（入待复核写明 LSP001）、批量迁移合并（同规则同文件 ≥20 → 一味 manual 外购）、
 > 命名约定豁免均已实现；`touches_public_api` 初版升 high，二期修订改为不升档
-> （告知级事项不阻断流程，风险写进 instructions）。测试：tests/test_rename.py。
+> （告知级事项不阻断流程，风险写进 instructions）；三期修订落 `advisory` 状态——
+> 正骨全组只告知不自动施治，用户用 `include_advisory` 点名才进药房。
+> 测试：tests/test_rename.py、tests/test_prescribe.py、tests/test_dispense.py。
 >
 > **命名约定豁免（2026-11-20 落地）**：「框架约定名」的豁免**机制内置、数据外置**：
 > 由被诊疗仓库的 `code-hospital.yaml` 用 `catalog.rename.exempt` 声明（符号 glob，如
@@ -35,6 +37,13 @@
 > 告知级（nit）事项，正骨全组风险上限 medium、不进 user_required、不阻断流程：
 > 医生可以觉得名字不合规，不能强制人改名。仓外调用方不可见的风险改写进
 > instructions 提示（「该符号是公开 API，改名后请自行评估影响」）。
+> 修订（2026-11-23 三期）：**告知级语义落到处方项状态**——正骨全组（普通项、对照药、
+> 批量迁移项）开方即落 `advisory`（告知建议），**不随处方执行**：不抬风险、不进
+> user_required、药房不抓、出院不拦。用户原话：医生可以觉得名字不合规，
+> 不能强制人改名；眼睫毛不舒服不能把眼睛扣掉。做不做由用户决定——批准时用
+> `hosp_prescribe(approve=true, include_advisory=["rxit-..."])` 点名翻 pending，
+> 翻转发生在风险/策略核算之前，点名的项照样过自己的风险闸。药房对已批准处方里的
+> advisory 项给出专属报错（指路 include_advisory），处方报告单列「告知建议」节。
 
 ---
 
@@ -100,12 +109,18 @@
 
 - **剂型 `llm_patch`（煎药）不变**；批量迁移项为 `manual`。没有可靠的机械改名
   执行器进入成药路径；ruff 不修命名，rope 这类重构库引入即破「主链路离线」原则。
+- **状态 `advisory`（2026-11-23 三修订）**：正骨全组开方即落告知建议——告知用户
+  「这里名字不合规」，但**做不做用户决定**，医院不自动施治。`_risk_level` /
+  `_policy` / 确认文案只看 pending 项；药房只抓 pending 项；出院只拦 pending 项。
+  用户的决定通道是 `hosp_prescribe` 的 `include_advisory`（点名药味 id 翻 pending，
+  翻转先于风险核算，点名的项照样过自己的风险闸）。
 - **风险**：上限 `medium`，不升档（2026-11-23 二修订）——命名不合规是告知级事项，
   不进 user_required、不阻断流程。`touches_public_api`（导出符号、被 `__all__` 收录、
   或出现在包顶层 `__init__.py` 的再导出）不再升 `high`，改为在 instructions 写明
   「该符号是公开 API，仓外调用方不可见，改名后请自行评估影响」。
   G6（文件移动）真接上时另行评估。
-- **伴随药**：对照（`contrast`）——改名后跑验收别名 `test`。
+- **伴随药**：对照（`contrast`）——改名后跑验收别名 `test`；主药挂起对照也挂起
+  （同为 advisory），主药被点名翻 pending 时对照不自动跟翻（要连对照一起治就一起点名）。
 
 ## 5. 名册改动（拍板后的最小集）
 
@@ -148,6 +163,8 @@ acceptance_alias: test
 | 单文件原子 | 一次施治的 diff 只触碰一个文件（符号定义 + 本文件引用） |
 | 批量不煎药 | 同规则同文件 ≥ 阈值的簇合成一味 `manual` 批量迁移项，不出煎药 |
 | 命名约定豁免 | 符号命中 `catalog.rename.exempt` 的发现不入方，待复核注明「命中命名约定」 |
+| 告知不阻断 | 正骨项落 `advisory`：不抬处方风险、宿主代理可批、药房不抓、出院不拦 |
+| 点名才施治 | `include_advisory` 点名的项翻 pending 并重新核算风险；未点名的项点名式抓药报「告知建议项」 |
 
 ## 7. 明确不做
 

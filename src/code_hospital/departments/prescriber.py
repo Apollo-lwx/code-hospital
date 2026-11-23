@@ -79,12 +79,20 @@ def _acceptance(method: str) -> dict:
 def _prompt(prescription_id: str, items: list[dict], risk_level: str) -> str:
     counts = {"autofix": 0, "llm_patch": 0, "manual": 0}
     for it in items:
-        counts[it["method"]] = counts.get(it["method"], 0) + 1
+        if it["status"] == "pending":
+            counts[it["method"]] = counts.get(it["method"], 0) + 1
     high = sum(1 for it in items if it["risk"] == "high" and it["status"] == "pending")
+    advisory = sum(1 for it in items if it["status"] == "advisory")
+    note = ""
+    if advisory:
+        note = (
+            f"另有 {advisory} 项告知建议（命名类），不随处方执行——"
+            "要治哪项，批准时用 include_advisory 点名药味 id。"
+        )
     return (
         f"处方 {prescription_id}：{len(items)} 项"
         f"（可自动修改 {counts['autofix']} / 需要补丁 {counts['llm_patch']} / 建议人工处理 {counts['manual']}），"
-        f"风险 {risk_level}。必须你本人确认的有 {high} 项。"
+        f"风险 {risk_level}。必须你本人确认的有 {high} 项。{note}"
         "同意后以 approve=true 重新调用；必须本人确认的项要 approver=user 且 user_confirmed=true。"
     )[:500]
 
@@ -555,6 +563,8 @@ def _draft_rename_rows(
                 "rename", "", "manual", matched.specialty_id, attending,
                 f"file:{file_path}#rule:{rule_id}", _member_spans(all_members),
             )
+            # 告知级事项默认不随处方执行：医生觉得名字不合规可以告知，做不做用户决定。
+            item["status"] = "advisory"
             item["instructions"] = (
                 f"正骨·批量迁移：{file_path} 有 {len(all_members)} 处 {rule_id}。"
                 f"同规则同文件达到 {RENAME_BATCH_MIN} 处按批量迁移处理，不开煎药——"
@@ -634,6 +644,9 @@ def _draft_rename_rows(
                 "rename", "", method, matched.specialty_id, attending,
                 scope_key(head), _member_spans(members),
             )
+            # 告知级事项默认不随处方执行：医生觉得名字不合规可以告知，做不做用户决定
+            #（批准时 include_advisory 点名翻 pending 才进施治）。
+            item["status"] = "advisory"
             # lsp_rename 的定位信息：符号 + 定义行（scope_lines 取 members 序，不保证是定义点）。
             item["rename_line"] = head.line_start
             if lsp_refs:
@@ -652,11 +665,14 @@ def _draft_rename_rows(
             hint += 1
             companion = companion_for("rename", method, matched.specialty_id, project_root)
             if companion is not None:
-                drafted.append(_draft_item(
+                shadow = _draft_item(
                     diagnosis, members, prescription_id, hint,
                     companion.id, "rename", companion.method, matched.specialty_id,
                     attending, scope_key(head), [],
-                ))
+                )
+                # 伴随药跟主药同进退：主药是告知建议，对照验收也先挂起。
+                shadow["status"] = "advisory"
+                drafted.append(shadow)
                 hint += 1
     return hint
 
@@ -757,8 +773,11 @@ async def prescribe(
     acceptance_decision: str = "",
     decision: str = "",
     project_root: str = "",
+    include_advisory: list | None = None,
 ) -> dict:
-    """hosp_prescribe。approve=false 出草稿；approve=true 按策略批准、拒绝或降级。"""
+    """hosp_prescribe。approve=false 出草稿；approve=true 按策略批准、拒绝或降级。
+    include_advisory：批准时点名的告知建议项药味 id 清单（正骨等告知级事项默认
+    不随处方执行，点名后翻 pending 过自己的风险闸）。"""
     from .reception import resolve_project_root
     from .scanner import detect_acceptance_commands
 
@@ -772,6 +791,8 @@ async def prescribe(
         raise bad_argument("decision 须为 reject / downgrade", target="decision")
     if decision and not approve:
         raise bad_argument("reject / downgrade 须与 approve=true 一起使用", target="decision")
+    if include_advisory and not approve:
+        raise bad_argument("include_advisory 须与 approve=true 一起使用", target="include_advisory")
 
     root = resolve_project_root(project_root)
     async with Database(root) as db:
@@ -783,7 +804,7 @@ async def prescribe(
         if case.status == "prescribed" and existing is not None:
             return await _decide(
                 db, case, existing, approve, approver, user_confirmed, decision,
-                str(report_path), root,
+                str(report_path), root, include_advisory=include_advisory,
             )
         if case.status != "diagnosed":
             raise invalid_operation(
@@ -946,7 +967,7 @@ def _prescribe_report_path(root: str, case_id: str, round_: int) -> Path:
 
 async def _decide(
     db, case, rx, approve, approver, user_confirmed, decision, report_path: str, root: str,
-    confirmation: str = "",
+    confirmation: str = "", include_advisory: list | None = None,
 ) -> dict:
     if not rx.get("efficacy"):
         diagnoses = await db.list_diagnoses(case.id)
@@ -991,6 +1012,20 @@ async def _decide(
                 )
         rx["risk_level"] = _risk_level(items)
 
+    if include_advisory:
+        # 告知建议项默认不执行；用户点名哪些治，翻成 pending 随处方走。
+        # 翻转发生在风险/策略核算之前——点名的项照样过自己的风险闸。
+        known = {it["id"] for it in items if it["status"] == "advisory"}
+        unknown = [ident for ident in include_advisory if ident not in known]
+        if unknown:
+            raise bad_argument(
+                f"这些 id 不是本处方的告知建议项：{unknown}", target="include_advisory",
+            )
+        for it in items:
+            if it["id"] in include_advisory:
+                it["status"] = "pending"
+                await db.update_prescription_item(it["id"], status="pending")
+
     risk = _risk_level(items)
     policy = _policy(items, risk)
     if policy["user_required_items"] and approver == "host_agent":
@@ -1016,7 +1051,8 @@ async def _decide(
             return presented.stop
         if presented.choice == "approve":
             return await _decide(
-                db, case, rx, True, "user", True, decision, report_path, root, confirmation="elicitation",
+                db, case, rx, True, "user", True, decision, report_path, root,
+                confirmation="elicitation", include_advisory=include_advisory,
             )
         if presented.choice == "reject":
             return await _decide(
@@ -1024,7 +1060,8 @@ async def _decide(
             )
         if presented.choice == "downgrade":
             return await _decide(
-                db, case, rx, True, "user", True, "downgrade", report_path, root, confirmation="elicitation",
+                db, case, rx, True, "user", True, "downgrade", report_path, root,
+                confirmation="elicitation", include_advisory=include_advisory,
             )
         return question
     if risk == "medium" and approver == "auto":
