@@ -95,6 +95,9 @@ DEFAULT_DISPOSITIONS: tuple[Disposition, ...] = (
     Disposition("ts.function-lines", cls="convention"),
     Disposition("python.branch-count", cls="convention"),
     Disposition("python.too-many-params", cls="convention"),
+    # 重复代码（jscpd 去重，2026-11-23 拍板收入）：重复不是缺陷，
+    # 合并重构同样没有机械判据；刻意重复（测试夹具/协议对齐）由仓库配置放宽。
+    Disposition("clone.duplicate", cls="convention"),
 )
 
 

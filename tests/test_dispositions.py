@@ -70,6 +70,7 @@ def test_default_table_only_covers_conventions():
     for rule in (
         "structure.function_lines", "structure.file_lines", "structure.cyclomatic",
         "ts.function-lines", "python.branch-count", "python.too-many-params",
+        "clone.duplicate",
     ):
         assert resolve(rule).advisory is True, rule
     assert resolve("F821") is None

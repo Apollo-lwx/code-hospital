@@ -53,7 +53,8 @@ catalog:
     # 内置默认表已收：ruff N8* 命名族、ESLint naming-convention、
     # 行长规则 java.line-length / ts.line-length / E501（纯排版，同样只告知）、
     # 结构健康度量 structure.function_lines / file_lines / cyclomatic、
-    # ts.function-lines、python.branch-count / too-many-params（拆函数没有机械判据）。
+    # ts.function-lines、python.branch-count / too-many-params（拆函数没有机械判据）、
+    # 去重 clone.duplicate（重复不是缺陷，合并重构同样没有机械判据）。
     # 放宽规范类（auto / none）是你自己的仓你自己说了算，医院会在药味说明里写明风险提示。
     # dispositions:
     #   - {match: "N8*", class: convention}                          # 显式写出内置默认也行
