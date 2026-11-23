@@ -577,6 +577,7 @@ def _draft_rename_rows(
     from ..catalog.rename import (
         G1_LOCAL_RULES,
         G5_ALIAS_RULES,
+        G6_MODULE_RULES,
         RENAME_BATCH_MIN,
         cross_file_reference,
         exempted,
@@ -592,7 +593,23 @@ def _draft_rename_rows(
         diagnosis, members, head, _matched = row
         groups.setdefault((head.rule_id, head.file_path), []).append(row)
 
+    g6_total = sum(1 for rule_id, _path in groups if rule_id in G6_MODULE_RULES)
+    g6_batch_done = False
     for (rule_id, file_path), rows in sorted(groups.items()):
+        if rule_id in G6_MODULE_RULES:
+            # G6 模块文件名是文件移动，不走符号改名的守门/合并管线（move-formula 草案）。
+            if g6_total >= RENAME_BATCH_MIN:
+                if not g6_batch_done:
+                    hint = _draft_g6_batch(
+                        groups, prescription_id, hint, attending_of, project_root, drafted, user_rows,
+                    )
+                    g6_batch_done = True
+                continue
+            hint = _draft_g6_module(
+                rows, prescription_id, hint, attending_of, project_root,
+                drafted, drops_out, pool, exempt, user_rows,
+            )
+            continue
         all_members = [m for _d, members, _h, _m in rows for m in members]
         if len(all_members) >= RENAME_BATCH_MIN:
             # 批量迁移不是诊疗：几百处 N802 该用 codemod，一味煎药开不出来。
@@ -718,6 +735,129 @@ def _draft_rename_rows(
                 shadow["status"] = item["status"]
                 drafted.append(shadow)
                 hint += 1
+    return hint
+
+
+def _draft_g6_batch(
+    groups: dict, prescription_id: str, hint: int, attending_of: dict,
+    project_root: str, drafted: list, user_rows,
+) -> int:
+    """G6 批量（全仓 N999 ≥ RENAME_BATCH_MIN 个文件）：一味外购批量迁移，不开移动剂型。
+
+    批量迁移不是诊疗：几百个文件名该用 codemod，一味移动剂型开不出来
+    （与符号改名的批量惯例同源，只是计数维度是「同规则全仓文件数」）。
+    """
+    from ..catalog.rename import G6_MODULE_RULES, RENAME_BATCH_MIN
+
+    g6_rows = [
+        row for (rule_id, _path), rows in groups.items()
+        if rule_id in G6_MODULE_RULES for row in rows
+    ]
+    head_diag, _members, _head, matched = g6_rows[0]
+    all_members = [m for _d, members, _h, _m in g6_rows for m in members]
+    attending = attending_of.get(head_diag.id, matched.specialty_id)
+    item = _draft_item(
+        head_diag, all_members, prescription_id, hint,
+        "rename", "", "manual", matched.specialty_id, attending,
+        "repo#rule:N999", _member_spans(all_members),
+    )
+    item["instructions"] = (
+        f"正骨·批量迁移：全仓 {len(g6_rows)} 个模块文件名不合规（N999）。"
+        f"同规则达到 {RENAME_BATCH_MIN} 个按批量迁移处理，不开移动剂型——"
+        "建议用 codemod 一次性脚本迁移，逐文件移动不值当。"
+    )[:500]
+    item["acceptance"] = {"alias": "", "expect": "迁移后 N999 在本范围的发现数应为 0"}
+    item["rollback"] = "manual"
+    _rename_risk_cap(item, project_root, "", "")
+    # 处置矩阵放最后（默认表 N999 → 告知建议；用户配置可放宽）。
+    _apply_disposition(item, "N999", user_rows)
+    drafted.append(item)
+    return hint + 1
+
+
+def _draft_g6_module(
+    rows: list, prescription_id: str, hint: int, attending_of: dict,
+    project_root: str, drafted: list, drops_out: list | None, pool,
+    exempt, user_rows,
+) -> int:
+    """G6 模块文件名（N999）入方：LSP 到岗且认领 willRenameFiles 才开移动剂型。
+
+    缺席 / 不认领 / 干跑失败 → 不入方、留待复核写明原因；不手搓文本推导的
+    import 重写（move-formula 草案 §2）。scope 推导用 willRenameFiles 干跑的
+    编辑清单——模块符号在文件内没有可定位的 references 查询位置，干跑返回的
+    编辑文件集就是引用文件集的权威来源，开方与施治同源最稳。
+    """
+    from ..catalog.rename import exempted, module_snake_name
+
+    diagnosis, members, head, matched = rows[0]
+    file_path = head.file_path
+    stem = Path(file_path).stem
+
+    def drop(reason: str) -> int:
+        if drops_out is not None:
+            drops_out.append({"file": file_path, "line": head.line_start, "reason": reason})
+        return hint
+
+    if not stem or stem == "__init__":
+        return drop(f"正骨 N999：{file_path} 拿不到可改的模块名，留人工核对")
+    if exempt and exempted(stem, exempt):
+        return drop(
+            f"正骨 N999：模块名 {stem} 命中仓库声明的命名约定"
+            "（catalog.rename.exempt），这名不归医院管，不入方"
+        )
+    support = pool.move_support(file_path) if pool else None
+    if support is not True:
+        detail = "LSP 未到岗（LSP001）" if support is None else "语言服务没认领 willRenameFiles"
+        return drop(
+            f"正骨 N999：模块名 {stem} 不合规是文件移动，机械移动前提不满足"
+            f"（{detail}），不入方"
+        )
+    new_stem = module_snake_name(stem)
+    if not new_stem or new_stem == stem or not new_stem.isidentifier():
+        return drop(f"正骨 N999：推导不出合规新名（{stem} → {new_stem or '空'}），留人工核对")
+    new_path = (Path(file_path).parent / f"{new_stem}{Path(file_path).suffix}").as_posix()
+    # 干跑拿引用集合定 scope（施治时再跑一次，实际触及 ⊆ scope 才放行）。
+    payload = pool.move_payload(file_path, new_path) if pool else None
+    if payload is None:
+        return drop(f"正骨 N999：移动干跑没跑成（{stem} → {new_stem}），不入方，留待复核")
+    refs = sorted({str(h.path) for h in payload["edits"]} - {file_path})
+    attending = attending_of.get(diagnosis.id, matched.specialty_id)
+    item = _draft_item(
+        diagnosis, members, prescription_id, hint,
+        "rename", "", "llm_patch", matched.specialty_id, attending,
+        scope_key(head), _member_spans(members),
+    )
+    item["move_to"] = new_path
+    item["scope_paths"] = list(dict.fromkeys([file_path, new_path, *refs]))
+    item["files"] = list(item["scope_paths"])
+    cited = (
+        f"LSP 干跑确认被 {len(refs)} 个文件引用"
+        f"（{'、'.join(refs[:3])}{' 等' if len(refs) > 3 else ''}），引用文件已在 scope 内；"
+        if refs else "LSP 干跑确认仓内无引用；"
+    )
+    item["instructions"] = (
+        f"{item['instructions']} G6 机械移动：{file_path} → {new_path}"
+        f"（新名按 snake_case 推导，施治时可用 new_path 覆盖，只准改文件名部分）。{cited}"
+        '可用 hosp_dispense mode="lsp_move" 让医院机械移动。'
+        "已知盲区：字符串 import、importlib 动态加载、模板/配置里的模块路径 "
+        "LSP 覆盖不到，移动后请人工核。"
+    )[:500]
+    _rename_risk_cap(item, project_root, file_path, stem)
+    # 处置矩阵放最后（默认表 N999 → 告知建议，include_advisory 点名才治）。
+    _apply_disposition(item, "N999", user_rows)
+    drafted.append(item)
+    hint += 1
+    companion = companion_for("rename", "llm_patch", matched.specialty_id, project_root)
+    if companion is not None:
+        shadow = _draft_item(
+            diagnosis, members, prescription_id, hint,
+            companion.id, "rename", companion.method, matched.specialty_id,
+            attending, scope_key(head), [],
+        )
+        # 伴随药跟主药同进退：主药是告知建议，对照验收也先挂起。
+        shadow["status"] = item["status"]
+        drafted.append(shadow)
+        hint += 1
     return hint
 
 

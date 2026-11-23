@@ -165,8 +165,13 @@ Submit that token, the snapshot_hash, and a unified diff or SEARCH/REPLACE block
 mode=submit_patch; four checks run before any write, and a failed check leaves the file
 unchanged. For rename (正骨) items, mode=lsp_rename with new_name lets the hospital
 generate the patch itself via the LSP substrate (all referencing files already sit in
-scope_paths); the generated diff passes the same four checks. Falls back to
-submit_patch when no language server is on duty. verify_only replays the nursing checks for one item, or the whole
+scope_paths); the generated diff passes the same four checks. For G6 module-file
+items (N999), mode=lsp_move performs the file move via willRenameFiles: reference
+edits pass the same four checks, the move itself passes move-specific anchor/scope/
+content checks (new path must not exist, extension unchanged), then lands as
+write-new-delete-old with a v2 snapshot so rollback restores or deletes by path.
+new_path overrides the derived file name (same directory, same extension only).
+Falls back to submit_patch when no language server is on duty. verify_only replays the nursing checks for one item, or the whole
 prescription when item_id is empty, and returns status=verified. It does not
 modify source files or advance the next item. It runs an acceptance command
 only when that alias is already in the confirmed whitelist. resolve_conflict continues a failed item whose latest dose is

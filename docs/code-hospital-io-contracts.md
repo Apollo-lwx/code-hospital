@@ -851,11 +851,12 @@ graph LR
   "properties": {
     "prescription_id": {"type": "string", "pattern": "^rx_"},
     "item_id": {"type": "string", "default": "", "description": "默认下一味 pending"},
-    "mode": {"enum": ["apply", "submit_patch", "lsp_rename", "verify_only", "resolve_conflict"], "default": "apply"},
+    "mode": {"enum": ["apply", "submit_patch", "lsp_rename", "lsp_move", "verify_only", "resolve_conflict"], "default": "apply"},
     "patch_token": {"type": "string", "default": "", "description": "submit_patch 必填"},
     "snapshot_hash": {"type": "string", "default": "", "description": "submit_patch 必填，prepare 时下发原样回传"},
     "patch": {"type": "string", "default": "", "description": "submit_patch 必填，SEARCH/REPLACE 块或 unified diff"},
     "new_name": {"type": "string", "default": "", "description": "lsp_rename 必填，合法的新符号名"},
+    "new_path": {"type": "string", "default": "", "description": "lsp_move 可选，覆盖开方推导的新文件名（只准改文件名部分：同目录、同扩展名）"},
     "resolution": {"enum": ["manual_resolved", "retry", "skip_item", ""], "default": "", "description": "resolve_conflict 必填"},
     "dry_run": {"type": "boolean", "default": false},
     "follow_autofix": {"type": "boolean", "default": false, "description": "true 时同一次调用连续做完后续成药，遇到煎药、失败或 40 味上限停下。默认 false，仍一味一停"},
@@ -956,6 +957,8 @@ graph LR
 关键错误：`Conflict`（snapshot_hash 不匹配 → 重新取药，不耗重试额度）、`Overlimit`（patch 重试超 3 次）、`Forbidden`（内容关命中禁止项）、`InvalidOperation`（处方未批准）。**问题变体**：Q6 `patch_attempts_exhausted`（同项 3 次失败：跳过转外购 / 改签 / 终止施治，默认转外购不阻塞其他项）；Q7 `repeated_drift`（同 case 连续 2 次漂移，或 treat 模式 `stop_on_drift=true` 首次即问：停止施治 / 改签后继续）；Q8 `rollback_conflict`（挂起即问，与出参 C 并存）。
 
 护理里别名 `lint` 只检查本味 `scope_paths`。命令是 ruff 且说明里写了规则号时追加 `--select`。其它文件的问题不回滚本味。`test` 等别名仍整段执行。出院门禁仍是整仓。`follow_autofix=true` 在最后一味的出参上附加 `batch`。
+
+**lsp_move（G6 移动剂型，2026-11-23）**：只适用于正骨 G6（N999）入方项（药味带 `move_to`）。药房向语言服务发 `workspace/willRenameFiles` 收回结构化 payload（`move` + 编辑 hunk，文本 patch 表达不了移动）；编辑 hunk 过煎药同一条四道校验，移动本身过移动特例（旧路径必须存在、新路径撞名即拒、from/to 都在 scope_paths 内、扩展名不变）；落盘「写新删旧」（旧文件活到最后），快照 v2（`{path: content | null}`，null = 施治前不存在；恢复 = 写回 + 删除 + 空目录修剪 + 字节级断言）。剂量 `executor` 记 `lsp_move`，`patch_path` 指向渲染 diff（`rename from/to` 头 + 编辑 diff），结构化 payload 以 `.move.json` 存同目录。LSP 缺席 / 不认领 willRenameFiles / 应答意外即报错退回 `submit_patch`，不手搓 import 重写。已知盲区（字符串 import、importlib、模板/配置里的模块路径）写在药味 instructions。
 
 ### 3.6 `hosp_discharge`（复诊 + 门禁 + 出院）
 

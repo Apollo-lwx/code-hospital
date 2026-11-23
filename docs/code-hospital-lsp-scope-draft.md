@@ -104,7 +104,7 @@ PATH → 覆盖账写「<cmd> 未到岗」；拉起失败/超时 → 本轮降�
 |---|---|
 | ①（已落地） | client + registry + pool，references 三语言；正骨守门销账（跨文件守门 + G5 `__init__.py` 重导出） |
 | ②（已落地） | rename 方法 + WorkspaceEdit 翻译 + 药房 mode `lsp_rename`；跨文件引用发现扩 scope 入方。**G6 除外**（见下） |
-| ③ | G6 模块文件名（移动剂型专项）；Go 等语言按需入默认注册表；algorithms.md 两处二期标注 |
+| ③（G6 已落地） | G6 模块文件名（移动剂型专项，2026-11-23 实施：客户端 willRenameFiles 能力探测 + 药房 `lsp_move` + 快照 v2，见 code-hospital-move-formula-draft.md 定稿注）；Go 等语言按需入默认注册表；algorithms.md 两处二期标注 |
 | ④ | jdtls 重设备策略细化（跨门诊缓存等），按真实观察再议 |
 
 **G6（N999 模块文件名）评估（2026-11-23）：暂不接，留专项。** 文件移动与煎药管线
@@ -112,9 +112,10 @@ PATH → 覆盖账写「<cmd> 未到岗」；拉起失败/超时 → 本轮降�
 ② scope 关要求处方列全路径，而 willRenameFiles 的准确编辑清单施治时才返回；
 ③ 回滚是字节级逆应用，文件移动不在 patch 表达内。三个都指向同一个东西——
 药房需要「移动剂型」（move + 编辑 + 快照含移动的一等公民语义），这是独立的
-设计草案，不该夹带进符号改名。**专项草案已出（2026-11-23）**：
-code-hospital-move-formula-draft.md——三个不兼容各对应一个设计决定
-（锚点移动特例、scope 推导前移到开方、快照 schema v2 含存在性）。
+设计草案，不该夹带进符号改名。**专项已落地（2026-11-23）**：
+code-hospital-move-formula-draft.md（定稿）——三个不兼容各对应一个设计决定
+（锚点移动特例、scope 推导前移到开方、快照 schema v2 含存在性），
+真实观察见该草案定稿注（pyright OSS 不认领 willRenameFiles，按设计降级）。
 
 ## 5. 验收断言
 

@@ -6,6 +6,31 @@
 > **move + 编辑 + 含移动语义的快照，三者都是一等公民**。
 > 本草案只定设计，拍板后才动名册 YAML 与代码。
 
+> **定稿（2026-11-23 实施落地）**：一期已按本草案实施，回归 676 绿。
+> 实现注记与实测回填：
+> 1. **scope 推导手段**：实现用「开方时 willRenameFiles 干跑的编辑清单」替代
+>    §2 字面的 references——模块符号在文件内没有可定位的 references 查询
+>    位置，干跑返回的编辑文件集就是引用文件集的权威来源，且开方与施治同源
+>    （施治时再跑一次，实际触及 ⊆ scope 才放行，越出即拒）。§0 决定②的
+>    「推导前移到开方」意图不变。
+> 2. **实测矩阵回填**：pyright 1.1.414 **不认领** `workspace.fileOperations`
+>    （OSS 版没有移动文件重构，该能力在闭源 pylance）——pyright 下 G6 按设计
+>    降级：N999 不入方、待复核写明「语言服务没认领 willRenameFiles」，能力
+>    探测与降级链路经真机验证。tsls 未实测（本机 TS 7.0.2 native preview 与
+>    tsls 不适配）；jdtls 未测。认领该能力的服务可经 `catalog.lsp.languages`
+>    SPI 接入即用，无需改代码。
+> 3. **顺带修复存量缺陷**：`rename_line` 此前只在内存流转、未落库——
+>    lsp_rename 生产路径读回必「缺符号定位」。补 `rename_line` / `move_to`
+>    两列（迁移式 ALTER TABLE），lsp_rename 与 lsp_move 同愈。
+> 4. **快照 v2 落点**：`_restore_snapshot` 统一恢复（写回 + null 删除 +
+>    空目录修剪 + 逐字节断言），验收失败恢复与 resolve_conflict(skip_item)
+>    共用；`_manual_block` 对 null 项按「scope 内人工改动」收下。
+>    worktree 合回（`_settle_isolated`）同步学会 None 语义（删旧/写新）。
+> 5. **Windows 保案**：移动改的就是文件名大小写，移动链路全程用保案路径
+>    （`lsp/edits.py` 的 `_uri_path_cased`），比较时才 normcase。
+
+---
+
 ---
 
 ## 0. 三个结构性不兼容 → 三个设计决定
@@ -143,7 +168,8 @@
 
 ## 9. 开放问题
 
-- 各语言服务 `willRenameFiles` 能力实测矩阵（pyright / tsls / jdtls）——
-  一期到岗验证第一件事，结果回填 §7；
-- `N999` 入默认表 convention 的拍板与实施同步进行（§2 已记判据）；
-- 移动后 references 对账（§6 可选增强）按真实观察再议。
+- ~~各语言服务 `willRenameFiles` 能力实测矩阵~~ → 已回填（定稿注 2）：
+  pyright 不认领、tsls 环境不适配未实测、jdtls 未测；二期按实测逐个开；
+- ~~`N999` 入默认表 convention 的拍板~~ → 已拍板并实施（§2 判据）；
+- 移动后 references 对账（§6 可选增强）按真实观察再议——pyright 不认领的
+  现状下暂无真实场景可观察，等有认领该能力的服务接入再说。

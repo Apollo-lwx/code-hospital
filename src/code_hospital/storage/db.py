@@ -327,6 +327,10 @@ class Database:
             ("scope_lines_json", "TEXT NOT NULL DEFAULT '[]'"),
             ("formulary_conflict", "INTEGER NOT NULL DEFAULT 0"),
             ("conflict_reason", "TEXT NOT NULL DEFAULT ''"),
+            # rename_line 此前只在内存里流转、没落库——lsp_rename 读回即「缺符号定位」；
+            # move_to 是 G6 移动剂型推导的新路径（move-formula 草案）。
+            ("rename_line", "INTEGER NOT NULL DEFAULT 0"),
+            ("move_to", "TEXT NOT NULL DEFAULT ''"),
         ):
             if item_cols and name not in item_cols:
                 await self.conn.execute(f"ALTER TABLE prescription_items ADD COLUMN {name} {ddl}")
@@ -705,8 +709,8 @@ class Database:
             " target_file, target_symbol, method, instructions, acceptance_json, rollback,"
             " scope_paths_json, scope_symbols_json, risk, touches_manifest, amended_from,"
             " status, formula_id, parent_formula_id, specialty_id, scope_key,"
-            " scope_lines_json, formulary_conflict, conflict_reason)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " scope_lines_json, formulary_conflict, conflict_reason, rename_line, move_to)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             [
                 (
                     it["id"], header["id"], it["seq"], it["diagnosis_id"],
@@ -719,6 +723,7 @@ class Database:
                     it.get("specialty_id", ""), it.get("scope_key", ""),
                     json.dumps(it.get("scope_lines") or [], ensure_ascii=False),
                     int(it.get("formulary_conflict") or 0), it.get("conflict_reason") or "",
+                    int(it.get("rename_line") or 0), str(it.get("move_to") or ""),
                 )
                 for it in items
             ],
@@ -788,6 +793,8 @@ class Database:
                 "scope_lines": json.loads(r["scope_lines_json"] or "[]") if "scope_lines_json" in r.keys() else [],
                 "formulary_conflict": bool(r["formulary_conflict"]) if "formulary_conflict" in r.keys() else False,
                 "conflict_reason": r["conflict_reason"] if "conflict_reason" in r.keys() else "",
+                "rename_line": int(r["rename_line"]) if "rename_line" in r.keys() else 0,
+                "move_to": r["move_to"] if "move_to" in r.keys() else "",
             })
         return items
 

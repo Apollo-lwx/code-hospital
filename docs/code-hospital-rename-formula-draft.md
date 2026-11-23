@@ -32,8 +32,10 @@
 > 修订（2026-11-23）：LSP 基座一期（references）落地——§2 跨文件守门与 §6
 > `__init__.py` 重导出守门在 LSP 到岗时改为 references 销账（无跨文件引用照常入方、
 > 有引用写明证据），缺席时回退文本守门行为不变。见 code-hospital-lsp-scope-draft.md。
-> G6（N999）等二期 rename；移动剂型专项草案已出（2026-11-23），
-> 见 code-hospital-move-formula-draft.md，拍板后才动代码。
+> G6（N999）走移动剂型专项（code-hospital-move-formula-draft.md）。
+> 修订（2026-11-23 G6 落地）：移动剂型已实施——N999 入册，LSP 认领
+> `willRenameFiles` 时入方（scope = 新旧路径 ∪ 干跑引用集），药房走
+> `mode="lsp_move"`；不认领/缺席维持不入方、待复核写明原因。详见移动剂型草案定稿注。
 > 修订（2026-11-23 二期）：`touches_public_api` 升 high 改为**不升档**——命名不合规是
 > 告知级（nit）事项，正骨全组风险上限 medium、不进 user_required、不阻断流程：
 > 医生可以觉得名字不合规，不能强制人改名。仓外调用方不可见的风险改写进
@@ -73,7 +75,7 @@
 | G3 类名 | 定义 + 引用 | `N801`、`N818` | 单文件 | ✅ |
 | G4 模块级变量 | 全局 / 类作用域 | `N815`、`N816` | 单文件 | ✅ |
 | G5 import 别名 | 本文件绑定名 | `N811`、`N812`、`N813`、`N814`、`N817` | 单文件，但涉及外部包语义 | ✅ 第二批已落地（2026-11-20） |
-| G6 模块（文件）名 | 文件移动 | `N999` | 全仓 import 重写 | ❌ LSP 已到（2026-11-23），但文件移动与煎药管线结构性不兼容；移动剂型专项草案已出（code-hospital-move-formula-draft.md），拍板后接 |
+| G6 模块（文件）名 | 文件移动 | `N999` | 全仓 import 重写 | ✅ 移动剂型已落地（2026-11-23）：不走符号改名管线，`mode="lsp_move"`，前提 LSP 认领 `willRenameFiles`（pyright OSS 不认领，按设计降级不入方）；见 code-hospital-move-formula-draft.md |
 
 **为什么只有这类规则能进**：改名入方的前提是「新名字有机械判据」。PEP 8 规定了
 目标形态，宿主模型只做「现名 → 合规名」映射，不需要读懂业务语义。
@@ -167,7 +169,7 @@ acceptance_alias: test
 | 断言 | 含义 |
 |---|---|
 | 未启用不触发 | 仓库未在 `ruff_select` 启用 N 前缀时，无任何正骨入方 |
-| 组外不接 | `N999`（G6 模块文件名）的发现不入方，待复核并写明等 LSP |
+| 组外分诊 | `N999`（G6 模块文件名）不走本草案的符号改名管线：LSP 认领 `willRenameFiles` 时入方开移动剂型（`mode="lsp_move"`，见移动剂型草案），不认领/缺席不入方、待复核写明原因 |
 | G5 别名局部 | import 别名不做跨文件守门直接入方；`__init__.py` 里的别名（重导出名）入待复核写明 LSP001 |
 | 跨文件守门 | 符号被其他文件 import 的发现标待复核、不入方，诊断书写明原因 |
 | 公开 API 不升档 | `__all__` 收录符号的正骨项保持 `risk=medium`（不进 user_required），instructions 写明仓外风险提示 |

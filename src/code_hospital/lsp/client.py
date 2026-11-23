@@ -47,6 +47,7 @@ class Client:
         self._wlock = threading.Lock()   # stdin 写入（读帧线程要回服务器请求）
         self._opened: set[str] = set()
         self._diag: dict[str, threading.Event] = {}
+        self._will_rename = False   # 服务端声明的 workspace.fileOperations.willRenameFiles
         self._closed = False
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
         self._reader.start()
@@ -69,7 +70,7 @@ class Client:
         client = cls(spec, proc, root)
         try:
             root_uri = Path(root).as_uri()
-            client._request("initialize", {
+            initialized = client._request("initialize", {
                 # processId 给出去：医院进程死了，语言服务跟着退，不留孤儿进程。
                 "processId": os.getpid(),
                 "rootUri": root_uri,
@@ -77,8 +78,13 @@ class Client:
                 "capabilities": {
                     "window": {"workDoneProgress": True},
                     "textDocument": {"references": {"dynamicRegistration": False}},
+                    # 文件移动（G6/N999）的前提：客户端声明、服务端认领才发 willRenameFiles。
+                    "workspace": {"fileOperations": {"willRenameFiles": True}},
                 },
             }, timeout=spec.startup_timeout_s)
+            server_caps = (initialized or {}).get("capabilities") or {}
+            file_ops = (server_caps.get("workspace") or {}).get("fileOperations") or {}
+            client._will_rename = bool(file_ops.get("willRenameFiles"))
             client._notify("initialized", {})
         except BaseException:
             client.close()
@@ -148,6 +154,29 @@ class Client:
             raise LspError(f"{self._spec.id} 改名被拒（该位置可能不是可改名符号）")
         if not isinstance(result, dict):
             raise LspError("rename 应答不是 WorkspaceEdit")
+        return result
+
+    @property
+    def supports_will_rename(self) -> bool:
+        """服务端在 initialize 应答里认领了 workspace.fileOperations.willRenameFiles。"""
+        return self._will_rename
+
+    def will_rename_files(self, old_path: Path, new_path: Path) -> dict:
+        """workspace/willRenameFiles → WorkspaceEdit（不落盘，由 pool 规格化成移动 payload）。
+
+        应答 None 按空 edit 处理（服务声明支持但对这次移动没有引用要改）；
+        非 dict 是协议违约，抛 LspError。调用前先查 supports_will_rename。
+        """
+        if not self._will_rename:
+            raise LspError(f"{self._spec.id} 没认领 willRenameFiles，移动请求不该发")
+        self.did_open(old_path)
+        result = self._request("workspace/willRenameFiles", {
+            "files": [{"oldUri": old_path.as_uri(), "newUri": new_path.as_uri()}],
+        }, timeout=self._spec.request_timeout_s)
+        if result is None:
+            return {}
+        if not isinstance(result, dict):
+            raise LspError("willRenameFiles 应答不是 WorkspaceEdit")
         return result
 
     def close(self) -> None:

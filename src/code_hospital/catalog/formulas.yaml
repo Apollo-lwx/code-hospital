@@ -53,8 +53,10 @@
         - N813   # G5 import 别名：驼峰名按小写导入
         - N814   # G5 import 别名：驼峰名按常量导入
         - N817   # G5 import 别名：驼峰名按首字母缩写导入
+        - N999   # G6 模块文件名（文件移动，走 lsp_move 剂型；前提 LSP 认领 willRenameFiles）
       # G5 别名是本文件局部绑定，天然单文件闭包（__init__.py 重导出除外，入待复核）。
-      # 不接：G6 模块文件名 N999（等 LSP001）。
+      # G6 不做跨文件守门：scope 由开方侧 willRenameFiles 干跑的编辑清单推导，
+      # LSP 缺席/不认领时不入方、留待复核写明原因（move-formula 草案 §2）。
 - id: dedupe
   name: 去重
   method: llm_patch

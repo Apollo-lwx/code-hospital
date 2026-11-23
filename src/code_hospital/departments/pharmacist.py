@@ -46,7 +46,7 @@ from ..core.questions import ask, release
 from ..safety.acceptance import run_alias
 from ..storage.db import Database, hospital_root, now_ms
 
-_MODES = {"apply", "submit_patch", "lsp_rename", "verify_only", "resolve_conflict"}
+_MODES = {"apply", "submit_patch", "lsp_rename", "lsp_move", "verify_only", "resolve_conflict"}
 _RESOLUTIONS = {"manual_resolved", "retry", "skip_item"}
 _TOKEN_TTL_MS = 30 * 60 * 1000
 _MAX_ATTEMPTS = 3
@@ -192,11 +192,14 @@ async def dispense(
     follow_autofix: bool = False,
     project_root: str = "",
     new_name: str = "",
+    new_path: str = "",
     isolation: bool | None = None,
     assist: dict | None = None,
 ) -> dict:
     """hosp_dispense。默认一味一停；follow_autofix 时连续做完后续成药。
     lsp_rename：正骨味的机械改名（LSP 生成 patch，走同一条校验管线）。
+    lsp_move：正骨 G6 味的机械移动（willRenameFiles 生成结构化 payload，
+    移动特例四道校验 + 写新删旧落盘 + v2 快照；new_path 覆盖推导的新名）。
     isolation：git worktree 高危隔离当次覆盖——None 走仓级配置
     safety.worktree（never/high/always，默认 high，worktree 草案一期）。
     assist 是诊断侧的交卷契约，药房不消费——收下保持 MCP 调用面一致
@@ -204,7 +207,7 @@ async def dispense(
     from .reception import resolve_project_root
 
     if mode not in _MODES:
-        raise bad_argument("mode 须为 apply / submit_patch / lsp_rename / verify_only / resolve_conflict", target="mode")
+        raise bad_argument("mode 须为 apply / submit_patch / lsp_rename / lsp_move / verify_only / resolve_conflict", target="mode")
     if mode == "verify_only" and resolution:
         raise bad_argument("verify_only 不接收 resolution", target="resolution")
 
@@ -305,6 +308,8 @@ async def dispense(
                 )
             if mode == "lsp_rename":
                 return await _lsp_rename(db, root, case, rx, item, new_name, dry_run, isolation)
+            if mode == "lsp_move":
+                return await _lsp_move(db, root, case, rx, item, new_path, dry_run, isolation)
             blocked = await _admission_block(db, case, item)
             if blocked:
                 last = await _skip_admission(db, case, rx, item, blocked)
@@ -477,6 +482,260 @@ async def _lsp_rename(db, root, case, rx, item, new_name: str, dry_run: bool, is
     return await _run_isolated(root, item, workspace, _apply_patch_pipeline(
         db, root, case, rx, item, diff, dry_run, executor="lsp_rename", workspace=workspace,
     ))
+
+
+async def _lsp_move(db, root, case, rx, item, new_path: str, dry_run: bool, isolation: bool | None = None) -> dict:
+    """LSP 机械移动（G6 移动剂型，move-formula 草案）：willRenameFiles 生成
+    结构化 payload（move + 编辑 hunk），移动特例四道校验后「写新删旧」落盘，
+    快照/验收/剂量/护理与煎药同管。LSP 是更准的取数，煎与验还是医院的。"""
+    if item["formula_id"] != "rename" or not item.get("move_to"):
+        raise invalid_operation("机械移动只适用于正骨 G6（模块文件名）煎药味", target="mode")
+    from_path = normalize_path(item["target_file"])
+    to_path = _move_target(from_path, str(new_path or "").strip() or str(item["move_to"]))
+    from ..lsp.pool import Pool
+
+    with Pool(root) as pool:
+        payload = pool.move_payload(from_path, to_path)
+        notes = pool.notes()
+    if payload is None:
+        detail = "；".join(notes)[:240] or "原因未知"
+        raise invalid_operation(
+            f"LSP 基座机械移动没跑成：{detail}",
+            target="mode", next_action="退回煎药流程：mode=apply 取药后 submit_patch",
+        )
+    workspace = _maybe_isolate(root, item, isolation, dry_run)
+    return await _run_isolated(root, item, workspace, _apply_move_pipeline(
+        db, root, case, rx, item, payload, dry_run, executor="lsp_move", workspace=workspace,
+    ))
+
+
+def _move_target(from_path: str, to_input: str) -> str:
+    """施治的新路径：默认开方推导值，用户 new_path 覆盖——只准改文件名部分。
+
+    目录归属、文件类型（扩展名）、.hospital 都不在本剂型内（move-formula 草案 §2/§8）。
+    """
+    rel = normalize_path(to_input).lstrip("/")
+    if not rel or ".." in Path(rel).parts:
+        raise bad_argument("new_path 必须是仓库内的相对路径", target="new_path")
+    if ".hospital" in Path(rel).parts:
+        raise bad_argument("new_path 不能落进 .hospital/", target="new_path")
+    old = Path(from_path)
+    new = Path(rel)
+    if new.parent != old.parent:
+        raise bad_argument("机械移动只改文件名部分，目录归属不在本剂型内", target="new_path")
+    if new.suffix != old.suffix:
+        raise bad_argument("机械移动不改文件类型（扩展名必须与现名一致）", target="new_path")
+    if rel == from_path:
+        raise bad_argument("新路径与现路径相同，没有可执行的移动", target="new_path")
+    if not new.stem:
+        raise bad_argument("new_path 的文件名不能为空", target="new_path")
+    return rel
+
+
+def _validate_move(from_rel: str, to_rel: str, files: dict, scope_paths: list[str], base: Path) -> CheckResult:
+    """四道校验的移动特例（move-formula 草案 §4）：编辑 hunk 走通用校验，
+    MOVE 操作本身在这里过 anchor/scope/content 三道（format 对 MOVE 不计行数）。"""
+    # anchor：旧路径必须存在、新路径必须不存在（撞名即拒）、新路径越不出仓库。
+    if files.get(from_rel) is None:
+        return CheckResult(False, "anchor", "NotFound",
+                           f"移动源文件不存在：{from_rel}", "确认 target_file 后重试")
+    if (base / to_rel).exists():
+        return CheckResult(False, "anchor", "Conflict",
+                           f"新路径已存在：{to_rel}（撞名即拒）", "换个新名（new_path）或改签处方")
+    resolved_base = base.resolve()
+    resolved_to = (base / to_rel).resolve()
+    if resolved_to != resolved_base and resolved_base not in resolved_to.parents:
+        return CheckResult(False, "anchor", "Forbidden",
+                           f"新路径越出仓库：{to_rel}", "new_path 只准改文件名部分")
+    # scope：from 与 to 都必须在处方 scope_paths 内（施治时不得冒出 scope 外的新文件）。
+    allowed = {normalize_path(p) for p in scope_paths}
+    if from_rel not in allowed or to_rel not in allowed:
+        return CheckResult(False, "scope", "Forbidden",
+                           f"移动 {from_rel} → {to_rel} 越出处方范围 {sorted(allowed)}",
+                           "本味药不可越界；如需改动请改签处方")
+    if ".hospital" in to_rel.split("/"):
+        return CheckResult(False, "scope", "Forbidden", f"禁止改动病历目录：{to_rel}", "病历不可篡改")
+    # content：扩展名必须一致（防「改名顺手改类型」）。
+    if Path(to_rel).suffix != Path(from_rel).suffix:
+        return CheckResult(False, "content", "Forbidden",
+                           "移动不改文件类型（扩展名必须与现名一致）", "改签处方")
+    return CheckResult(True, "all")
+
+
+async def _apply_move_pipeline(db, root, case, rx, item, payload: dict, dry_run: bool, executor: str, workspace: str | None = None) -> dict:
+    """移动剂型的施治管：编辑 hunk 过煎药同一条四道校验，MOVE 走特例，
+    落盘「写新删旧」（旧文件活到最后），快照 v2（新路径记 null）。
+    验收 / 剂量记录 / 护理核查 / 处方报告全部复用煎药那套。"""
+    move = payload["move"]
+    hunks = payload["edits"]
+    from_rel = normalize_path(move["from"])
+    to_rel = normalize_path(move["to"])
+    scope = item["scope_paths"] or ([item["target_file"]] if item["target_file"] else [])
+    scope_norm = [normalize_path(p) for p in scope]
+    if any(".hospital" in p.split("/") for p in scope_norm):
+        raise forbidden("处方范围含 .hospital/，拒绝施治", target="scope_paths")
+    base = Path(workspace or root)
+    # v2 快照语义：scope 内存在的文件持内容；施治前不存在的（新路径）持 None。
+    before: dict[str, str | None] = {}
+    for rel in scope_norm:
+        target = base / rel
+        before[rel] = target.read_text(encoding="utf-8", errors="replace") if target.is_file() else None
+    existing = {rel: text for rel, text in before.items() if text is not None}
+    # 编辑 hunk 的校验文件映射：scope 内现有文件 + hunk 实际触及的现有文件
+    # （触及 scope 外文件时锚点先读得到内容、scope 关再给准确拒因）。
+    edit_map = dict(existing)
+    for hunk in hunks:
+        rel = normalize_path(hunk.path)
+        if rel not in edit_map and (base / rel).is_file():
+            edit_map[rel] = _read(base / rel)
+    if hunks:
+        checked = validate_patch(
+            hunks, edit_map, scope_norm, allow_manifest=bool(item.get("touches_manifest")),
+        )
+        if not checked.ok:
+            _fail_check(checked, await _burn_attempt(db, item))
+    checked = _validate_move(from_rel, to_rel, existing, scope_norm, base)
+    if not checked.ok:
+        _fail_check(checked, await _burn_attempt(db, item))
+    try:
+        after = apply_hunks(edit_map, hunks) if hunks else dict(edit_map)
+    except PatchParseError as exc:
+        await _burn_attempt(db, item)
+        raise invalid_operation(str(exc)[:300], target="patch") from exc
+    # 落盘三步序（崩溃安全，「写新删旧」不是 OS rename，move-formula 草案 §3.4）：
+    # ① 编辑后的旧内容写入新路径；② 引用文件编辑落盘；③ 删旧路径。
+    # ③ 之前任何一步失败旧文件都还在；② 中途失败有部分引用已改，靠 git 人工清
+    # （此刻快照未落盘，与煎药管线的崩溃窗口同量级）。
+    moved = after.get(from_rel, existing[from_rel])
+    landing: list[tuple[str, str]] = [(to_rel, moved)]
+    for rel, new in sorted(after.items()):
+        if rel == from_rel or new == before.get(rel):
+            continue
+        landing.append((rel, new))
+    chunks = [f"rename from {from_rel}\nrename to {to_rel}\n"]
+    for rel, new in sorted(after.items()):
+        old = before.get(rel)
+        if old is not None and new != old:
+            chunks.append(_unified(rel, old, new))
+    diff = "".join(chunks)
+    dose = {
+        "id": new_id("dose"),
+        "item_id": item["id"],
+        "round": case.round,
+        "executor": executor,
+        "patch_path": "",
+        "snapshot_hash": "",
+        "diff_stat": _diff_stat(diff),
+        "result": "success",
+        "error": "",
+        "created_at": now_ms(),
+    }
+    nursing = {
+        "env_precheck": "skipped",
+        "scope_check": "pass",
+        "content_check": "pass",
+        "acceptance": "skipped",
+        "verdict": "pass",
+        "drift_files": [],
+        "logs": [],
+    }
+    if dry_run:
+        return {
+            "status": "dry_run",
+            "item_id": item["id"],
+            "dose": {**dose, "patch_path": ""},
+            "nursing": nursing,
+            "case_status": case.status,
+            "next_item_id": item["id"],
+            "diff": diff[:4000],
+            "handoff": _handoff(case.id, item["id"], item["id"], True),
+        }
+    for rel, content in landing:
+        dest = base / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(content, encoding="utf-8")
+    try:
+        (base / from_rel).unlink()
+    except OSError as exc:
+        raise invalid_operation(
+            f"新路径与引用已落盘，但删除旧文件失败：{exc}。仓库处于新旧并存态，"
+            "请人工删除旧文件后按护理记录核对",
+            target="target_file",
+        ) from exc
+    _prune_empty_dirs((base / from_rel).parent, base)
+    stored = hospital_root(root) / "patches" / case.id / f"{item['id']}-r{case.round}.diff"
+    stored.parent.mkdir(parents=True, exist_ok=True)
+    stored.write_text(diff, encoding="utf-8")
+    # 结构化 payload 同目录存档（给人看的 diff 之外，机器可复盘的原始操作单）。
+    stored.with_suffix(".move.json").write_text(json.dumps({
+        "move": move,
+        "edits": [
+            {"path": h.path, "search": h.search, "replace": h.replace, "line_hint": h.line_hint}
+            for h in hunks
+        ],
+    }, ensure_ascii=False, indent=1), encoding="utf-8")
+    dose["patch_path"] = str(stored)
+    rejected = await _reject_if_acceptance_failed(db, root, case, rx, item, before, nursing, workspace=workspace)
+    if rejected is not None:
+        return rejected
+    if workspace is not None:
+        settled = await _settle_isolated(
+            db, root, workspace, case, rx, item, before,
+            {**{rel: None for rel in [from_rel]}, **{rel: content for rel, content in landing}},
+            executor, nursing,
+        )
+        if settled is not None:
+            return settled
+    _write_snapshot(root, case.id, item["id"], case.round, before)
+    await db.insert_dose(dose)
+    await db.update_prescription_item(item["id"], status="applied", patch_token="", token_expires_at=0)
+    item["status"] = "applied"
+    nursing = await _record_nursing(db, case.id, item["id"], nursing)
+    _append_report(root, case, item, dose, nursing)
+    return await _finish(db, case, rx, item, dose, nursing, applied=True)
+
+
+def _prune_empty_dirs(start: Path, stop: Path) -> None:
+    """逐级向上修剪空目录，收到 root 为止（绝不动 root 本身，move-formula 草案 §5）。"""
+    stop = stop.resolve()
+    current = start
+    while True:
+        resolved = current.resolve()
+        if resolved == stop or stop not in resolved.parents:
+            return
+        try:
+            current.rmdir()
+        except OSError:
+            return
+        current = current.parent
+
+
+def _restore_snapshot(base: Path, before: dict) -> list[str]:
+    """按快照恢复工作区，返回恢复后字节级比对不一致的清单（空 = 全对）。
+
+    v2 语义（move-formula 草案 §5）：content → 写回；None → 文件存在即删 +
+    空目录修剪。恢复断言是本函数的一部分：写回读回不逐字节一致、或 None
+    路径恢复后仍存在，都进返回清单，由调用方挂起（rollback_conflict）。
+    """
+    bad: list[str] = []
+    for rel, text in before.items():
+        dest = base / rel
+        if text is None:
+            if dest.exists():
+                try:
+                    dest.unlink()
+                except OSError:
+                    bad.append(rel)
+                    continue
+            _prune_empty_dirs(dest.parent, base)
+            if dest.exists():
+                bad.append(rel)
+            continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(text, encoding="utf-8")
+        if _read(dest) != text:
+            bad.append(rel)
+    return bad
 
 
 def _maybe_isolate(root: str, item: dict, isolation: bool | None, dry_run: bool) -> str | None:
@@ -884,10 +1143,12 @@ def _snapshot_path(root: str, case_id: str, item_id: str, round_: int) -> Path:
 
 
 def _write_snapshot(root: str, case_id: str, item_id: str, round_: int, before: dict) -> tuple[str, str]:
+    """快照 v2（move-formula 草案 §5）：{path: content | null}，null = 施治前不存在。
+    v1（全 content）是它的子集，读取侧兼容两种。"""
     path = _snapshot_path(root, case_id, item_id, round_)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(before, ensure_ascii=False), encoding="utf-8")
-    return str(path), _sha("\n".join(before.values()))
+    return str(path), _sha("\n".join(text for text in before.values() if isinstance(text, str)))
 
 
 def _load_snapshot(root: str, case_id: str, item_id: str, round_: int) -> dict:
@@ -900,13 +1161,20 @@ def _load_snapshot(root: str, case_id: str, item_id: str, round_: int) -> dict:
         raise invalid_operation("本味快照无法读取", target="item_id") from exc
     if not isinstance(loaded, dict):
         raise invalid_operation("本味快照无法读取", target="item_id")
-    return {str(key): str(value) for key, value in loaded.items()}
+    # v2 的 null 原样保留（恢复时 = 删除）；v1 全 str 行为不变。
+    return {str(key): (None if value is None else str(value)) for key, value in loaded.items()}
 
 
 def _manual_block(before: dict, current: dict, spans: list) -> str:
-    """现状相对快照仍越界时返回原因。范围内的人工改动可以收下，越界行不悄悄裁掉。"""
+    """现状相对快照仍越界时返回原因。范围内的人工改动可以收下，越界行不悄悄裁掉。
+    v2：快照为 None 的项（移动产生的新路径）跳过越界检查——它在 scope 内，
+    人工留着、改空或删掉都算范围内的人工改动（move-formula 草案 §5）。"""
     for rel, old in before.items():
-        new = current.get(rel, "")
+        if old is None:
+            continue
+        new = current.get(rel)
+        if new is None:
+            new = ""
         if ".hospital" in Path(rel).parts:
             return "改动落入 .hospital/"
         if old == new:
@@ -1192,7 +1460,10 @@ async def _resolve_conflict(db, root, case, rx, item_id: str, resolution: str, s
             next_action="只有逆应用冲突的药味可以续行",
         )
     before = _load_snapshot(root, case.id, item["id"], case.round)
-    current = {rel: _read(Path(root) / rel) for rel in before}
+    current = {
+        rel: (_read(Path(root) / rel) if (Path(root) / rel).is_file() else None)
+        for rel in before
+    }
     spans = item.get("scope_lines") or []
     if resolution == "skip_item":
         return await _skip_conflict(db, root, case, rx, item, before)
@@ -1202,11 +1473,14 @@ async def _resolve_conflict(db, root, case, rx, item_id: str, resolution: str, s
 
 
 async def _skip_conflict(db, root, case, rx, item, before: dict) -> dict:
-    base = Path(root)
-    for rel, text in before.items():
-        dest = base / rel
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(text, encoding="utf-8")
+    bad = _restore_snapshot(Path(root), before)
+    if bad:
+        # 恢复到快照都恢复不干净：不装没事，再挂一次让人工处理工作区。
+        return await _rollback_conflict(
+            db, root, case, rx, item, "resolve_conflict:skip_item", bad,
+            f"快照恢复不一致（{'、'.join(bad[:3])}），请人工核对工作区后续行",
+            before,
+        )
     dose = _resolution_dose(item, case.round, "resolve_conflict:skip_item", before, "", "reverted")
     await db.insert_dose(dose)
     await db.update_prescription_item(item["id"], status="skipped")
@@ -1220,16 +1494,21 @@ async def _skip_conflict(db, root, case, rx, item, before: dict) -> dict:
 
 
 async def _retry_conflict(db, root, case, rx, item, before: dict, current: dict, spans: list) -> dict:
-    if all(before[rel] == current.get(rel, "") for rel in before):
+    if all(before[rel] == current.get(rel) for rel in before):
         return _blocked(
             item, "resolve_conflict:retry", [], "工作区与快照一致，没有可重试的差异", case.status,
         )
-    kept: dict[str, str] = {}
+    kept: dict[str, str | None] = {}
     drift_files: list[str] = []
     conflict = ""
     conflict_files: list[str] = []
     for rel, old in before.items():
-        text, drifted, reason = _settle_drift(rel, old, current[rel], spans)
+        if old is None:
+            # v2：移动产生的新路径——人工留着/改空/删掉都算范围内的人工改动，原样收下。
+            kept[rel] = current.get(rel)
+            continue
+        now = current.get(rel)
+        text, drifted, reason = _settle_drift(rel, old, "" if now is None else now, spans)
         if reason:
             conflict = conflict or reason
             conflict_files.append(rel)
@@ -1247,7 +1526,7 @@ async def _retry_conflict(db, root, case, rx, item, before: dict, current: dict,
         revert = "".join(
             _unified(rel, current[rel], kept[rel])
             for rel in drift_files
-            if current[rel] != kept[rel]
+            if current[rel] != kept[rel] and isinstance(current[rel], str) and isinstance(kept[rel], str)
         )
         if revert:
             path = hospital_root(root) / "patches" / case.id / f"{item['id']}-r{case.round}.revert.diff"
@@ -1273,10 +1552,20 @@ async def _accept_resolution(
     base = Path(root)
     for rel, text in kept.items():
         dest = base / rel
-        if _read(dest) != text:
+        if text is None:
+            # v2：收下「该文件不存在」——存在即删 + 空目录修剪。
+            if dest.exists():
+                dest.unlink()
+            _prune_empty_dirs(dest.parent, base)
+            continue
+        if not dest.is_file() or _read(dest) != text:
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_text(text, encoding="utf-8")
-    diff = "".join(_unified(rel, old, kept[rel]) for rel, old in before.items() if kept[rel] != old)
+    diff = "".join(
+        _unified(rel, old, kept[rel])
+        for rel, old in before.items()
+        if kept.get(rel) != old and isinstance(old, str) and isinstance(kept.get(rel), str)
+    )
     patch_path = ""
     if diff:
         dest = hospital_root(root) / "patches" / case.id / f"{item['id']}-r{case.round}.diff"
@@ -1313,7 +1602,7 @@ def _resolution_dose(item, round_: int, executor: str, before: dict, patch_path:
         "round": round_,
         "executor": executor,
         "patch_path": patch_path,
-        "snapshot_hash": _sha("\n".join(before.values())),
+        "snapshot_hash": _sha("\n".join(text for text in before.values() if isinstance(text, str))),
         "diff_stat": "+0/-0",
         "result": result,
         "error": "",
@@ -1351,10 +1640,14 @@ async def _reject_if_acceptance_failed(db, root, case, rx, item, before: dict, n
     if result["verdict"] != "fail":
         return None
     base = Path(workspace or root)
-    for rel, text in before.items():
-        dest = base / rel
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(text, encoding="utf-8")
+    bad = _restore_snapshot(base, before)
+    if bad:
+        # 恢复断言不过（字节级比对不一致 / null 路径仍在）：不装没事，挂起续行。
+        return await _rollback_conflict(
+            db, root, case, rx, item, "acceptance", bad,
+            f"验收未通过且快照恢复不一致（{'、'.join(bad[:3])}），已挂起",
+            {rel: text for rel, text in before.items()},
+        )
     message = f"验收未通过，本味已回到快照：{result['detail']}"
     if workspace:
         message = f"隔离间验收未通过，主仓未受影响：{result['detail']}"
@@ -1368,10 +1661,33 @@ async def _reject_if_acceptance_failed(db, root, case, rx, item, before: dict, n
 
 async def _settle_isolated(db, root, workspace, case, rx, item, before: dict, after: dict, executor: str, nursing: dict) -> dict | None:
     """合回（worktree 草案 §3 拍的文件复制）：drift 检查 → 复制 → 字节级比对 → 主仓复验。
-    返回 None = 合回成功，继续走快照/剂量；否则是挂起（漂移，现场保留）或失败 payload。"""
+    返回 None = 合回成功，继续走快照/剂量；否则是挂起（漂移，现场保留）或失败 payload。
+    v2：before/after 值为 None 表示该文件在该侧不存在（移动剂型的删旧/写新）。"""
     main = Path(root)
+
+    def drift(rel: str) -> bool:
+        old = before.get(rel)
+        if old is None:
+            return (main / rel).exists()  # 快照侧不存在 → 主仓冒出同名文件就是漂移
+        return _read(main / rel) != old
+
+    def put(rel: str, text) -> None:
+        dest = main / rel
+        if text is None:
+            if dest.exists():
+                dest.unlink()
+            _prune_empty_dirs(dest.parent, main)
+            return
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(text, encoding="utf-8")
+
+    def holds(rel: str, text) -> bool:
+        if text is None:
+            return not (main / rel).exists()
+        return _read(main / rel) == text
+
     touched = [rel for rel, new in after.items() if new != before.get(rel)]
-    drifted = [rel for rel in touched if _read(main / rel) != before[rel]]
+    drifted = [rel for rel in touched if drift(rel)]
     if drifted:
         shown = "、".join(drifted[:3]) + (" 等" if len(drifted) > 3 else "")
         return await _rollback_conflict(
@@ -1381,13 +1697,11 @@ async def _settle_isolated(db, root, workspace, case, rx, item, before: dict, af
             before,
         )
     for rel in touched:
-        dest = main / rel
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(after[rel], encoding="utf-8")
-    mismatch = [rel for rel in touched if _read(main / rel) != after[rel]]
+        put(rel, after[rel])
+    mismatch = [rel for rel in touched if not holds(rel, after[rel])]
     if mismatch:
         for rel in touched:
-            (main / rel).write_text(before[rel], encoding="utf-8")
+            put(rel, before.get(rel))
         return await _fail(
             db, case, rx, item,
             f"合回字节级比对失败（{'、'.join(mismatch[:3])}），主仓已恢复", executor,
@@ -1407,7 +1721,7 @@ async def _settle_isolated(db, root, workspace, case, rx, item, before: dict, af
     if result["verdict"] != "fail":
         return None
     for rel in touched:
-        (main / rel).write_text(before[rel], encoding="utf-8")
+        put(rel, before.get(rel))
     return await _fail(
         db, case, rx, item,
         f"主仓复验未通过，已回到合回前：{result['detail']}",

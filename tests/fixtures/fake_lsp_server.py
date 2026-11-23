@@ -72,7 +72,11 @@ def main():
         if ident is None:
             continue  # 其余通知（initialized 等）不应答
         if method == "initialize":
-            _send(stdout, {"jsonrpc": "2.0", "id": ident, "result": {"capabilities": {}}})
+            # FAKE_LSP_WILL_RENAME_CAP=1 时认领 willRenameFiles（G6 移动剂型能力探测）。
+            capabilities = {}
+            if os.environ.get("FAKE_LSP_WILL_RENAME_CAP"):
+                capabilities = {"workspace": {"fileOperations": {"willRenameFiles": True}}}
+            _send(stdout, {"jsonrpc": "2.0", "id": ident, "result": {"capabilities": capabilities}})
         elif method == "textDocument/prepareRename":
             params = message.get("params") or {}
             pos = params.get("position") or {}
@@ -86,6 +90,14 @@ def main():
         elif method == "textDocument/rename":
             # FAKE_LSP_RENAME：JSON 形态的 WorkspaceEdit（changes 形态）
             raw = os.environ.get("FAKE_LSP_RENAME") or "{}"
+            try:
+                edit = json.loads(raw)
+            except json.JSONDecodeError:
+                edit = {}
+            _send(stdout, {"jsonrpc": "2.0", "id": ident, "result": edit or None})
+        elif method == "workspace/willRenameFiles":
+            # FAKE_LSP_WILL_RENAME：JSON 形态的 WorkspaceEdit（changes 形态）
+            raw = os.environ.get("FAKE_LSP_WILL_RENAME") or "{}"
             try:
                 edit = json.loads(raw)
             except json.JSONDecodeError:

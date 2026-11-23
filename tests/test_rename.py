@@ -58,8 +58,9 @@ def test_rename_rules_enumerated_and_active():
     assert {"N801", "N802", "N803", "N804", "N805", "N806", "N807", "N815", "N816", "N818"} <= names
     # G5 import 别名（第二批）已入册
     assert {"N811", "N812", "N813", "N814", "N817"} <= names
-    # G6 模块文件名不在范围内
-    assert "N999" not in names
+    # G6 模块文件名（N999）已入册：走移动剂型（move-formula 草案），
+    # 入方前提 LSP 认领 willRenameFiles，缺席/不支持在开方侧拦截不入方。
+    assert "N999" in names
     # phase 已降到 1：真实仓观察通过后转正，直接可匹配
     assert formula.phase == 1
     matched = match_finding("ruff", "N802", "minor")

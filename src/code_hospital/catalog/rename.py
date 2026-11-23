@@ -32,8 +32,24 @@ G1_LOCAL_RULES = frozenset({"N803", "N806"})
 # 文本守门推不出包名，直接入待复核（等 LSP001）。
 G5_ALIAS_RULES = frozenset({"N811", "N812", "N813", "N814", "N817"})
 
+# G6 模块文件名（N999）：文件移动不是符号改名，走移动剂型（move-formula 草案）。
+# 入方前提是 LSP 到岗且认领 willRenameFiles；缺席/不支持不入方，留待复核写明原因。
+G6_MODULE_RULES = frozenset({"N999"})
+
 # 同规则同文件的簇数达到这个阈值，合并成一味「批量迁移」外购药。
 RENAME_BATCH_MIN = 20
+
+
+def module_snake_name(stem: str) -> str:
+    """N999 新名推导：模块名 → snake_case（机械映射，与 G1–G5 的「新名有机械判据」同源）。
+
+    FooBar → foo_bar；my-module → my_module；HTTPResponse → http_response。
+    只处理文件名主体，目录归属与扩展名不在推导范围（move-formula 草案 §2/§8）。
+    """
+    cleaned = re.sub(r"[^0-9A-Za-z]+", "_", str(stem or ""))
+    s1 = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", cleaned)
+    s2 = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", s1)
+    return re.sub(r"_+", "_", s2).strip("_").lower()
 
 _SKIP_DIRS = {".git", ".hospital", ".venv", "venv", "node_modules", "target", "build", "__pycache__"}
 _SCAN_CAP = 3000

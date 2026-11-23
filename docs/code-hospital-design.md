@@ -914,6 +914,12 @@ graph LR
 
 ## 附录：修订记录
 
+### v1.11 → v1.12（G6 移动剂型一期落地，1 条，含影响面）
+
+| # | 评审意见 | 合入位置 | 影响面 |
+|---|---|---|---|
+| 1 | move-formula 草案拍板落地：正骨 G6（N999 模块文件名）接入——文件移动是 move + 编辑 + 含移动语义的快照，三者都是一等公民。LSP 客户端声明并探测 `workspace.fileOperations.willRenameFiles`（initialize 应答解析）；开方侧 N999 入方前提「LSP 到岗且认领」，scope 用 willRenameFiles 干跑的编辑清单推导（新旧路径 ∪ 引用文件集），新名 snake_case 机械推导，批量（全仓 ≥20 个文件）合并外购 manual，N999 同步入处置矩阵默认表 convention（默认告知）；药房新 mode `lsp_move`（payload 结构化不走文本 patch，编辑 hunk 过煎药同一条四道校验，MOVE 走移动特例：旧路径必须存在/新路径撞名即拒/from∩to ⊆ scope/扩展名不变；落盘「写新删旧」旧文件活到最后；快照升 schema v2 `{path: content\|null}`，恢复 = 写回 + 删除 + 空目录修剪 + 逐字节断言，`resolve_conflict` 全家学会 null 语义；worktree 合回同步学会 None）。`hosp_dispense` 增 `new_path` 入参（只准改文件名部分）。真实观察：pyright 1.1.414 **不认领** willRenameFiles（OSS 无移动文件重构，能力在闭源 pylance）——能力探测与「不入方、待复核写明原因」降级链路经真机验证；tsls 因本机 TS 7.0.2 native preview 不适配未实测。顺带修复存量缺陷：`rename_line` 未落库（lsp_rename 生产路径必「缺符号定位」），补 `rename_line`/`move_to` 两列（迁移式 ALTER TABLE）；Windows 下移动链路全程保案路径（normcase 会抹掉 FooBar→foo_bar 的大小写信息） | move-formula 草案（定稿）；`lsp/client.py`/`pool.py`/`edits.py`；开方 `_draft_g6_module`/`_draft_g6_batch`；药房 `_lsp_move`/`_apply_move_pipeline`/`_restore_snapshot`；`catalog/rename.py`（`module_snake_name`）；`catalog/dispositions.py`；名册 formulas.yaml；`storage/db.py`；契约 §3.5 | **行为新增**（此前 N999 在名册层不入方，现 LSP 认领时入方开移动剂型；不认领/缺席时行为与现状逐字节一致）；新增 mode + 入参；DB 加两列（迁移式，旧库自动补） |
+
 ### v1.10 → v1.11（git worktree 高危隔离一期，1 条，含影响面）
 
 | # | 评审意见 | 合入位置 | 影响面 |

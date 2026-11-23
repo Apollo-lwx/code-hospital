@@ -78,6 +78,10 @@ class Disposition:
 DEFAULT_DISPOSITIONS: tuple[Disposition, ...] = (
     # ruff N8xx 命名族（正骨）：医生可以觉得名字不合规，不能强制人改名。
     Disposition("N8*", cls="convention"),
+    # G6 模块文件名（N999，move-formula 草案拍板收入）：与 N8 族同一判据——
+    # 命名不合规不造成功能错误，默认告知、include_advisory 点名才治。
+    # N8* 前缀匹配不到 N999，单列。
+    Disposition("N999", cls="convention"),
     # ESLint / TS 命名约定同上。
     Disposition("naming-convention", cls="convention"),
     Disposition("@typescript-eslint/naming-convention", cls="convention"),

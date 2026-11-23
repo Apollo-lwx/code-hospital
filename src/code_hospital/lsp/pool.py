@@ -13,7 +13,7 @@ from pathlib import Path
 
 from . import registry
 from .client import Client, LspError
-from .edits import EditApplyError, to_diff, uri_path
+from .edits import EditApplyError, move_hunks, to_diff, uri_path
 from .registry import LanguageSpec
 
 _NOTE_CAP = 20
@@ -137,6 +137,64 @@ class Pool:
             self._note(f"LSP 基座：{spec.id} 改名产物为空（位置可能不对）")
             return None
         return diff
+
+    def move_support(self, file_path: str) -> bool | None:
+        """本语言 LSP 是否认领了 willRenameFiles。None = LSP 缺席，False = 在岗但不支持。
+
+        能力探测（G6 移动剂型的入方前提）：initialize 时客户端声明
+        workspace.fileOperations.willRenameFiles，这里报服务端的认领结果。
+        """
+        if self._closed:
+            return None
+        ext = Path(file_path).suffix.lower()
+        spec = self._by_ext.get(ext)
+        if spec is None:
+            return None
+        client = self._client_for(spec)
+        if client is None:
+            return None
+        if not client.supports_will_rename:
+            self._note(f"LSP 基座：{spec.id} 没认领 willRenameFiles，机械移动不可用")
+            return False
+        return True
+
+    def move_payload(self, file_path: str, new_file_path: str) -> dict | None:
+        """willRenameFiles → 结构化移动 payload。None = LSP 缺席 / 不支持 / 应答意外。
+
+        payload = {"move": {"from", "to"}, "edits": [Hunk...]}——移动操作与
+        引用编辑分开持（move-formula 草案 §1：payload 结构化，不走文本 patch）。
+        编辑键法（被移动文件自身键旧/新 URI）在 edits.move_hunks 规格化，
+        实测键法记台账；意外（文件级操作、双键同现、落到仓外）拒绝不猜。
+        """
+        if self._closed:
+            return None
+        ext = Path(file_path).suffix.lower()
+        spec = self._by_ext.get(ext)
+        if spec is None:
+            return None
+        old_rel = str(file_path or "").replace("\\", "/")
+        new_rel = str(new_file_path or "").replace("\\", "/")
+        old_abs = Path(self._root) / old_rel
+        new_abs = Path(self._root) / new_rel
+        if not old_rel or not new_rel or not old_abs.is_file():
+            return None
+        client = self._client_for(spec)
+        if client is None:
+            return None
+        if not client.supports_will_rename:
+            self._note(f"LSP 基座：{spec.id} 没认领 willRenameFiles，机械移动没跑")
+            return None
+        try:
+            edit = client.will_rename_files(old_abs, new_abs)
+            hunks, keying = move_hunks(self._root, edit, old_abs, new_abs)
+        except (LspError, EditApplyError, OSError) as exc:
+            self._note(f"LSP 基座：{spec.id} 机械移动失败（{exc}）")
+            return None
+        self._note(
+            f"LSP 基座：{spec.id} 移动编辑键法={keying}"
+            + ("（对被移动文件自身的编辑已规格化到旧路径）" if keying != "none" else "（被移动文件自身无编辑）")
+        )
+        return {"move": {"from": old_rel, "to": new_rel}, "edits": hunks}
 
     def close(self) -> None:
         """门诊结束统一退。每个客户端自己 shutdown/exit，对面不听话就杀。"""
