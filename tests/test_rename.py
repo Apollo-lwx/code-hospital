@@ -90,6 +90,63 @@ def test_cross_file_reference_clean_when_unreferenced(tmp_path: Path):
     assert cross_file_reference(str(tmp_path), "src/a.py", "Foo") is False
 
 
+# ---------- 三期：文本守门算法升级 ----------
+
+
+def test_cross_file_reference_ignores_comments(tmp_path: Path):
+    """注释里提到 from a import Foo 不算引用（误拦主力场景）。"""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.py").write_text("def Foo():\n    return 1\n", encoding="utf-8")
+    (tmp_path / "src" / "b.py").write_text(
+        "# 以前用 from a import Foo，现在不用了\ndef other():\n    return 2\n",
+        encoding="utf-8",
+    )
+    assert cross_file_reference(str(tmp_path), "src/a.py", "Foo") is False
+
+
+def test_cross_file_reference_ignores_strings_and_docstrings(tmp_path: Path):
+    """docstring / 字符串字面量里提到 a.Foo 不算引用。"""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.py").write_text("def Foo():\n    return 1\n", encoding="utf-8")
+    (tmp_path / "src" / "b.py").write_text(
+        '"""参见 a.Foo 的实现。"""\nNOTE = "from a import Foo 是旧写法"\n',
+        encoding="utf-8",
+    )
+    assert cross_file_reference(str(tmp_path), "src/a.py", "Foo") is False
+
+
+def test_cross_file_reference_fstring_expression_is_real(tmp_path: Path):
+    """f-string 的表达式部分是真实代码：f"{a.Foo}" 是真引用（3.12+ tokenize 拆表达式）。"""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.py").write_text("def Foo():\n    return 1\n", encoding="utf-8")
+    (tmp_path / "src" / "b.py").write_text(
+        'import a\n\ndef show():\n    return f"{a.Foo}"\n', encoding="utf-8",
+    )
+    assert cross_file_reference(str(tmp_path), "src/a.py", "Foo") is True
+
+
+def test_cross_file_reference_broken_syntax_falls_back_conservative(tmp_path: Path):
+    """语法坏掉的文件剥不动注释，回退原文匹配——注释里的提及照样拦（保守方向）。"""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.py").write_text("def Foo():\n    return 1\n", encoding="utf-8")
+    (tmp_path / "src" / "b.py").write_text(
+        "def broken(:\n# from a import Foo\n", encoding="utf-8",
+    )
+    assert cross_file_reference(str(tmp_path), "src/a.py", "Foo") is True
+
+
+def test_cross_file_reference_truncated_scan_blocks(tmp_path: Path, monkeypatch):
+    """扫描被 _SCAN_CAP 截断 = 没查完 = 不能证明单文件闭包，堵漏拦。"""
+    from code_hospital.catalog import rename as rename_mod
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.py").write_text("def Foo():\n    return 1\n", encoding="utf-8")
+    (tmp_path / "src" / "b.py").write_text("def b():\n    return 2\n", encoding="utf-8")
+    (tmp_path / "src" / "c.py").write_text("def c():\n    return 3\n", encoding="utf-8")
+    monkeypatch.setattr(rename_mod, "_SCAN_CAP", 1)
+    assert cross_file_reference(str(tmp_path), "src/a.py", "Foo") is True
+
+
 def test_touches_public_api_via_dunder_all(tmp_path: Path):
     (tmp_path / "a.py").write_text(
         '__all__ = ["Foo"]\n\ndef Foo():\n    return 1\n', encoding="utf-8",

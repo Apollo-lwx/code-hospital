@@ -7,13 +7,20 @@
 `__init__.py` 重导出例外——入待复核）。
 
 守门是保守的文本扫描：宁可是误拦（留待复核），不能是漏拦（自动改断别的文件）。
+三期算法升级（2026-11-23）：
+1. 匹配前用 tokenize 剥掉注释与字符串字面量——docstring 里提一句符号名不算引用，
+   这是文本守门误拦的主力来源；剥不动（语法已坏，医院常客）回退原文，方向仍保守。
+2. 扫描命中 _SCAN_CAP 截断视为「没查完 = 不能证明单文件闭包」——截断点之后
+   可能有引用，返回真值堵漏拦（截断是沉默的，不拦就是漏）。
 """
 
 from __future__ import annotations
 
 import ast
 import fnmatch
+import io
 import re
+import tokenize
 from pathlib import Path
 
 # G1 局部名字（函数内变量/参数）：天然单函数闭包，不可能有跨文件引用，不需要守门。
@@ -38,9 +45,11 @@ def _module_tail(file_path: str) -> str:
     return "" if name == "__init__" else name
 
 
-def _repo_python_files(root: Path, exclude: str) -> list[Path]:
+def _repo_python_files(root: Path, exclude: str) -> tuple[list[Path], bool]:
+    """仓内全部 .py（排除自身与常见杂物目录）。返回 (文件清单, 是否被 _SCAN_CAP 截断)。"""
     found: list[str] = []
     excluded = str(Path(root) / exclude).replace("\\", "/")
+    truncated = False
     for path in root.rglob("*.py"):
         if any(part in _SKIP_DIRS for part in path.parts):
             continue
@@ -48,12 +57,43 @@ def _repo_python_files(root: Path, exclude: str) -> list[Path]:
             continue
         found.append(str(path))
         if len(found) >= _SCAN_CAP:
+            truncated = True
             break
-    return found
+    return found, truncated
+
+
+def _code_only(text: str) -> str:
+    """剥掉注释与字符串字面量，只留代码骨架。剥不动（语法已坏）回退原文。
+
+    注释 / docstring / 普通字符串里提到符号名都不算引用，剥掉再匹配是
+    消灭文本守门误拦的主力手段。f-string 的表达式部分是真实代码
+    （3.12+ 单独成 token），保留——f"{mod.symbol}" 是真引用。
+    """
+    lines = text.splitlines(keepends=True)
+    starts = [0]
+    for line in lines:
+        starts.append(starts[-1] + len(line))
+    chars = list(text)
+    try:
+        for tok in tokenize.generate_tokens(io.StringIO(text).readline):
+            if tok.type not in (tokenize.COMMENT, tokenize.STRING):
+                continue
+            begin = starts[tok.start[0] - 1] + tok.start[1]
+            end = starts[tok.end[0] - 1] + tok.end[1]
+            for idx in range(begin, min(end, len(chars))):
+                if chars[idx] not in ("\n", "\r"):
+                    chars[idx] = " "
+    except (tokenize.TokenError, IndentationError, SyntaxError, ValueError):
+        return text
+    return "".join(chars)
 
 
 def cross_file_reference(project_root: str, file_path: str, symbol: str) -> bool:
-    """符号被本仓其他 .py 文件 import 或点用时为真。文本扫描，误拦方向保守。"""
+    """不能证明单文件闭包时为真：确认被本仓其他 .py 引用，或扫描没查完。
+
+    文本扫描，误拦方向保守：注释/字符串先剥掉再匹配（三期），扫描被
+    _SCAN_CAP 截断按有引用处理——截断点之后查不到了，放行就是漏拦。
+    """
     symbol = str(symbol or "").strip()
     tail = _module_tail(file_path)
     if not symbol or not tail:
@@ -65,14 +105,16 @@ def cross_file_reference(project_root: str, file_path: str, symbol: str) -> bool
         rf"\bfrom\s+[\w.]*{escaped_tail}\s+import\s+[^#\n]*(\b{escaped_sym}\b|\*)"
     )
     attr_use = re.compile(rf"\b{escaped_tail}\s*\.\s*{escaped_sym}\b")
-    for other in _repo_python_files(root, file_path):
+    others, truncated = _repo_python_files(root, file_path)
+    for other in others:
         try:
             text = Path(other).read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        if from_import.search(text) or attr_use.search(text):
+        code = _code_only(text)
+        if from_import.search(code) or attr_use.search(code):
             return True
-    return False
+    return truncated
 
 
 def exempted(symbol: str, patterns: tuple[str, ...] | list[str]) -> bool:

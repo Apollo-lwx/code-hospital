@@ -604,8 +604,9 @@ def _draft_rename_rows(
                         drops_out.append({
                             "file": file_path, "line": head.line_start,
                             "reason": (
-                                f"正骨 {rule_id}：符号 {symbol} 被其他文件引用，"
-                                "存在跨文件引用，等 LSP 符号级 scope（LSP001）"
+                                f"正骨 {rule_id}：不能证明符号 {symbol} 是单文件闭包"
+                                "（确认有跨文件引用，或文本扫描未查完），"
+                                "等 LSP 符号级 scope（LSP001）"
                             ),
                         })
                     continue
