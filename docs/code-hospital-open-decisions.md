@@ -10,7 +10,7 @@
 3. **不做子进程禁网。** 设计里提过，是因为 `pytest` / `npm test` 会执行仓库里的代码，理论上能把环境里的密钥送出去；Windows 上又没有可移植的办法只掐掉这一个子进程的网络。白名单、不经 shell、环境变量裁剪和超时继续保留。不增加 `acceptance.offline`。
 4. **Q1、Q2、Q6、Q7、Q8 维持现在的返回。** 不改成 `pending_question` 卡片。
 5. **第二期名册放行。** 见下方「放行后仍缺规则」。本轮只把已经有药名的那一条接上：类型尺发现走续治（`repair`，`llm_patch`）。
-6. **rsi-boot 作为基础能力。** 医院进程调用本机 `rsi` 命令，不新开 MCP 工具。开方前若仓库已有 `.rsi/identity.json` 且 `rsi` 在 PATH 上，草稿增加 `rsi_prohibitions`。`distill_to_rsi=true` 时把结局和计数写成 `documentation`，不写发现原文。命令不在时出院说明为「未找到 rsi 命令」，就诊不中断。
+6. **rsi-boot 作为基础能力。** 医院进程调用本机 `rsi` 命令，不新开 MCP 工具。开方前若仓库已有 `.rsi/identity.json` 且 `rsi` 在 PATH 上，草稿增加 `rsi_prohibitions`。`distill_to_rsi=true` 时把结局和计数写成 `documentation`，不写发现原文。命令不在时出院说明为「未找到 rsi 命令」，就诊不中断。真机观察补记（2026-11-23）：documentation 落 rsi 正式区即写即可召回（相关性门禁照常）；疗效账 `experience` 被 rsi 归一为 `convention`，按 rsi 治理落**待审区**，审批（rsi 大屏/MCP review）后才参与召回——医院写后查 `knowledge list` 按真实状态出话术，待审时明说「待 rsi 侧审批后参与召回」，不冒充已生效。
 
 ## 放行后仍缺规则
 

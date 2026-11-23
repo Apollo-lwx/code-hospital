@@ -3,7 +3,7 @@
 全部药味终态后调用。先复扫差分：有医源性新症且疗程未满则再入院，不跑门禁。
 否则做四维会签。门禁失败先问是否接受未愈/转院，或由用户本人豁免。
 本工具不改仓库代码。白名单里已有的别名会执行；为空时验收项仍记通过且不跑命令。
-distill_to_rsi 为真且本机有 rsi 命令时，把结局计数写入 documentation，并把疗效账写成 experience；没有命令则记未写入。
+distill_to_rsi 为真且本机有 rsi 命令时，把结局计数写入 documentation（即写即可召回），并把疗效账写成 experience（rsi 侧归一到 convention 落待审区，审批后参与召回，话术如实标注）；没有命令则记未写入。
 """
 
 from __future__ import annotations

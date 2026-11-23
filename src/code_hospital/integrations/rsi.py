@@ -88,7 +88,11 @@ def _clean_rows(rows, limit: int) -> list[dict]:
 
 
 async def distill_lesson(root: str, title: str, content: str) -> str:
-    """把出院计数写成 rsi documentation。不写发现原文。"""
+    """把出院计数写成 rsi documentation。不写发现原文。
+
+    documentation 落 rsi 正式区即写即可召回；若 rsi 治理改版落入待审，
+    话术如实标注「审批后参与召回」。
+    """
     if not rsi_on_path():
         return "未找到 rsi 命令，本轮不写入外部记忆。"
     result = await _run(
@@ -105,12 +109,16 @@ async def distill_lesson(root: str, title: str, content: str) -> str:
         return "rsi 未在时限内返回，本轮不写入外部记忆。"
     text = str(result).strip()
     if text.startswith("已添加"):
-        return f"已写入 rsi 文档记忆：{text}"
+        return await _wording_by_status(root, text, "文档记忆")
     return f"rsi 未写入记忆：{text or '无输出'}"
 
 
 async def distill_efficacy(root: str, content: str) -> str:
-    """把疗效账写成 experience。没有成败记录时不调用。"""
+    """把疗效账写成 experience。没有成败记录时不调用。
+
+    rsi 侧 experience 归一到 convention，按治理落待审区（pending_review），
+    审批后才参与召回——话术必须如实说明，不能让人以为写完就能被召回。
+    """
     if not content.strip():
         return ""
     if not rsi_on_path():
@@ -130,8 +138,32 @@ async def distill_efficacy(root: str, content: str) -> str:
         return "rsi 未在时限内返回，疗效账不写入外部记忆。"
     text = str(result).strip()
     if text.startswith("已添加"):
-        return f"已写入 rsi 疗效账：{text}"
+        return await _wording_by_status(root, text, "疗效账")
     return f"rsi 未写入疗效账：{text or '无输出'}"
+
+
+async def _wording_by_status(root: str, added_text: str, label: str) -> str:
+    """按新条目在 rsi 库里的真实状态出话术；查不到时按已生效兜底。"""
+    item_id = added_text.rsplit("：", 1)[-1].strip()
+    status = await _entry_status(root, item_id)
+    if status == "pending_review":
+        return f"已提交 rsi {label}（待 rsi 侧审批后参与召回）：{item_id}"
+    if status:
+        return f"已写入 rsi {label}：{added_text}"
+    return f"已写入 rsi {label}（状态未核实）：{added_text}"
+
+
+async def _entry_status(root: str, item_id: str) -> str:
+    """查条目在 rsi 库里的状态；查询失败或查无此条返回空串。"""
+    if not item_id:
+        return ""
+    payload = await _run(root, ["knowledge", "list"])
+    if not isinstance(payload, list):
+        return ""
+    for row in payload:
+        if isinstance(row, dict) and row.get("id") == item_id:
+            return str(row.get("status") or "")
+    return ""
 
 
 def _parse_json(text: str):

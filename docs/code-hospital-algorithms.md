@@ -600,7 +600,7 @@ estimate:  p̂ = (α₀ + s) / (α₀ + β₀ + s + f)
 | `departments/prescriber.py` | §6 拓扑排序；同簇超过 5 个文件切开 | — | 已接入 |
 | `departments/pharmacist.py` | 煎药备料走 `gen_search_candidates`；成药照旧 | §7 四道校验、退避、token、提交 | 大 |
 | `departments/nurse.py` | **不存在**（逆应用函数已在 algorithms） | §8 挂到施治回滚 | 大 |
-| `departments/discharge.py` | 复扫差分、再入院、门禁、豁免、随访；`distill_to_rsi` 在 `rsi` 在岗时写入 documentation | 疗效统计、`case_links` | 中 |
+| `departments/discharge.py` | 复扫差分、再入院、门禁、豁免、随访；`distill_to_rsi` 在 `rsi` 在岗时写入 documentation（疗效账 experience 落 rsi 待审区，话术如实分档） | 疗效统计、`case_links` | 中 |
 | `storage/db.py` | `findings.content_key`、`diagnoses.member_ids_json` | §11.1 疗效聚合、`case_links` | 小 |
 | `tests/` | 无 property-based | §10 I1–I7 | 中 |
 

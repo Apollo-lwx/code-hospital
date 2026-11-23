@@ -425,6 +425,8 @@ graph LR
 - 开方前召回「用药禁忌」；出院时把「误诊/漂移/修复成功」蒸馏为 lesson（符合 rsi-boot 收工纪律）。
 - 病案调档（§4.8）是院内记忆，rsi-boot 是跨会话记忆，两者互补：`integrations.rsi = true` 开启；不装 rsi-boot 时 code-hospital 独立可用。
 
+> 定稿注（2026-11-23 真机观察，rsi-boot 0.2.0 CLI）：① 召回只读 rsi 正式区（official），待审条目不参与——禁止项/约定类须经 rsi 侧审批才可见，审批权在 rsi 不在医院；② `distill_to_rsi` 的 documentation 即写即入正式区，按相关性门禁参与召回；③ 疗效账 `experience` 被 rsi 归一为 `convention` 落待审区，医院写后复查条目状态，待审时出院说明如实标注「待 rsi 侧审批后参与召回」；④ 全链路（种子→审批→召回入方、蒸馏→待审话术、缺命令降级）已在独立病人仓实测通过。
+
 ### 4.10 单体 → 多 MCP 的演进
 
 - **一期（推荐）**：单 MCP `hosp serve`，8 个诊疗工具 + 2 个平台运维工具（§6.2）。理由：状态机一致性、共享病例库、零编排损耗；Semgrep MCP 同为「一个二进制多工具」的成功先例。
@@ -906,7 +908,7 @@ graph LR
 | **P0 PR 门诊（旗舰）** | 工程骨架（仿 rsi-boot）+ `hosp_register/scan/case` + ruff/semgrep/gitleaks 三适配器 + **diff scope（staged/commit/range）** + PR 可贴的 Markdown 检验报告 + `.git/info/exclude` 隔离 + 挂号轻量预检分诊 + 病例查重（duplicate_cases） | 对一个 staged diff 完成「送医→检验→报告直接贴进 PR」；重复送医能查出历史病例 |
 | **P1 门诊闭环** | `hosp_diagnose/prescribe/dispense/discharge` + 成药剂型 + 审批闸门（human_in_loop）+ **出院门禁三档会签 + waive** + **改签审批策略** + 一仓一病例互斥 + patch 逆应用回滚 + new 细分差分 + 内容禁止项校验 + **验收环境预检**（白名单/env 隔离/上限）+ 初诊调档（history_refs）+ case_links | 真实仓库完成闭环；门禁能拦下「治好手上病、身上添新病」；改签绕不过人审；投毒测试文件跑不进验收 |
 | **P2 住院部** | 两步煎药协议（need_patch/submit_patch + SEARCH 候选）+ scope guard 漂移拦截 + 多轮疗程 + `hosp_treat` 自动档（**progress 进度通知 + 最长阻塞超时返回 `suspended` 快照、复用 resume 续跑**）+ **会诊转诊单** + **随访计划产出** | 漂移用例被拦截逆应用；煎药全流程走通；treat 长任务进度可见、超时不断档；转诊单能串起两个仓的 case；出院小结附可复制 CI 片段 |
-| **P3 医养结合** | rsi-boot 联动（用药禁忌召回、疗效蒸馏）+ 符号级 scope（**LSP 基座一二期已落地**：references 销账 + lsp_rename 机械改名；G6 文件移动留「移动剂型」专项（草案已出：code-hospital-move-formula-draft.md）；算法层升级留三期）+ git worktree 高危隔离（**已落地 v1.11**：默认 high，配置可自定义）+ 跨 case 聚合视图（**已落地 v1.10**：`hosp_case(include="chain")` 会诊链轻编排） | 禁止项命中拦截；出院经验可被 rsi_recall 召回；`hosp_case` 能看到一条会诊链上的全部病例 |
+| **P3 医养结合** | rsi-boot 联动（**已落地并真机观察 2026-11-23**：用药禁忌召回入方、出院疗效蒸馏；疗效账经 rsi 侧审批后参与召回，话术如实分档，见 §4.9 定稿注）+ 符号级 scope（**LSP 基座一二期已落地**：references 销账 + lsp_rename 机械改名；G6 文件移动留「移动剂型」专项（草案已出：code-hospital-move-formula-draft.md）；算法层升级留三期）+ git worktree 高危隔离（**已落地 v1.11**：默认 high，配置可自定义）+ 跨 case 聚合视图（**已落地 v1.10**：`hosp_case(include="chain")` 会诊链轻编排） | 禁止项命中拦截；出院经验可被 rsi_recall 召回；`hosp_case` 能看到一条会诊链上的全部病例 |
 
 > 远期（不写入承诺）：跨仓联合会诊（多仓 scope/跨仓差分）。契约层已在 case 之上预留「就诊网络（encounter network）」概念命名空间。
 

@@ -45,6 +45,9 @@ async def test_distill_writes_documentation(tmp_path, monkeypatch):
     seen = {}
 
     async def fake(_root, args, expect_json=True):
+        if args[0:2] == ["knowledge", "list"]:
+            seen["list_json"] = expect_json
+            return [{"id": "abc", "status": "active"}]
         seen["args"] = args
         seen["json"] = expect_json
         return "已添加知识条目：abc"
@@ -52,10 +55,12 @@ async def test_distill_writes_documentation(tmp_path, monkeypatch):
     monkeypatch.setattr(rsi, "rsi_on_path", lambda: True)
     monkeypatch.setattr(rsi, "_run", fake)
     note = await rsi.distill_lesson(str(tmp_path), "病例出院", "结局 cured，已解决 1 项。")
+    assert "已写入 rsi 文档记忆" in note
     assert "abc" in note
     assert seen["json"] is False
     assert seen["args"][0:2] == ["knowledge", "add"]
     assert "documentation" in seen["args"]
+    assert seen["list_json"] is True
 
 
 async def test_recall_keeps_efficacy_items_only(tmp_path, monkeypatch):
@@ -87,17 +92,50 @@ async def test_distill_efficacy_writes_experience(tmp_path, monkeypatch):
     seen = {}
 
     async def fake(_root, args, expect_json=True):
+        if args[0:2] == ["knowledge", "list"]:
+            return [{"id": "eff", "status": "active"}]
         seen["args"] = args
         return "已添加知识条目：eff"
 
     monkeypatch.setattr(rsi, "rsi_on_path", lambda: True)
     monkeypatch.setattr(rsi, "_run", fake)
     note = await rsi.distill_efficacy(str(tmp_path), "F401 autofix 成功 1 次，失败 0 次")
+    assert "已写入 rsi 疗效账" in note
     assert "eff" in note
     assert seen["args"][0:2] == ["knowledge", "add"]
     assert "experience" in seen["args"]
     assert "efficacy" in seen["args"]
     assert await rsi.distill_efficacy(str(tmp_path), "  ") == ""
+
+
+async def test_distill_efficacy_pending_review_says_so(tmp_path, monkeypatch):
+    """rsi 治理把 experience 归一到 convention 落待审区，话术必须如实。"""
+
+    async def fake(_root, args, expect_json=True):
+        if args[0:2] == ["knowledge", "list"]:
+            return [{"id": "eff2", "status": "pending_review"}]
+        return "已添加知识条目：eff2"
+
+    monkeypatch.setattr(rsi, "rsi_on_path", lambda: True)
+    monkeypatch.setattr(rsi, "_run", fake)
+    note = await rsi.distill_efficacy(str(tmp_path), "F401 autofix 成功 1 次，失败 0 次")
+    assert "待 rsi 侧审批后参与召回" in note
+    assert "已写入" not in note
+
+
+async def test_distill_status_unknown_falls_back(tmp_path, monkeypatch):
+    """list 查询失败时不阻断，话术标注状态未核实。"""
+
+    async def fake(_root, args, expect_json=True):
+        if args[0:2] == ["knowledge", "list"]:
+            return "查询失败"
+        return "已添加知识条目：xyz"
+
+    monkeypatch.setattr(rsi, "rsi_on_path", lambda: True)
+    monkeypatch.setattr(rsi, "_run", fake)
+    note = await rsi.distill_lesson(str(tmp_path), "病例出院", "结局 cured。")
+    assert "状态未核实" in note
+    assert "xyz" in note
 
 
 def test_recall_json_accepts_bom():
