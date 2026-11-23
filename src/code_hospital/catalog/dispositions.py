@@ -3,7 +3,8 @@
 三层优先级，逐层回落：
 
 1. 仓库 `code-hospital.yaml` 的 `catalog.rules.dispositions`（用户说了算）；
-2. 内置默认表（只收无争议的规范类，如 ruff N8* 命名族）；
+2. 内置默认表（只收无争议的规范类：ruff N8* 命名族、ESLint naming-convention、
+   各语言行长规则 java.line-length / ts.line-length / E501）；
 3. 未命中维持现状——名册剂型 + 风险闸决定一切，不额外加确认。
 
 规范（命名、风格、格式）不造成功能错误，默认**只告知**：落 advisory、不随处方执行、
@@ -80,6 +81,11 @@ DEFAULT_DISPOSITIONS: tuple[Disposition, ...] = (
     # ESLint / TS 命名约定同上。
     Disposition("naming-convention", cls="convention"),
     Disposition("@typescript-eslint/naming-convention", cls="convention"),
+    # 行长是纯排版规范（2026-11-23 真实仓观察后收入）：11 个 line-length 发现
+    # 基线全开清创自动修，与「规范只告知」的分流口径冲突。Python 的 E501 同类。
+    Disposition("java.line-length", cls="convention"),
+    Disposition("ts.line-length", cls="convention"),
+    Disposition("E501", cls="convention"),
 )
 
 

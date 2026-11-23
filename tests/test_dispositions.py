@@ -62,8 +62,38 @@ def test_default_table_only_covers_conventions():
     assert resolve("N801").resolved_class == "convention"
     assert resolve("N801").advisory is True
     assert resolve("naming-convention").advisory is True
+    # 行长是纯排版规范（真实仓观察后收入）
+    assert resolve("java.line-length").advisory is True
+    assert resolve("ts.line-length").advisory is True
+    assert resolve("E501").advisory is True
     assert resolve("F821") is None
     assert resolve("F841") is None
+
+
+def test_default_table_drives_line_length_advisory(tmp_path: Path):
+    """java.line-length 挂在清创（autofix）下，默认表把它拦在告知级。"""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "A.java").write_text("class A {\n}\n", encoding="utf-8")
+    finding = Finding(
+        id="fnd-ll", case_id="case-x", report_id="rpt-x",
+        tool="java-review", rule_id="java.line-length", severity="minor",
+        file_path="src/A.java", line_start=1, line_end=1,
+        symbol="", message="这一行有 130 个字符，超过 120", fingerprint="fp-ll",
+    )
+    diagnosis = Diagnosis(
+        id="dia-ll", case_id="case-x", report_id="rpt-x",
+        fingerprint="fp-ll", category="java.line-length",
+        root_cause="", severity="minor", confidence=0.8,
+        fixability="autofix", member_ids=["fnd-ll"],
+        specialty_id="java", formulary_matched=True,
+    )
+    items = build_items(
+        [diagnosis], {"fnd-ll": finding}, "rx-t",
+        include_low=False, project_root=str(tmp_path),
+        drops_out=[], rename_pool=_AbsentPool(),
+    )
+    assert items[0]["formula_id"] == "debride"
+    assert items[0]["status"] == "advisory"
 
 
 def test_policy_loads_dispositions_with_notes(tmp_path: Path):

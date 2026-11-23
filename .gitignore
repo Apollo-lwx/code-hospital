@@ -13,3 +13,7 @@ dist/
 .workbuddy/
 .cursor/mcp.json
 .tmp-lsp/
+
+# 观察草稿与真实仓副本（勿提交）
+scratch/
+scratch_*.py
