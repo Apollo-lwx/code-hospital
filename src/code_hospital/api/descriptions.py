@@ -159,7 +159,10 @@ diff under .hospital/patches/ before the change is kept. manual items are skippe
 do not touch code. llm_patch items first return need_patch with a one-time patch_token.
 Submit that token, the snapshot_hash, and a unified diff or SEARCH/REPLACE block via
 mode=submit_patch; four checks run before any write, and a failed check leaves the file
-unchanged. verify_only replays the nursing checks for one item, or the whole
+unchanged. For rename (正骨) items, mode=lsp_rename with new_name lets the hospital
+generate the patch itself via the LSP substrate (all referencing files already sit in
+scope_paths); the generated diff passes the same four checks. Falls back to
+submit_patch when no language server is on duty. verify_only replays the nursing checks for one item, or the whole
 prescription when item_id is empty, and returns status=verified. It does not
 modify source files or advance the next item. It runs an acceptance command
 only when that alias is already in the confirmed whitelist. resolve_conflict continues a failed item whose latest dose is

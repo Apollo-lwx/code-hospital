@@ -505,6 +505,10 @@ def parse_patch(text: str, default_path: str = "") -> list[Hunk]:
 def _parse_unified(text: str) -> list[Hunk]:
     hunks: list[Hunk] = []
     lines = text.split("\n")
+    # difflib 生成的 diff 以 \n 收尾，切出来的末尾空串是 framing 不是上下文行；
+    # 不丢掉它会让最后一个 hunk 多一条幻影上下文，锚点校验必然失败。
+    if lines and lines[-1] == "":
+        lines.pop()
     path, i = "", 0
     while i < len(lines):
         ln = lines[i]

@@ -227,6 +227,7 @@ async def hosp_dispense(
     ack: str = "",
     follow_autofix: bool = False,
     project_root: str = "",
+    new_name: str = "",
     assist: dict | None = None,
     ctx: Context | None = None,
 ) -> dict:
@@ -245,6 +246,7 @@ async def hosp_dispense(
             ack=ack,
             follow_autofix=follow_autofix,
             project_root=project_root,
+            new_name=new_name,
             assist=assist,
         ))
     except HospitalError as e:

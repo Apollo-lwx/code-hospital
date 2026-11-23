@@ -127,6 +127,29 @@ class Client:
             raise LspError("references 应答不是列表")
         return [item for item in result if isinstance(item, dict)]
 
+    def rename(self, path: Path, line0: int, character: int, new_name: str) -> dict:
+        """符号级全仓改名 → WorkspaceEdit（不落盘，由 edits.py 翻译成 diff 走校验）。
+
+        prepareRename 先探一次：探不动不拦（有的服务器不支持），改名请求自己会被拒。
+        """
+        self.did_open(path)
+        position = {"line": max(line0, 0), "character": max(character, 0)}
+        doc = {"uri": path.as_uri()}
+        try:
+            self._request("textDocument/prepareRename", {
+                "textDocument": doc, "position": position,
+            }, timeout=self._spec.request_timeout_s)
+        except LspError:
+            pass
+        result = self._request("textDocument/rename", {
+            "textDocument": doc, "position": position, "newName": str(new_name),
+        }, timeout=self._spec.request_timeout_s)
+        if result is None:
+            raise LspError(f"{self._spec.id} 改名被拒（该位置可能不是可改名符号）")
+        if not isinstance(result, dict):
+            raise LspError("rename 应答不是 WorkspaceEdit")
+        return result
+
     def close(self) -> None:
         """shutdown + exit；对面不听话就杀。幂等。"""
         if self._closed:

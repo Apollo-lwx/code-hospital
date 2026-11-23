@@ -154,3 +154,178 @@ def test_pool_empty_refs_means_clear(tmp_path: Path, monkeypatch):
     with Pool(str(tmp_path), specs=specs) as pool:
         assert pool.cross_file_refs("src/a.py", 1, "Foo") == set()
         assert pool.notes() == []
+
+
+# ---------- WorkspaceEdit → diff（edits.py）----------
+
+
+def test_edits_to_diff_changes_form(tmp_path: Path):
+    from code_hospital.lsp.edits import to_diff
+
+    target = tmp_path / "a.py"
+    target.write_text("def Foo():\n    return Foo\n", encoding="utf-8")
+    edit = {"changes": {target.as_uri(): [
+        {"range": {"start": {"line": 0, "character": 4}, "end": {"line": 0, "character": 7}},
+         "newText": "foo"},
+        {"range": {"start": {"line": 1, "character": 11}, "end": {"line": 1, "character": 14}},
+         "newText": "foo"},
+    ]}}
+    diff, touched = to_diff(str(tmp_path), edit)
+    assert touched == ["a.py"]
+    assert "-def Foo():" in diff
+    assert "+def foo():" in diff
+    # 不落盘
+    assert "Foo" in target.read_text(encoding="utf-8")
+
+
+def test_edits_to_diff_document_changes_form(tmp_path: Path):
+    from code_hospital.lsp.edits import to_diff
+
+    target = tmp_path / "b.py"
+    target.write_text("X = 1\n", encoding="utf-8")
+    edit = {"documentChanges": [{
+        "textDocument": {"uri": target.as_uri(), "version": 1},
+        "edits": [{"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}},
+                   "newText": "x"}],
+    }]}
+    diff, touched = to_diff(str(tmp_path), edit)
+    assert touched == ["b.py"]
+    assert "-X = 1" in diff and "+x = 1" in diff
+
+
+def test_edits_reject_overlapping_and_outside(tmp_path: Path):
+    from code_hospital.lsp.edits import EditApplyError, to_diff
+
+    target = tmp_path / "a.py"
+    target.write_text("def Foo():\n", encoding="utf-8")
+    overlap = {"changes": {target.as_uri(): [
+        {"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 6}},
+         "newText": "x"},
+        {"range": {"start": {"line": 0, "character": 4}, "end": {"line": 0, "character": 7}},
+         "newText": "y"},
+    ]}}
+    try:
+        to_diff(str(tmp_path), overlap)
+        raise AssertionError("重叠区间该被拒")
+    except EditApplyError as exc:
+        assert "重叠" in str(exc)
+
+    outside = tmp_path.parent / "outside.py"
+    outside.write_text("X = 1\n", encoding="utf-8")
+    try:
+        to_diff(str(tmp_path), {"changes": {outside.as_uri(): [
+            {"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}},
+             "newText": "x"},
+        ]}})
+        raise AssertionError("仓外改动该被拒")
+    except EditApplyError as exc:
+        assert "仓库外" in str(exc)
+
+
+# ---------- pool.rename_patch ----------
+
+
+def test_pool_rename_patch_roundtrip(tmp_path: Path, monkeypatch):
+    _seed_repo(tmp_path)
+    target = tmp_path / "src" / "a.py"
+    monkeypatch.setenv("FAKE_LSP_RENAME", json.dumps({"changes": {target.as_uri(): [
+        {"range": {"start": {"line": 0, "character": 4}, "end": {"line": 0, "character": 7}},
+         "newText": "foo"},
+    ]}}))
+    specs = {"python": _fake_spec()}
+    with Pool(str(tmp_path), specs=specs) as pool:
+        diff = pool.rename_patch("src/a.py", 1, "Foo", "foo")
+        assert diff is not None
+        assert "-def Foo():" in diff and "+def foo():" in diff
+        assert pool.notes() == []
+
+
+def test_pool_rename_patch_degrades(tmp_path: Path):
+    _seed_repo(tmp_path)
+    specs = {"python": _fake_spec(command="definitely-not-a-real-lsp-server-x")}
+    with Pool(str(tmp_path), specs=specs) as pool:
+        assert pool.rename_patch("src/a.py", 1, "Foo", "foo") is None
+        assert any("未到岗" in note for note in pool.notes())
+    # 新名字不合法：不拉起服务器直接拒
+    with Pool(str(tmp_path), specs={"python": _fake_spec()}) as pool:
+        assert pool.rename_patch("src/a.py", 1, "Foo", "not a name") is None
+        assert any("合法标识符" in note for note in pool.notes())
+
+
+# ---------- 药房 mode=lsp_rename（干跑，不碰 db）----------
+
+
+def _item(**over):
+    base = {
+        "id": "rxit-x", "formula_id": "rename", "method": "llm_patch",
+        "target_file": "src/a.py", "target_symbol": "Foo", "rename_line": 1,
+        "scope_paths": ["src/a.py"], "touches_manifest": False,
+    }
+    base.update(over)
+    return base
+
+
+class _Case:
+    id = "case-x"
+    round = 1
+    status = "dispensing"
+
+
+def test_lsp_rename_guards(tmp_path: Path, monkeypatch):
+    import pytest
+
+    from code_hospital.core.errors import HospitalError
+    from code_hospital.departments.pharmacist import _lsp_rename
+
+    async def run(item, new_name="foo"):
+        return await _lsp_rename(None, str(tmp_path), _Case(), None, item, new_name, True)
+
+    with pytest.raises(HospitalError, match="只适用于正骨"):
+        asyncio_run(run(_item(formula_id="clean")))
+    with pytest.raises(HospitalError, match="缺符号定位"):
+        asyncio_run(run(_item(target_symbol="")))
+    with pytest.raises(HospitalError, match="新名字"):
+        asyncio_run(run(_item(), new_name="not a name"))
+    # LSP 缺席：注册表覆盖成「命令不存在」的规格，与本机装没装 pyright 无关
+    (tmp_path / "src").mkdir(exist_ok=True)
+    (tmp_path / "src" / "a.py").write_text("def Foo():\n    return 1\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "code_hospital.lsp.pool.registry.for_project",
+        lambda root: ({"python": _fake_spec(command="definitely-not-a-real-lsp-server-x")}, []),
+    )
+    with pytest.raises(HospitalError, match="没跑成"):
+        asyncio_run(run(_item()))
+
+
+def test_lsp_rename_dry_run_applies_nothing(tmp_path: Path, monkeypatch):
+    from code_hospital.departments.pharmacist import _lsp_rename
+
+    (tmp_path / "src").mkdir()
+    target = tmp_path / "src" / "a.py"
+    target.write_text("def Foo():\n    return Foo\n", encoding="utf-8")
+    monkeypatch.setenv("FAKE_LSP_RENAME", json.dumps({"changes": {target.as_uri(): [
+        {"range": {"start": {"line": 0, "character": 4}, "end": {"line": 0, "character": 7}},
+         "newText": "foo"},
+        {"range": {"start": {"line": 1, "character": 11}, "end": {"line": 1, "character": 14}},
+         "newText": "foo"},
+    ]}}))
+    monkeypatch.setattr(
+        "code_hospital.lsp.pool.registry.for_project",
+        lambda root: ({"python": _fake_spec()}, []),
+    )
+
+    async def run():
+        return await _lsp_rename(None, str(tmp_path), _Case(), None, _item(), "foo", True)
+
+    result = asyncio_run(run())
+    assert result["status"] == "dry_run"
+    assert result["dose"]["executor"] == "lsp_rename"
+    assert "+def foo():" in result["diff"]
+    # 干跑不落盘
+    assert "Foo" in target.read_text(encoding="utf-8")
+
+
+def asyncio_run(coro):
+    import asyncio
+
+    return asyncio.run(coro)

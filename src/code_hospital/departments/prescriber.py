@@ -551,6 +551,7 @@ def _draft_rename_rows(
             continue
         for diagnosis, members, head, matched in rows:
             symbol = str(getattr(head, "symbol", "") or "")
+            lsp_refs: set[str] = set()  # LSP 确认的跨文件引用（非空时扩 scope 入方）
             if symbol and exempt and exempted(symbol, exempt):
                 if drops_out is not None:
                     drops_out.append({
@@ -583,18 +584,9 @@ def _draft_rename_rows(
                                 ),
                             })
                         continue
-                    if refs:
-                        if drops_out is not None:
-                            sample = "、".join(sorted(refs)[:3])
-                            drops_out.append({
-                                "file": file_path, "line": head.line_start,
-                                "reason": (
-                                    f"正骨 {rule_id}：LSP 确认别名 {symbol} 被 "
-                                    f"{len(refs)} 个文件引用（{sample}），重导出改名不入方"
-                                ),
-                            })
-                        continue
-                    # 空集：LSP 确认这个重导出名没有包外引用，守门销账，照常入方。
+                    # LSP 到岗：引用集合已知，无论空不空都入方——空的单文件闭包，
+                    # 非空的扩 scope 全文件一起改（见下方 lsp_refs 注入）。
+                    lsp_refs = set(refs)
             elif rule_id not in G1_LOCAL_RULES:
                 if not symbol:
                     if drops_out is not None:
@@ -605,18 +597,8 @@ def _draft_rename_rows(
                     continue
                 refs = pool.cross_file_refs(file_path, head.line_start, symbol) if pool else None
                 if refs is not None:
-                    # LSP 在岗：references 说了算。空集销账，非空维持待复核但写明证据。
-                    if refs:
-                        if drops_out is not None:
-                            sample = "、".join(sorted(refs)[:3])
-                            drops_out.append({
-                                "file": file_path, "line": head.line_start,
-                                "reason": (
-                                    f"正骨 {rule_id}：LSP 确认符号 {symbol} 被 "
-                                    f"{len(refs)} 个文件引用（{sample}），不入方"
-                                ),
-                            })
-                        continue
+                    # LSP 在岗：引用集合已知，非空就扩 scope 全文件一起改，空集单文件闭包。
+                    lsp_refs = set(refs)
                 elif cross_file_reference(project_root, file_path, symbol):
                     if drops_out is not None:
                         drops_out.append({
@@ -634,6 +616,19 @@ def _draft_rename_rows(
                 "rename", "", method, matched.specialty_id, attending,
                 scope_key(head), _member_spans(members),
             )
+            # lsp_rename 的定位信息：符号 + 定义行（scope_lines 取 members 序，不保证是定义点）。
+            item["rename_line"] = head.line_start
+            if lsp_refs:
+                # 跨文件闭包：引用文件进 scope（四道校验的 scope 关按这个清单放行），
+                # 改名须同步全部引用文件；机械改名走药房 mode="lsp_rename"。
+                item["scope_paths"] = list(dict.fromkeys([*item["scope_paths"], *sorted(lsp_refs)]))
+                item["files"] = list(item["scope_paths"])
+                sample = "、".join(sorted(lsp_refs)[:3])
+                item["instructions"] = (
+                    f"{item['instructions']} LSP 确认符号被 {len(lsp_refs)} 个文件引用"
+                    f"（{sample}），改名须同步全部引用文件；可用 hosp_dispense "
+                    'mode="lsp_rename" 让医院机械改名。'
+                )[:500]
             for override in matched.formula.risk_overrides:
                 if override.get("when") == "touches_public_api" and touches_public_api(
                     project_root, file_path, symbol

@@ -73,6 +73,24 @@ def main():
             continue  # 其余通知（initialized 等）不应答
         if method == "initialize":
             _send(stdout, {"jsonrpc": "2.0", "id": ident, "result": {"capabilities": {}}})
+        elif method == "textDocument/prepareRename":
+            params = message.get("params") or {}
+            pos = params.get("position") or {}
+            _send(stdout, {"jsonrpc": "2.0", "id": ident, "result": {
+                "range": {
+                    "start": {"line": pos.get("line", 0), "character": pos.get("character", 0)},
+                    "end": {"line": pos.get("line", 0), "character": pos.get("character", 0) + 1},
+                },
+                "placeholder": "old_name",
+            }})
+        elif method == "textDocument/rename":
+            # FAKE_LSP_RENAME：JSON 形态的 WorkspaceEdit（changes 形态）
+            raw = os.environ.get("FAKE_LSP_RENAME") or "{}"
+            try:
+                edit = json.loads(raw)
+            except json.JSONDecodeError:
+                edit = {}
+            _send(stdout, {"jsonrpc": "2.0", "id": ident, "result": edit or None})
         elif method == "textDocument/references":
             _send(stdout, {"jsonrpc": "2.0", "id": ident, "result": _refs()})
         elif method == "shutdown":

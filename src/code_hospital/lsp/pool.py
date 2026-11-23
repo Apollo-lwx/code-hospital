@@ -10,10 +10,10 @@ from __future__ import annotations
 import os
 import time
 from pathlib import Path
-from urllib.parse import unquote, urlparse
 
 from . import registry
 from .client import Client, LspError
+from .edits import EditApplyError, to_diff, uri_path
 from .registry import LanguageSpec
 
 _NOTE_CAP = 20
@@ -100,10 +100,43 @@ class Pool:
         target = _norm(abs_path)
         others: set[str] = set()
         for ref in refs:
-            other = _uri_path(str(ref.get("uri") or ""))
+            other = uri_path(str(ref.get("uri") or ""))
             if other and other != target:
                 others.add(os.path.relpath(other, self._root).replace("\\", "/"))
         return others
+
+    def rename_patch(self, file_path: str, line: int, symbol: str, new_name: str) -> str | None:
+        """LSP 机械改名 → unified diff（不落盘）。None = 本语言 LSP 缺席。
+
+        产物必须过煎药的四道校验才能落盘（药房 mode=lsp_rename 走的就是这条路）。
+        """
+        if self._closed:
+            return None
+        ext = Path(file_path).suffix.lower()
+        spec = self._by_ext.get(ext)
+        symbol = str(symbol or "").strip()
+        new_name = str(new_name or "").strip()
+        abs_path = Path(self._root) / file_path
+        if spec is None or not symbol or not new_name or not abs_path.is_file():
+            return None
+        if not new_name.isidentifier():
+            self._note(f"LSP 基座：新名字 {new_name!r} 不是合法标识符，机械改名没跑")
+            return None
+        client = self._client_for(spec)
+        if client is None:
+            return None
+        try:
+            edit = client.rename(
+                abs_path, int(line) - 1, _symbol_column(abs_path, line, symbol), new_name,
+            )
+            diff, _touched = to_diff(self._root, edit)
+        except (LspError, EditApplyError, OSError) as exc:
+            self._note(f"LSP 基座：{spec.id} 机械改名失败（{exc}）")
+            return None
+        if not diff:
+            self._note(f"LSP 基座：{spec.id} 改名产物为空（位置可能不对）")
+            return None
+        return diff
 
     def close(self) -> None:
         """门诊结束统一退。每个客户端自己 shutdown/exit，对面不听话就杀。"""
@@ -149,18 +182,6 @@ def _symbol_column(path: Path, line: int, symbol: str) -> int:
         return 0
     column = text.find(symbol)
     return column if column >= 0 else 0
-
-
-def _uri_path(uri: str) -> str:
-    """file:// URI → 规范化绝对路径；不是 file URI 返回空。"""
-    if not uri.startswith("file:"):
-        return ""
-    parsed = urlparse(uri)
-    path = unquote(parsed.path)
-    # Windows 的 file URI 路径是 /D:/... 形态，剥掉前导斜杠。
-    if len(path) > 2 and path[0] == "/" and path[2] == ":":
-        path = path[1:]
-    return _norm(path)
 
 
 def _norm(path) -> str:

@@ -46,7 +46,7 @@ from ..core.questions import ask, release
 from ..safety.acceptance import run_alias
 from ..storage.db import Database, hospital_root, now_ms
 
-_MODES = {"apply", "submit_patch", "verify_only", "resolve_conflict"}
+_MODES = {"apply", "submit_patch", "lsp_rename", "verify_only", "resolve_conflict"}
 _RESOLUTIONS = {"manual_resolved", "retry", "skip_item"}
 _TOKEN_TTL_MS = 30 * 60 * 1000
 _MAX_ATTEMPTS = 3
@@ -191,12 +191,17 @@ async def dispense(
     ack: str = "",
     follow_autofix: bool = False,
     project_root: str = "",
+    new_name: str = "",
+    assist: dict | None = None,
 ) -> dict:
-    """hosp_dispense。默认一味一停；follow_autofix 时连续做完后续成药。"""
+    """hosp_dispense。默认一味一停；follow_autofix 时连续做完后续成药。
+    lsp_rename：正骨味的机械改名（LSP 生成 patch，走同一条校验管线）。
+    assist 是诊断侧的交卷契约，药房不消费——收下保持 MCP 调用面一致
+    （83f76fb 起 hosp_dispense 就传这个参数，药房没接，MCP 路径一直是断的）。"""
     from .reception import resolve_project_root
 
     if mode not in _MODES:
-        raise bad_argument("mode 须为 apply / submit_patch / verify_only / resolve_conflict", target="mode")
+        raise bad_argument("mode 须为 apply / submit_patch / lsp_rename / verify_only / resolve_conflict", target="mode")
     if mode == "verify_only" and resolution:
         raise bad_argument("verify_only 不接收 resolution", target="resolution")
 
@@ -289,6 +294,8 @@ async def dispense(
                 return await _submit_patch(
                     db, root, case, rx, item, patch_token, snapshot_hash, patch, dry_run,
                 )
+            if mode == "lsp_rename":
+                return await _lsp_rename(db, root, case, rx, item, new_name, dry_run)
             blocked = await _admission_block(db, case, item)
             if blocked:
                 last = await _skip_admission(db, case, rx, item, blocked)
@@ -421,18 +428,53 @@ async def _submit_patch(db, root, case, rx, item, token: str, snapshot_hash: str
         raise invalid_operation("补丁令牌无效，请先取药", target="patch_token", next_action="mode=apply 重新取药")
     if int(item.get("token_expires_at") or 0) < now_ms():
         raise invalid_operation("补丁令牌已过期，请重新取药", target="patch_token")
+    target = normalize_path(item["target_file"])
+    current = _read(Path(root) / target)
+    if snapshot_hash != _sha(current):
+        raise conflict("文件与取药时的快照不一致，请重新取药", target="snapshot_hash", next_action="mode=apply 重新取药")
+    return await _apply_patch_pipeline(db, root, case, rx, item, patch, dry_run, executor="llm_patch")
+
+
+async def _lsp_rename(db, root, case, rx, item, new_name: str, dry_run: bool) -> dict:
+    """LSP 机械改名：医院自己生成 patch（lsp-scope 草案二期），之后与煎药同管——
+    同样的四道校验、同样的验收、同样的剂量记录。LSP 是更准的取数，煎与验还是医院的。"""
+    if item["formula_id"] != "rename" or item["method"] != "llm_patch":
+        raise invalid_operation("机械改名只适用于正骨（rename）煎药味", target="mode")
+    symbol = str(item.get("target_symbol") or "")
+    line = int(item.get("rename_line") or 0)
+    if not symbol or line < 1:
+        raise invalid_operation(
+            "这味正骨缺符号定位（target_symbol/rename_line），机械改名跑不了",
+            target="item_id", next_action="退回煎药流程：mode=apply 取药后 submit_patch",
+        )
+    new_name = str(new_name or "").strip()
+    if not new_name or not new_name.isidentifier():
+        raise bad_argument("lsp_rename 要一个合法的新名字（new_name）", target="new_name")
+    from ..lsp.pool import Pool
+
+    with Pool(root) as pool:
+        diff = pool.rename_patch(item["target_file"], line, symbol, new_name)
+        notes = pool.notes()
+    if diff is None:
+        detail = "；".join(notes)[:240] or "原因未知"
+        raise invalid_operation(
+            f"LSP 基座机械改名没跑成：{detail}",
+            target="mode", next_action="退回煎药流程：mode=apply 取药后 submit_patch",
+        )
+    return await _apply_patch_pipeline(db, root, case, rx, item, diff, dry_run, executor="lsp_rename")
+
+
+async def _apply_patch_pipeline(db, root, case, rx, item, patch: str, dry_run: bool, executor: str) -> dict:
+    """patch 从解析到落盘的同一条管：四道校验 → 应用 → 验收 → 剂量记录。
+    煎药（模型写 patch）与机械改名（LSP 生成 patch）共用。"""
     scope = item["scope_paths"] or ([item["target_file"]] if item["target_file"] else [])
     safe = _safe_paths(root, scope)
     if any(".hospital" in p.split("/") for p in scope):
         raise forbidden("处方范围含 .hospital/，拒绝施治", target="scope_paths")
     base = Path(root)
     before = {normalize_path(rel): _read(base / rel) for rel in safe}
-    target = normalize_path(item["target_file"])
-    current = before.get(target, "")
-    if snapshot_hash != _sha(current):
-        raise conflict("文件与取药时的快照不一致，请重新取药", target="snapshot_hash", next_action="mode=apply 重新取药")
     try:
-        hunks = parse_patch(patch, default_path=target)
+        hunks = parse_patch(patch, default_path=normalize_path(item["target_file"]))
     except PatchParseError as exc:
         await _burn_attempt(db, item)
         raise invalid_operation(str(exc)[:300], target="patch", next_action="按 unified diff 或 SEARCH/REPLACE 重写") from exc
@@ -473,9 +515,9 @@ async def _submit_patch(db, root, case, rx, item, token: str, snapshot_hash: str
         "id": new_id("dose"),
         "item_id": item["id"],
         "round": case.round,
-        "executor": "llm_patch",
+        "executor": executor,
         "patch_path": patch_path,
-        "snapshot_hash": snapshot_hash,
+        "snapshot_hash": "",
         "diff_stat": _diff_stat(diff),
         "result": "success",
         "error": "",

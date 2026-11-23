@@ -365,17 +365,19 @@ def test_lsp_clears_guard_when_no_cross_file_refs(tmp_path: Path):
     assert drops == []
 
 
-def test_lsp_confirmed_refs_stay_in_review(tmp_path: Path):
-    """LSP 确认有跨文件引用 → 维持待复核，reason 写明证据而不是「等 LSP001」。"""
+def test_lsp_confirmed_refs_prescribed_with_wide_scope(tmp_path: Path):
+    """二期：LSP 确认有跨文件引用 → 入方且 scope 扩到全部引用文件（不再待复核）。"""
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "a.py").write_text("def Foo():\n    return 1\n", encoding="utf-8")
     members = [_finding("N802", "src/a.py", 1, "Foo")]
     items, drops = _build_with_pool(tmp_path, members, _StubPool({"src/b.py", "src/c.py"}))
-    assert [it for it in items if it["formula_id"] == "rename"] == []
-    assert len(drops) == 1
-    assert "LSP 确认" in drops[0]["reason"]
-    assert "2 个文件" in drops[0]["reason"]
-    assert "LSP001" not in drops[0]["reason"]
+    rename_items = [it for it in items if it["formula_id"] == "rename"]
+    assert len(rename_items) == 1
+    item = rename_items[0]
+    assert set(item["scope_paths"]) == {"src/a.py", "src/b.py", "src/c.py"}
+    assert "LSP 确认" in item["instructions"]
+    assert item["rename_line"] == 1
+    assert drops == []
 
 
 def test_lsp_clears_init_reexport_when_unreferenced(tmp_path: Path):
@@ -391,17 +393,18 @@ def test_lsp_clears_init_reexport_when_unreferenced(tmp_path: Path):
     assert drops == []
 
 
-def test_lsp_confirmed_init_reexport_stays_in_review(tmp_path: Path):
+def test_lsp_confirmed_init_reexport_prescribed_with_wide_scope(tmp_path: Path):
+    """二期：__init__.py 重导出名有包外引用 → 入方且 scope 含引用文件。"""
     (tmp_path / "pkg").mkdir()
     (tmp_path / "pkg" / "__init__.py").write_text(
         "from collections import OrderedDict as OD\n", encoding="utf-8",
     )
     members = [_finding("N817", "pkg/__init__.py", 1, "OD")]
     items, drops = _build_with_pool(tmp_path, members, _StubPool({"app/main.py"}))
-    assert [it for it in items if it["formula_id"] == "rename"] == []
-    assert len(drops) == 1
-    assert "重导出" in drops[0]["reason"]
-    assert "app/main.py" in drops[0]["reason"]
+    rename_items = [it for it in items if it["formula_id"] == "rename"]
+    assert len(rename_items) == 1
+    assert set(rename_items[0]["scope_paths"]) == {"pkg/__init__.py", "app/main.py"}
+    assert drops == []
 
 
 def test_default_pool_notes_landed_in_drops(tmp_path: Path):
