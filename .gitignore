@@ -12,3 +12,4 @@ dist/
 .rsi/
 .workbuddy/
 .cursor/mcp.json
+.tmp-lsp/

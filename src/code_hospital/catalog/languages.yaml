@@ -1,0 +1,28 @@
+# LSP 语言注册表（内置默认，docs/code-hospital-lsp-scope-draft.md 已定稿）。
+# 语言服务是外部二进制，医院不打包；命令名只认 PATH 上的裸名。
+# 被诊仓库 code-hospital.yaml 的 catalog.lsp.languages 可追加新语言或按 id 覆盖本表。
+- id: python
+  extensions: [.py]
+  language_id: python
+  command: pyright-langserver
+  args: ["--stdio"]
+  startup_timeout_s: 45
+  request_timeout_s: 20
+- id: typescript
+  extensions: [.ts, .tsx, .js, .jsx]
+  language_id: typescript
+  dialects:                     # 个别扩展名的 LSP languageId 与默认不同
+    .js: javascript
+    .jsx: javascriptreact
+    .tsx: typescriptreact
+  command: typescript-language-server
+  args: ["--stdio"]
+  startup_timeout_s: 45
+  request_timeout_s: 20
+- id: java
+  extensions: [.java]
+  language_id: java
+  command: jdtls
+  args: []                      # jdtls 常需 -data <工作区目录>，按仓库配置补
+  startup_timeout_s: 180        # 重设备：首次索引以分钟计
+  request_timeout_s: 30

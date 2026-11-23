@@ -388,6 +388,7 @@ def build_items(
     requested: list[str] | None = None,
     project_root: str = "",
     drops_out: list | None = None,
+    rename_pool=None,
 ) -> list[dict]:
     chosen = [
         d for d in diagnoses
@@ -451,6 +452,7 @@ def build_items(
         hint += 1
     hint = _draft_rename(
         rename_clusters, prescription_id, hint, attending_of, project_root, drafted, drops_out,
+        rename_pool=rename_pool,
     )
 
     kept: dict[tuple, dict] = {}
@@ -472,12 +474,43 @@ def build_items(
 def _draft_rename(
     rename_clusters: list, prescription_id: str, hint: int, attending_of: dict,
     project_root: str, drafted: list, drops_out: list | None,
+    rename_pool=None,
+) -> int:
+    """LSP 池子的生命周期壳：有正骨簇才建池，用完记未到岗台账再统一退。
+
+    池子在岗时守门用 references 销账（确认无跨文件引用 → 照常入方）；
+    缺席时一切回退文本守门，行为与没有 LSP 的现状一致。
+    """
+    pool = rename_pool
+    own = None
+    if pool is None and project_root and rename_clusters:
+        from ..lsp.pool import Pool
+
+        own = Pool(project_root)
+        pool = own
+    try:
+        return _draft_rename_rows(
+            rename_clusters, prescription_id, hint, attending_of,
+            project_root, drafted, drops_out, pool,
+        )
+    finally:
+        # 台账行谁建池子都照记；但只关自己建的池子，传入的池子归调用方管。
+        if pool is not None and drops_out is not None:
+            for note in pool.notes():
+                drops_out.append({"file": "", "line": 0, "reason": note})
+        if own is not None:
+            own.close()
+
+
+def _draft_rename_rows(
+    rename_clusters: list, prescription_id: str, hint: int, attending_of: dict,
+    project_root: str, drafted: list, drops_out: list | None, pool,
 ) -> int:
     """正骨入方三道闸：仓库声明的命名约定（catalog.rename.exempt）先入待复核；
     G1 局部名字直接过；G5 import 别名是本文件局部绑定直接过（__init__.py 重导出除外，
-    入待复核写明 LSP001）；其余先守门（跨文件引用 → 待复核），
-    再按规模合并（同规则同文件 ≥ RENAME_BATCH_MIN → 一味外购批量迁移），
-    最后 touches_public_api 升档。返回下一个 seq hint。"""
+    入待复核写明 LSP001——LSP 到岗时改为 references 销账）；
+    其余先守门（跨文件引用 → 待复核），再按规模合并（同规则同文件 ≥ RENAME_BATCH_MIN →
+    一味外购批量迁移），最后 touches_public_api 升档。返回下一个 seq hint。"""
     from ..catalog.policy import load_policy
     from ..catalog.rename import (
         G1_LOCAL_RULES,
@@ -539,15 +572,29 @@ def _draft_rename(
                         })
                     continue
                 if Path(file_path).name == "__init__.py":
-                    if drops_out is not None:
-                        drops_out.append({
-                            "file": file_path, "line": head.line_start,
-                            "reason": (
-                                f"正骨 {rule_id}：别名 {symbol} 在 __init__.py 里是包的重导出名，"
-                                "改名影响包外引用，等 LSP 符号级 scope（LSP001）"
-                            ),
-                        })
-                    continue
+                    refs = pool.cross_file_refs(file_path, head.line_start, symbol) if pool else None
+                    if refs is None:
+                        if drops_out is not None:
+                            drops_out.append({
+                                "file": file_path, "line": head.line_start,
+                                "reason": (
+                                    f"正骨 {rule_id}：别名 {symbol} 在 __init__.py 里是包的重导出名，"
+                                    "改名影响包外引用，等 LSP 符号级 scope（LSP001）"
+                                ),
+                            })
+                        continue
+                    if refs:
+                        if drops_out is not None:
+                            sample = "、".join(sorted(refs)[:3])
+                            drops_out.append({
+                                "file": file_path, "line": head.line_start,
+                                "reason": (
+                                    f"正骨 {rule_id}：LSP 确认别名 {symbol} 被 "
+                                    f"{len(refs)} 个文件引用（{sample}），重导出改名不入方"
+                                ),
+                            })
+                        continue
+                    # 空集：LSP 确认这个重导出名没有包外引用，守门销账，照常入方。
             elif rule_id not in G1_LOCAL_RULES:
                 if not symbol:
                     if drops_out is not None:
@@ -556,7 +603,21 @@ def _draft_rename(
                             "reason": f"正骨 {rule_id}：提取不到符号名，无法证明单文件闭包，留人工核对",
                         })
                     continue
-                if cross_file_reference(project_root, file_path, symbol):
+                refs = pool.cross_file_refs(file_path, head.line_start, symbol) if pool else None
+                if refs is not None:
+                    # LSP 在岗：references 说了算。空集销账，非空维持待复核但写明证据。
+                    if refs:
+                        if drops_out is not None:
+                            sample = "、".join(sorted(refs)[:3])
+                            drops_out.append({
+                                "file": file_path, "line": head.line_start,
+                                "reason": (
+                                    f"正骨 {rule_id}：LSP 确认符号 {symbol} 被 "
+                                    f"{len(refs)} 个文件引用（{sample}），不入方"
+                                ),
+                            })
+                        continue
+                elif cross_file_reference(project_root, file_path, symbol):
                     if drops_out is not None:
                         drops_out.append({
                             "file": file_path, "line": head.line_start,

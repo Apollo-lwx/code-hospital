@@ -26,6 +26,10 @@
 > 并补「发现数超百」的批量迁移口径（§3）。
 > 修订（2026-11-20）：命名约定豁免落地为仓级外置配置 `catalog.rename.exempt`；
 > ruff N8xx 符号提取补齐；本仓真实观察通过，phase 降到 1。
+> 修订（2026-11-23）：LSP 基座一期（references）落地——§2 跨文件守门与 §6
+> `__init__.py` 重导出守门在 LSP 到岗时改为 references 销账（无跨文件引用照常入方、
+> 有引用写明证据），缺席时回退文本守门行为不变。见 code-hospital-lsp-scope-draft.md。
+> G6（N999）等二期 rename。
 
 ---
 

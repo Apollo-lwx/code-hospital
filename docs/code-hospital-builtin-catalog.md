@@ -267,7 +267,7 @@ graph TD
 |---|---|---|---|---|---|---|
 | debride | 清创 | `rule`。ruff 精确 `F401`、`F541`、`F841`、`E501`、`I001`，以及前缀 `I`、`UP`、`W`、`C4`、`RET`、`SIM`、`PIE`、`RUF`。`critical` 不命中 | autofix | low | `line_range`。验收别名 lint。置信度 0.86 | 1 |
 | split | 拆分 | `rule`。`structure.function_lines`、`structure.file_lines`、`structure.cyclomatic` | llm_patch | medium | 函数级 `symbol`，文件行数 `file`。验收别名 test | 1 |
-| rename | 正骨 | `rule`。G1–G5 按动作分组枚举（`N801`–`N807`、`N815`、`N816`、`N818` + 别名 `N811`–`N814`、`N817`，不接 `N999`）。跨文件引用守门：符号被其他文件 import 的发现不入方、留待复核（等 LSP001）；import 别名是本文件局部绑定不守门（`__init__.py` 重导出除外，入待复核）；同规则同文件 ≥20 处合并为一味外购批量迁移；命中 `catalog.rename.exempt` 的命名约定符号不入方、留待复核 | llm_patch（批量迁移项 manual） | medium；`touches_public_api` 时 high | `reference_closure`（一期语义：单文件闭包）。验收别名 test | 1 |
+| rename | 正骨 | `rule`。G1–G5 按动作分组枚举（`N801`–`N807`、`N815`、`N816`、`N818` + 别名 `N811`–`N814`、`N817`，不接 `N999`）。跨文件引用守门：LSP 基座（`lsp/`，内置 python/ts/java 注册表）到岗时 references 销账（无跨文件引用照常入方、有引用写明证据），缺席回退文本扫描（发现不入方、留待复核写明 LSP001）；import 别名是本文件局部绑定不守门（`__init__.py` 重导出除外，同 LSP 口径）；同规则同文件 ≥20 处合并为一味外购批量迁移；命中 `catalog.rename.exempt` 的命名约定符号不入方、留待复核 | llm_patch（批量迁移项 manual） | medium；`touches_public_api` 时 high | `reference_closure`（一期语义：单文件闭包）。验收别名 test | 1 |
 | dedupe | 去重 | `rule`。`jscpd` 的 `clone.duplicate` | llm_patch | medium | `file`。验收别名 test | 1 |
 | guard | 补罩 | `rule`。`BLE001`、`java.null-deref`、`java.resource-leak`。`critical` 不命中，改走封存 | llm_patch | medium | 有符号用 `symbol`，否则 `line_range`。验收别名 test | 1 |
 | seal | 封存 | `severity: critical`，以及 gitleaks 的全部规则。`hold: true` | manual | high | `line_range`。不改文件。gitleaks 置信度 0.92；ruff 的 critical 为 0.70；semgrep 与 java-pack 的 critical 为 0.62 | 1 |

@@ -13,6 +13,23 @@ from code_hospital.core.models import Diagnosis, Finding
 from code_hospital.departments.prescriber import build_items
 
 
+class _AbsentPool:
+    """LSP 缺席的确定性桩：守门一律回退文本扫描，不产台账行（等价于没装语言服务）。
+
+    本文件的守门测试不该依赖本机有没有装 pyright——一律显式缺席。
+    LSP 在岗时的行为见文件末尾「LSP 守门销账」一节与 tests/test_lsp.py。
+    """
+
+    def cross_file_refs(self, file_path, line, symbol):
+        return None
+
+    def notes(self):
+        return []
+
+    def close(self):
+        pass
+
+
 def _finding(rule_id: str, file_path: str, line: int, symbol: str) -> Finding:
     return Finding(
         id=f"fnd-{rule_id}-{line}-{symbol}", case_id="case-x", report_id="rpt-x",
@@ -96,7 +113,10 @@ def _build(tmp_path: Path, members: list[Finding]):
     diagnosis = _diagnosis(members)
     by_id = {f.id: f for f in members}
     drops: list[dict] = []
-    items = build_items([diagnosis], by_id, "rx-x", True, project_root=str(tmp_path), drops_out=drops)
+    items = build_items(
+        [diagnosis], by_id, "rx-x", True,
+        project_root=str(tmp_path), drops_out=drops, rename_pool=_AbsentPool(),
+    )
     return items, drops
 
 
@@ -162,6 +182,7 @@ def test_batch_merge_over_threshold(tmp_path: Path):
     drops: list[dict] = []
     items = build_items(
         diagnoses, by_id, "rx-x", True, project_root=str(tmp_path), drops_out=drops,
+        rename_pool=_AbsentPool(),
     )
     rename_items = [it for it in items if it["formula_id"] == "rename"]
     assert len(rename_items) == 1
@@ -181,6 +202,7 @@ def test_below_threshold_stays_llm_patch(tmp_path: Path):
     by_id = {f.id: f for f in members}
     items = build_items(
         diagnoses, by_id, "rx-x", True, project_root=str(tmp_path), drops_out=[],
+        rename_pool=_AbsentPool(),
     )
     rename_items = [it for it in items if it["formula_id"] == "rename"]
     assert rename_items
@@ -296,3 +318,123 @@ def test_exempt_policy_parsing(tmp_path: Path):
     # 没声明：内置默认为空
     (tmp_path / "code-hospital.yaml").write_text("catalog:\n  rules: {}\n", encoding="utf-8")
     assert load_policy(str(tmp_path)).rename_exempt == ()
+
+
+# ---------- LSP 守门销账（references 在岗时的行为）----------
+
+
+class _StubPool:
+    """LSP 在岗的桩：references 结果由测试直接给定。refs=None 表示缺席。"""
+
+    def __init__(self, refs, notes=()):
+        self._refs = refs
+        self._notes = list(notes)
+        self.closed = False
+
+    def cross_file_refs(self, file_path, line, symbol):
+        return self._refs
+
+    def notes(self):
+        return list(self._notes)
+
+    def close(self):
+        self.closed = True
+
+
+def _build_with_pool(tmp_path: Path, members: list[Finding], pool):
+    diagnosis = _diagnosis(members)
+    by_id = {f.id: f for f in members}
+    drops: list[dict] = []
+    items = build_items(
+        [diagnosis], by_id, "rx-x", True,
+        project_root=str(tmp_path), drops_out=drops, rename_pool=pool,
+    )
+    return items, drops
+
+
+def test_lsp_clears_guard_when_no_cross_file_refs(tmp_path: Path):
+    """文本守门拦下（b.py import 了 Foo），但 LSP 确认没有跨文件引用 → 销账入方。"""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.py").write_text("def Foo():\n    return 1\n", encoding="utf-8")
+    (tmp_path / "src" / "b.py").write_text("from a import Foo\n", encoding="utf-8")
+    members = [_finding("N802", "src/a.py", 1, "Foo")]
+    items, drops = _build_with_pool(tmp_path, members, _StubPool(set()))
+    rename_items = [it for it in items if it["formula_id"] == "rename"]
+    assert len(rename_items) == 1
+    assert rename_items[0]["method"] == "llm_patch"
+    assert drops == []
+
+
+def test_lsp_confirmed_refs_stay_in_review(tmp_path: Path):
+    """LSP 确认有跨文件引用 → 维持待复核，reason 写明证据而不是「等 LSP001」。"""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.py").write_text("def Foo():\n    return 1\n", encoding="utf-8")
+    members = [_finding("N802", "src/a.py", 1, "Foo")]
+    items, drops = _build_with_pool(tmp_path, members, _StubPool({"src/b.py", "src/c.py"}))
+    assert [it for it in items if it["formula_id"] == "rename"] == []
+    assert len(drops) == 1
+    assert "LSP 确认" in drops[0]["reason"]
+    assert "2 个文件" in drops[0]["reason"]
+    assert "LSP001" not in drops[0]["reason"]
+
+
+def test_lsp_clears_init_reexport_when_unreferenced(tmp_path: Path):
+    """__init__.py 重导出名：LSP 确认没有包外引用 → 销账入方（原来是必然待复核）。"""
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text(
+        "from collections import OrderedDict as OD\n", encoding="utf-8",
+    )
+    members = [_finding("N817", "pkg/__init__.py", 1, "OD")]
+    items, drops = _build_with_pool(tmp_path, members, _StubPool(set()))
+    rename_items = [it for it in items if it["formula_id"] == "rename"]
+    assert len(rename_items) == 1
+    assert drops == []
+
+
+def test_lsp_confirmed_init_reexport_stays_in_review(tmp_path: Path):
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text(
+        "from collections import OrderedDict as OD\n", encoding="utf-8",
+    )
+    members = [_finding("N817", "pkg/__init__.py", 1, "OD")]
+    items, drops = _build_with_pool(tmp_path, members, _StubPool({"app/main.py"}))
+    assert [it for it in items if it["formula_id"] == "rename"] == []
+    assert len(drops) == 1
+    assert "重导出" in drops[0]["reason"]
+    assert "app/main.py" in drops[0]["reason"]
+
+
+def test_default_pool_notes_landed_in_drops(tmp_path: Path):
+    """基座未到岗的台账行跟着待复核进报告（file 为空表示这不是某条发现的行）。"""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.py").write_text("def Foo():\n    return 1\n", encoding="utf-8")
+    members = [_finding("N802", "src/a.py", 1, "Foo")]
+    pool = _StubPool(None, notes=["LSP 基座：python 未到岗（pyright-langserver 不在 PATH 上），本轮降级文本守门"])
+    items, drops = _build_with_pool(tmp_path, members, pool)
+    assert any(row["file"] == "" and "未到岗" in row["reason"] for row in drops)
+    # 缺席时回退文本守门：没有跨文件引用的符号照常入方
+    assert any(it["formula_id"] == "rename" for it in items)
+
+
+def test_default_pool_created_and_closed(tmp_path: Path, monkeypatch):
+    """不传池子时 build_items 自建自关：会话不泄漏（draft 验收断言）。"""
+    created = []
+
+    class _TrackingPool(_StubPool):
+        def __init__(self, root):
+            super().__init__(None)
+            created.append(self)
+
+    # prescriber 是函数内 from ..lsp.pool import Pool，打的是 lsp.pool 模块属性
+    monkeypatch.setattr("code_hospital.lsp.pool.Pool", _TrackingPool)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.py").write_text("def Foo():\n    return 1\n", encoding="utf-8")
+    members = [_finding("N802", "src/a.py", 1, "Foo")]
+    _build(tmp_path, members)  # _build 传了桩池，自建路径单独验
+    assert created == []
+
+    diagnosis = _diagnosis(members)
+    by_id = {f.id: f for f in members}
+    build_items([diagnosis], by_id, "rx-x", True, project_root=str(tmp_path), drops_out=[])
+    assert len(created) == 1
+    assert created[0].closed is True
