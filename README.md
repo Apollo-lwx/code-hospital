@@ -6,7 +6,7 @@
 
 把代码送到医院：先体检、再诊断、开处方、按方修码、护士全程盯防、复查确认才出院——每一步都有报告。AI 修代码不再是「赤脚医生模式」（看两眼就动手、改完不验证、越改越偏），而是按**病历、处方、护理记录**行医的正规医院：**有处方可查、有边界可控、有差分可证**，数据只落当前仓库的 `.hospital/`。
 
-> 当前版本 v0.2：诊疗全程闭环已可用（挂号 / 检验 / 诊断 / 开方 / 成药与煎药 / 出院门禁 / 病例查询 / `hosp_treat` 自动档）；13 种号别与 23 台内置仪器名册、能力市场（`hosp_market`，影子期 + 判据转正）与院规（`hosp_rule`）已上线；会诊转诊单（R1–R4 + `referred_from` 直接转诊）与正骨（rename，phase 1）已落地，ast-grep、LSP 符号级 scope 等仍按[路线图](#路线图)开放。
+> 当前版本 v0.2：诊疗全程闭环已可用（挂号 / 检验 / 诊断 / 开方 / 成药与煎药 / 出院门禁 / 病例查询 / `hosp_treat` 自动档）；13 种号别与 23 台内置仪器名册、能力市场（`hosp_market`，影子期 + 判据转正）与院规（`hosp_rule`）已上线；会诊转诊单（R1–R4 + `referred_from` 直接转诊）、正骨（rename，phase 1）与 LSP 符号级 scope（references / lsp_rename / lsp_move）已落地，ast-grep（候选仪器，无排期）等仍按[路线图](#路线图)开放。
 > 用户向术语手册见 [`docs/code-hospital-glossary.md`](docs/code-hospital-glossary.md)；设计契约见 [`docs/code-hospital-design.md`](docs/code-hospital-design.md)；IO 契约见 [`docs/code-hospital-io-contracts.md`](docs/code-hospital-io-contracts.md)；算法与建模设计见 [`docs/code-hospital-algorithms.md`](docs/code-hospital-algorithms.md)；架构演进方案见 [`docs/code-hospital-agent-runtime-plan.md`](docs/code-hospital-agent-runtime-plan.md)。运行时实现在 `code_hospital.core.algorithms`（`docs/algorithms_reference.py` 只是自检入口）。
 
 ## 目录

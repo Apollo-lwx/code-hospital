@@ -454,7 +454,7 @@ SpotBugs（没有时试 FindBugs）是外部仪器，分析已编译的 class，
 | [ESLint 架构](https://eslint.org/docs/latest/contribute/architecture/) | CLI、配置加载、Linter 内核分开。规则是 `{ meta, create }`，内核不做文件 IO | MIT | 规则元数据见下方「搬迁」。ESLint 本体不链入，JS/TS 项目有配置时才进程外调用 |
 | [import-linter 分层契约](https://github.com/seddonym/import-linter) | 架构规则是仓库里的契约：`layers` 从高到低，高层可以 import 低层；另有 `independence`。契约没写的层不会被发明出来 | BSD | 契约形状搬到分层尺。图算法留在对方 CLI |
 | [ArchUnit](https://github.com/TNG/ArchUnit) | 分层用「层名 + 包模式 + mayOnlyBeAccessedBy」说清楚，违规是一条条可定位的失败 | Apache-2.0 | 只借词汇。它分析 Java 字节码，不嵌入 Python 进程 |
-| [ast-grep](https://github.com/ast-grep/ast-grep) | 三层：匹配核、YAML 规则、语言文法。规则用 `id`、`language`、`rule`、`fix` 表达「找到并替换」 | MIT | 第一期 Java 与热点仍走已接入的 semgrep。ast-grep 作为下一台仪器，专管能写成结构替换的成药 |
+| [ast-grep](https://github.com/ast-grep/ast-grep) | 三层：匹配核、YAML 规则、语言文法。规则用 `id`、`language`、`rule`、`fix` 表达「找到并替换」 | MIT | 第一期 Java 与热点仍走已接入的 semgrep。ast-grep 为候选仪器（无排期，2026-11-24 拍板）：专管能写成结构替换的成药，接入前提见下方复用表 |
 | [reviewdog](https://github.com/reviewdog/reviewdog) | 把各 linter 的输出收成统一诊断（rdjson / SARIF），再按 diff 过滤。诊断上可以带 `suggestions`（一段替换文本） | MIT | 我们已有自己的 `Finding` 归一。建议以后给 `RawFinding.extra` 留 `suggestion`，让成药不只有 ruff 一条路。不引入 reviewdog 的评论机器人 |
 | [lizard](https://github.com/terryyin/lizard) | 多语言圈复杂度，不要求头文件或完整编译 | MIT | 结构尺的行数自己数。圈复杂度在 lizard 在岗时复用其 CLI |
 | [security-audit](https://github.com/cloudflare/security-audit-skill) | 发现和核实分开；裁决分已确认、待验证、已排除；按攻击类记账，没查的不能写成正常 | MIT | 搬进安全科的裁决和安全号、重症号的覆盖账。不拷技能正文，不新开 `hosp_*` 工具，不在医院进程里跑狩猎子代理 |
@@ -482,7 +482,7 @@ SpotBugs（没有时试 FindBugs）是外部仪器，分析已编译的 class，
 | lizard | `lizard` 输出圈复杂度，结构尺吸收超过 15 的函数 | MIT |
 | import-linter | 仓库已有契约时运行 `lint-imports` | BSD |
 | mypy 或 pyright | 仅 `requested_instruments` 含 `type-ruler` 时运行 | MIT / 相应仓库许可，进程外 |
-| ast-grep | 下一期。`sg scan` 跑我们自己的 YAML；带 `fix` 的规则才有资格进成药 | MIT |
+| ast-grep | 候选仪器（无排期，2026-11-24 拍板）：不进默认初检（缺席噪音）；有 ≥1 个带 `fix` 的随包规则（真成药需求）才写适配器，`sg scan` 跑我们自己的 YAML | MIT |
 | jscpd | 与去重药同一期。第一期去重药 `phase: 2`，不入方 | MIT（以 [kucherenko/jscpd](https://github.com/kucherenko/jscpd) 的 LICENSE 为准） |
 
 jscpd 的复制检测、ast-grep 的结构替换，都是「有二进制就多一台仪器」。第一期不把它们写成硬依赖。
