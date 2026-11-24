@@ -37,6 +37,10 @@ def test_builtin_languages():
     # 方言：.js 的 languageId 是 javascript
     assert by_ext[".js"].language_id_for(".js") == "javascript"
     assert by_ext[".ts"].language_id_for(".ts") == "typescript"
+    # 内置三语言都带安装指引（只展示，永不执行）
+    assert "pyright" in specs["python"].install_hint
+    assert "typescript-language-server" in specs["typescript"].install_hint
+    assert specs["java"].install_hint
 
 
 def test_repo_config_extends_and_overrides(tmp_path: Path):
@@ -46,6 +50,7 @@ def test_repo_config_extends_and_overrides(tmp_path: Path):
         "        extensions: [.go]\n"
         "        command: gopls\n"
         "        args: [serve]\n"
+        "        install_hint: go install golang.org/x/tools/gopls@latest\n"
         "      - id: python\n"
         "        extensions: [.py]\n"
         "        command: basedpyright-langserver\n"
@@ -56,9 +61,12 @@ def test_repo_config_extends_and_overrides(tmp_path: Path):
     specs, notes = registry.for_project(str(tmp_path))
     assert notes == []
     assert specs["go"].command == "gopls"
+    assert specs["go"].install_hint == "go install golang.org/x/tools/gopls@latest"
     # 仓级按 id 覆盖内置
     assert specs["python"].command == "basedpyright-langserver"
     assert specs["python"].startup_timeout_s == 90.0
+    # 覆盖行没写 install_hint 就是空，不继承内置的
+    assert specs["python"].install_hint == ""
 
 
 def test_repo_config_rejects_bad_rows(tmp_path: Path):
@@ -131,6 +139,19 @@ def test_pool_absent_command_degrades_with_note(tmp_path: Path):
         notes = pool.notes()
     assert len(notes) == 1
     assert "未到岗" in notes[0]
+
+
+def test_pool_absent_command_note_carries_install_hint(tmp_path: Path):
+    """仪器缺席的降级提示带安装指引（只展示，永不执行）。"""
+    _seed_repo(tmp_path)
+    specs = {"python": _fake_spec(
+        command="definitely-not-a-real-lsp-server-x",
+        install_hint="pip install pyright",
+    )}
+    with Pool(str(tmp_path), specs=specs) as pool:
+        assert pool.cross_file_refs("src/a.py", 1, "Foo") is None
+        notes = pool.notes()
+    assert "安装：pip install pyright" in notes[0]
 
 
 def test_pool_separates_cross_file_refs(tmp_path: Path, monkeypatch):

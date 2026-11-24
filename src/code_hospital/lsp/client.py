@@ -56,7 +56,8 @@ class Client:
     def start(cls, spec: LanguageSpec, root: str) -> "Client":
         resolved = shutil.which(spec.command)
         if not resolved:
-            raise LspError(f"{spec.command} 不在 PATH 上")
+            hint = f"（安装：{spec.install_hint}）" if spec.install_hint else ""
+            raise LspError(f"{spec.command} 不在 PATH 上{hint}")
         try:
             proc = subprocess.Popen(
                 [resolved, *spec.args],

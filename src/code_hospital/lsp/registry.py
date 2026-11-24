@@ -29,6 +29,7 @@ class LanguageSpec:
     command: str                          # PATH 裸名
     args: tuple[str, ...] = ()
     dialects: tuple[tuple[str, str], ...] = ()  # 扩展名 → languageId 的例外（.js → javascript）
+    install_hint: str = ""        # 缺席时随降级提示展示的安装指引（只展示，永不执行）
     startup_timeout_s: float = 45.0
     request_timeout_s: float = 20.0
 
@@ -124,6 +125,7 @@ def _parse_row(row) -> tuple[LanguageSpec | None, str]:
         command=command,
         args=tuple(args),
         dialects=tuple(pairs),
+        install_hint=" ".join(str(row.get("install_hint") or "").split())[:120],
         startup_timeout_s=_timeout(row.get("startup_timeout_s"), 45.0),
         request_timeout_s=_timeout(row.get("request_timeout_s"), 20.0),
     ), ""

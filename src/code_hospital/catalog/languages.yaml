@@ -1,11 +1,13 @@
 # LSP 语言注册表（内置默认，docs/code-hospital-lsp-scope-draft.md 已定稿）。
-# 语言服务是外部二进制，医院不打包；命令名只认 PATH 上的裸名。
+# 语言服务是外部二进制，医院不打包也不代装；命令名只认 PATH 上的裸名。
+# install_hint 只在仪器缺席时随降级提示展示，永不执行（open-decisions 拍板：不代下外部二进制）。
 # 被诊仓库 code-hospital.yaml 的 catalog.lsp.languages 可追加新语言或按 id 覆盖本表。
 - id: python
   extensions: [.py]
   language_id: python
   command: pyright-langserver
   args: ["--stdio"]
+  install_hint: pip install pyright（或 npm i -g pyright）
   startup_timeout_s: 45
   request_timeout_s: 20
 - id: typescript
@@ -17,6 +19,7 @@
     .tsx: typescriptreact
   command: typescript-language-server
   args: ["--stdio"]
+  install_hint: npm i -g typescript typescript-language-server
   startup_timeout_s: 45
   request_timeout_s: 20
 # 重型可选：jdtls 本体约 500MB 且自身需 JDK 21+ 运行（1.63 起要 25；分析 1.8+ 项目不受影响）。
@@ -26,5 +29,6 @@
   language_id: java
   command: jdtls
   args: []                      # jdtls 常需 -data <工作区目录>，按仓库配置补
+  install_hint: 自装 jdtls（约 500MB，自身需 JDK 21+ 运行）；不装自动降级文本守门
   startup_timeout_s: 180        # 重设备：首次索引以分钟计
   request_timeout_s: 30
