@@ -14,3 +14,21 @@ rules:
     pattern-either:
       - pattern: $TYPE $RES = new FileInputStream(...);
       - pattern: $TYPE $RES = new FileReader(...);
+  # 以下两条带 fix，是 Java 成药执行器（semgrep --autofix）的适应证。
+  # 只有写得出机械安全修法的规则才准带 fix；写不出的维持续治。
+  - id: java.boxing-constructor
+    languages: [java]
+    severity: WARNING
+    message: 包装类构造器已弃用（JDK 9+），改用 valueOf
+    patterns:
+      - pattern: new $BOX($X)
+      - metavariable-regex:
+          metavariable: $BOX
+          regex: ^(Boolean|Byte|Character|Short|Integer|Long|Float|Double)$
+    fix: $BOX.valueOf($X)
+  - id: java.literal-equals-first
+    languages: [java]
+    severity: WARNING
+    message: 字面量置前 equals，避免左操作数为空时抛 NPE
+    pattern: $X.equals("$S")
+    fix: '"$S".equals($X)'

@@ -71,6 +71,8 @@ _RULE_PLAIN = {
     "python.exec": "执行任意代码",
     "python.hardcoded-secret": "密钥写在源码里",
     "java.line-length": "Java 行太长",
+    "java.boxing-constructor": "包装类构造器已弃用",
+    "java.literal-equals-first": "equals 字面量未置前",
     "java.empty-catch": "空的 catch",
     "java.system-out": "用了 System.out.print",
     "java.hardcoded-secret": "密钥写在源码里",

@@ -109,7 +109,7 @@ _FOLLOW_CAP = 40
 
 
 def _rule_id_from_item(item: dict) -> str:
-    selected = re.search(r"规则\s+([A-Za-z][A-Za-z0-9]+)", item.get("instructions") or "")
+    selected = re.search(r"规则\s+([A-Za-z][A-Za-z0-9._-]*)", item.get("instructions") or "")
     return selected.group(1) if selected else ""
 
 
@@ -972,8 +972,11 @@ def _clip_to_spans(old: str, new: str, spans: list) -> str:
 
 def _autofix_engine(item: dict) -> str:
     sample = (item.get("scope_paths") or [item.get("target_file") or ""])[0]
-    if Path(sample).suffix.lower() in {".js", ".jsx", ".ts", ".tsx"}:
+    suffix = Path(sample).suffix.lower()
+    if suffix in {".js", ".jsx", ".ts", ".tsx"}:
         return "eslint"
+    if suffix == ".java":
+        return "semgrep"
     return "ruff"
 
 
@@ -1008,6 +1011,19 @@ async def _autofix_inner(db, root: str, case, rx, item: dict, dry_run: bool, wor
             return await _fail(db, case, rx, item, "未找到 eslint，成药未执行，文件未改", "eslint --fix")
         command = [binary, "--fix", *paths]
         executor = "eslint --fix"
+    elif engine == "semgrep":
+        from ..catalog.formulary import instruments
+        from ..catalog.packs import fixable_rules, semgrep_available
+
+        executor = "semgrep --autofix"
+        if not instruments()["java-pack"].get("can_autofix"):
+            return await _fail(db, case, rx, item, "java-pack 成药执行器未开启，未改代码", executor)
+        if not semgrep_available():
+            return await _fail(db, case, rx, item, "未找到 semgrep，成药未执行，文件未改", executor)
+        rule_id = _rule_id_from_item(item)
+        if rule_id and rule_id not in fixable_rules("java-pack"):
+            return await _fail(db, case, rx, item, f"{rule_id} 没有机械修法，未改代码", executor)
+        command = []
     else:
         binary = _ruff_binary()
         if not binary:
@@ -1025,7 +1041,12 @@ async def _autofix_inner(db, root: str, case, rx, item: dict, dry_run: bool, wor
         return await _fail(db, case, rx, item, "成药缺少 scope_lines，未执行", executor)
     before = {rel: _read(base / rel) for rel in paths}
     try:
-        await _run(command, cwd=str(base), timeout=60)
+        if engine == "semgrep":
+            from ..catalog.packs import autofix_pack
+
+            await autofix_pack(str(base), paths, "java-pack", 60)
+        else:
+            await _run(command, cwd=str(base), timeout=60)
     except (AdapterError, OSError) as exc:
         for rel, text in before.items():
             (base / rel).write_text(text, encoding="utf-8")

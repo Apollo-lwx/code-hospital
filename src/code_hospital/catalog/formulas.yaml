@@ -9,7 +9,7 @@
   acceptance_alias: lint
   indications:
     - kind: rule
-      rule_ids: [F401, F541, F841, E501, I001, java.line-length, ts.line-length]
+      rule_ids: [F401, F541, F841, E501, I001, java.line-length, ts.line-length, java.boxing-constructor, java.literal-equals-first]
       prefixes: [I, UP, W, C4, RET, SIM, PIE, RUF]
 - id: split
   name: 拆分

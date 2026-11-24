@@ -44,6 +44,45 @@ def semgrep_available() -> bool:
     return shutil.which("semgrep") is not None
 
 
+def fixable_rules(instrument_id: str) -> set[str]:
+    """这台仪器的随包规则里带 fix 的规则 id——只有这些能走成药。
+
+    规则文件坏了我当没有可修规则（开方侧会把药开成续治，不会误执行）。
+    """
+    import yaml
+
+    try:
+        doc = yaml.safe_load(pack_path(instrument_id).read_text(encoding="utf-8")) or {}
+    except (AdapterError, OSError, yaml.YAMLError):
+        return set()
+    out: set[str] = set()
+    for row in doc.get("rules") or []:
+        if isinstance(row, dict) and row.get("fix") and row.get("id"):
+            out.add(str(row["id"]))
+    return out
+
+
+async def autofix_pack(
+    repo_root: str, files: list[str], instrument_id: str, timeout_s: float,
+) -> None:
+    """semgrep --autofix：就地应用随包规则里带 fix 的机械修法。
+
+    只修不改语义靠两条纪律：规则侧只有机械安全的规则才准带 fix；
+    执行侧由药房按 scope_lines 裁剪差分（与 eslint --fix 同一口径）。
+    """
+    if not semgrep_available():
+        raise AdapterError("semgrep 未到岗")
+    if not files:
+        return
+    config = pack_path(instrument_id)
+    await _run(
+        ["semgrep", "scan", "--autofix", "--quiet", "--metrics=off",
+         "--config", str(config), "--", *files],
+        cwd=repo_root,
+        timeout=max(timeout_s, 1),
+    )
+
+
 def _symbol(extra: dict) -> str:
     metavars = extra.get("metavars") or {}
     for key in _SYMBOL_KEYS:

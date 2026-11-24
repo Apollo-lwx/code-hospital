@@ -557,3 +557,141 @@ async def test_follow_autofix_stops_at_cap(git_repo, monkeypatch):
     assert capped["batch"]["stopped"] == "limit"
     assert capped["batch"]["remaining"] == 1
     assert "follow_autofix" in capped["handoff"]["confirm_hint"]
+
+
+# ---------- Java 成药执行器（semgrep --autofix）----------
+
+_JAVA_SOURCE = "class A {\n    Integer x = new Integer(5);\n}\n"
+
+
+class JavaPackFixAdapter(ScannerAdapter):
+    """java-pack 检出可机械修的弃用构造器（规范类 → 告知级）。"""
+
+    name = "java-pack"
+    binary = "git"
+    extensions = frozenset({".java"})
+
+    async def scan(self, repo_root, files, timeout_ms):
+        return [RawFinding(
+            rule_id="java.boxing-constructor", message="包装类构造器已弃用",
+            file_path="src/A.java", line_start=2, line_end=2, severity="minor",
+        )]
+
+
+class JavaLineAdapter(ScannerAdapter):
+    """java-review 检出行长（清创在册但 java-pack 没有这条规则的机械修法）。"""
+
+    name = "java-review"
+    binary = "git"
+    extensions = frozenset({".java"})
+
+    async def scan(self, repo_root, files, timeout_ms):
+        return [RawFinding(
+            rule_id="java.line-length", message="这一行有 121 个字符，超过 120",
+            file_path="src/A.java", line_start=2, line_end=2, severity="minor",
+        )]
+
+
+def _seed_java_repo(git_repo: str) -> None:
+    (Path(git_repo) / "src" / "A.java").write_text(_JAVA_SOURCE, encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=git_repo, check=True)
+
+
+async def _java_prescription(git_repo: str, adapter, monkeypatch) -> tuple[str, dict]:
+    """跑到批准后的处方，返回 (prescription_id, 被点名的告知项)。"""
+    monkeypatch.setattr("code_hospital.lsp.pool.Pool", _AbsentPool)
+    _use(adapter)
+    reg = await reception.register(
+        title="java 成药", scope_type="staged", scope={},
+        auto_advance=False, project_root=git_repo,
+    )
+    case_id = reg["case_id"]
+    await scanner.scan(case_id=case_id, stage_confirmed=True, project_root=git_repo)
+    await diagnostician.diagnose(case_id=case_id, stage_confirmed=True, project_root=git_repo)
+    draft = await prescriber.prescribe(
+        case_id=case_id, stage_confirmed=True, acceptance_decision="skip",
+        project_root=git_repo,
+    )
+    if draft.get("status") == "pending_question":
+        draft = await prescriber.prescribe(
+            case_id=case_id, stage_confirmed=True, low_confidence="adopt",
+            acceptance_decision="skip", project_root=git_repo,
+        )
+    assert draft["status"] == "draft"
+    advisory = next(it for it in draft["items"] if it["status"] == "advisory")
+    approved = await prescriber.prescribe(
+        case_id=case_id, approve=True, approver="host_agent",
+        include_advisory=[advisory["id"]], project_root=git_repo,
+    )
+    assert approved["status"] == "approved"
+    return draft["prescription_id"], advisory
+
+
+async def test_java_autofix_applies_semgrep_fix(git_repo, monkeypatch):
+    """桩 semgrep 就地改写，走通成药全管线（快照/裁剪/验收/落账）。"""
+    _seed_java_repo(git_repo)
+    rx_id, advisory = await _java_prescription(git_repo, JavaPackFixAdapter, monkeypatch)
+
+    async def fake_autofix(repo_root, files, instrument_id, timeout_s):
+        assert instrument_id == "java-pack"
+        path = Path(repo_root) / "src" / "A.java"
+        text = path.read_text(encoding="utf-8")
+        path.write_text(text.replace("new Integer(5)", "Integer.valueOf(5)"), encoding="utf-8")
+
+    monkeypatch.setattr("code_hospital.catalog.packs.semgrep_available", lambda: True)
+    monkeypatch.setattr("code_hospital.catalog.packs.autofix_pack", fake_autofix)
+
+    res = await pharmacist.dispense(
+        prescription_id=rx_id, item_id=advisory["id"], project_root=git_repo,
+    )
+    assert res["status"] == "applied"
+    assert res["dose"]["executor"] == "semgrep --autofix"
+    assert res["dose"]["result"] == "success"
+    text = (Path(git_repo) / "src" / "A.java").read_text(encoding="utf-8")
+    assert "Integer.valueOf(5)" in text
+    assert "new Integer" not in text
+
+
+async def test_java_autofix_without_semgrep_fails(git_repo, monkeypatch):
+    """semgrep 不在岗：成药失败留痕，文件不动。"""
+    _seed_java_repo(git_repo)
+    rx_id, advisory = await _java_prescription(git_repo, JavaPackFixAdapter, monkeypatch)
+    monkeypatch.setattr("code_hospital.catalog.packs.semgrep_available", lambda: False)
+
+    res = await pharmacist.dispense(
+        prescription_id=rx_id, item_id=advisory["id"], project_root=git_repo,
+    )
+    assert res["status"] == "failed"
+    assert "semgrep" in res["dose"]["error"]
+    assert (Path(git_repo) / "src" / "A.java").read_text(encoding="utf-8") == _JAVA_SOURCE
+
+
+async def test_java_autofix_rejects_rule_without_fix(git_repo, monkeypatch):
+    """规则在清创适应证里但包里没有 fix：明说没有机械修法，不空跑。"""
+    _seed_java_repo(git_repo)
+    rx_id, advisory = await _java_prescription(git_repo, JavaLineAdapter, monkeypatch)
+    monkeypatch.setattr("code_hospital.catalog.packs.semgrep_available", lambda: True)
+
+    res = await pharmacist.dispense(
+        prescription_id=rx_id, item_id=advisory["id"], project_root=git_repo,
+    )
+    assert res["status"] == "failed"
+    assert "没有机械修法" in res["dose"]["error"]
+    assert (Path(git_repo) / "src" / "A.java").read_text(encoding="utf-8") == _JAVA_SOURCE
+
+
+def test_autofix_engine_dispatch_by_extension():
+    assert pharmacist._autofix_engine({"scope_paths": ["src/A.java"]}) == "semgrep"
+    assert pharmacist._autofix_engine({"scope_paths": ["src/a.py"]}) == "ruff"
+    assert pharmacist._autofix_engine({"scope_paths": ["src/a.ts"]}) == "eslint"
+    assert pharmacist._autofix_engine({"scope_paths": [], "target_file": "a.jsx"}) == "eslint"
+
+
+def test_fixable_rules_reads_pack():
+    from code_hospital.catalog.packs import fixable_rules
+
+    rules = fixable_rules("java-pack")
+    assert {"java.boxing-constructor", "java.literal-equals-first"} <= rules
+    # 没有 fix 的规则不在其列
+    assert "java.null-deref" not in rules
+    assert fixable_rules("no-such-pack") == set()

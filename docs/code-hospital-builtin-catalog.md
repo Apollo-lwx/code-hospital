@@ -242,7 +242,7 @@ graph TD
 | general | 全科 | 清创、补罩、封存、进货、对照、续治 | 分流表落全科，或其他仪器的 critical 改到全科时接诊 |
 | security | 安全科 | 封存、补罩、续治、对照 | 接 gitleaks、安全尺、污点尺。待验证和已排除不入方。已确认的密钥开封存；函数内污点走通了才开续治 |
 | python | Python 语言科 | 清创、补罩、拆分、正骨、去重、对照、续治 | 接 ruff 与类型尺。能成药的规则开清创，其余非 critical 的 ruff 与类型尺发现开续治 |
-| java | Java 语言科 | 补罩、拆分、正骨、去重、对照、续治 | 接 `java-pack`。`.java` 上的结构尺仍由结构科按分流表接诊。第一期没有 Java 成药执行器。对得上的规则开补罩，其余非 critical 开续治 |
+| java | Java 语言科 | 补罩、拆分、正骨、去重、对照、续治 | 接 `java-pack`。`.java` 上的结构尺仍由结构科按分流表接诊。Java 成药执行器已落地（2026-11-24）：`semgrep --autofix` 只应用带 `fix` 的随包规则（清创适应证 `java.boxing-constructor` / `java.literal-equals-first`，规范类默认告知级），执行后按 `scope_lines` 裁剪，与 eslint 同一口径。对得上的规则开补罩，其余非 critical 开续治 |
 | structure | 结构科 | 拆分、去重、对照 | 接结构尺。一次只动一个符号或一个文件 |
 | architecture | 架构科 | 归位、拆分、进货、对照 | 只在仓库已声明契约时接诊。没有契约是终态限制 |
 | design | 设计科 | 正骨、去重、拆分、对照 | 这里指软件设计。第一期没有仪器，不出现在诊断书上。点名时写终态限制，药柜留给以后的规则包。动公开 API 的正骨仍按药上的 `risk_overrides` 升为高危 |

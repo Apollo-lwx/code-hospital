@@ -102,6 +102,10 @@ DEFAULT_DISPOSITIONS: tuple[Disposition, ...] = (
     # 重复代码（jscpd 去重，2026-11-23 拍板收入）：重复不是缺陷，
     # 合并重构同样没有机械判据；刻意重复（测试夹具/协议对齐）由仓库配置放宽。
     Disposition("clone.duplicate", cls="convention"),
+    # Java 成药两条（2026-11-24 随 semgrep --autofix 执行器收入）：弃用构造器改写、
+    # 字面量置前都是风格/兼容性规范，不造成功能错误——默认告知，点名才施治。
+    Disposition("java.boxing-constructor", cls="convention"),
+    Disposition("java.literal-equals-first", cls="convention"),
 )
 
 

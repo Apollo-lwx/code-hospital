@@ -114,7 +114,7 @@
   engine: semgrep
   binary: semgrep
   builtin: false
-  can_autofix: false
+  can_autofix: true              # 成药执行器：semgrep --autofix，只应用带 fix 的规则
   specialty_id: java
   requires_contract: false
   limitation: semgrep 未到岗，java-pack 未拍
